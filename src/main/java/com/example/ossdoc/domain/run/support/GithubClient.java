@@ -73,10 +73,10 @@ public class GithubClient {
     }
 
     // 특정 ref 상태의 저장소를 ZIP으로 다운로드
-    public Path downloadZip(String owner, String repo, String ref, Path targetZip) {
+    public Path downloadZip(String owner, String repo, String commitSha, Path targetZip) {
         try {
             byte[] bytes = webClient.get()
-                    .uri("https://codeload.github.com/{owner}/{repo}/zip/{ref}", owner, repo, ref)
+                    .uri("https://codeload.github.com/{owner}/{repo}/zip/{commitSha}", owner, repo, commitSha)
                     .retrieve()
                     .bodyToMono(byte[].class)
                     .block();

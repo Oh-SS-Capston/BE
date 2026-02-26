@@ -49,7 +49,7 @@ public class RepoRunService {
 
         // 5) zip 다운로드 → unzip
         Path zipPath = wsRoot.resolve("repo.zip");
-        githubClient.downloadZip(parsed.getOwner(), parsed.getRepo(), ref, zipPath);
+        githubClient.downloadZip(parsed.getOwner(), parsed.getRepo(), commitSha, zipPath);
 
         // GitHub zip은 보통 최상위 폴더가 "{repo}-{sha}" 형태로 한 번 감싸져 있음
         Path unzipRoot = wsRoot.resolve("repo");
