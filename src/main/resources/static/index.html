@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="ko">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ossdoc run tester</title>
+    <style>
+        :root { color-scheme: light dark; }
+        body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; margin: 24px; line-height: 1.45; }
+        .wrap { max-width: 900px; margin: 0 auto; }
+        h1 { font-size: 22px; margin: 0 0 14px; }
+        .card { border: 1px solid rgba(127,127,127,.35); border-radius: 12px; padding: 16px; }
+        label { display: block; font-size: 13px; opacity: .85; margin: 10px 0 6px; }
+        input { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(127,127,127,.35); background: transparent; }
+        .row { display: grid; grid-template-columns: 1fr 260px; gap: 12px; }
+        .actions { display: flex; gap: 10px; align-items: center; margin-top: 14px; }
+        button { padding: 10px 14px; border: 1px solid rgba(127,127,127,.35); border-radius: 10px; background: rgba(127,127,127,.12); cursor: pointer; }
+        button:disabled { opacity: .6; cursor: not-allowed; }
+        .hint { font-size: 12px; opacity: .75; margin-top: 10px; }
+        pre { margin: 12px 0 0; padding: 12px; border-radius: 12px; border: 1px solid rgba(127,127,127,.35); overflow: auto; }
+        .ok { color: #2e7d32; }
+        .bad { color: #c62828; }
+        .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    </style>
+</head>
+<body>
+<div class="wrap">
+    <h1>ossdoc — RepoRun 테스트</h1>
+
+    <div class="card">
+        <div class="row">
+            <div>
+                <label for="repoUrl">Repo URL (필수)</label>
+                <input id="repoUrl" placeholder="https://github.com/ronmamo/reflections.git"
+                       value="https://github.com/ronmamo/reflections.git" />
+            </div>
+            <div>
+                <label for="ref">ref (선택: branch/tag/sha)</label>
+                <input id="ref" placeholder="master" />
+            </div>
+        </div>
+
+        <div class="actions">
+            <button id="runBtn">POST /api/v1/runs</button>
+            <button id="clearBtn" type="button">결과 지우기</button>
+            <span id="status" class="mono"></span>
+        </div>
+
+        <div class="hint">
+            • 앱 실행 후 <span class="mono">http://localhost:8080/</span> 로 접속해서 버튼을 누르면 됩니다.<br/>
+            • 이 페이지는 같은 서버(origin)에서 호출하므로 CORS 설정 없이 동작합니다.
+        </div>
+
+        <label>요청/응답</label>
+        <pre id="out" class="mono">Ready.</pre>
+    </div>
+</div>
+
+<script>
+    const $ = (id) => document.getElementById(id);
+
+    function pretty(obj) {
+      try { return JSON.stringify(obj, null, 2); } catch { return String(obj); }
+    }
+
+    function setStatus(text, kind) {
+      const el = $('status');
+      el.textContent = text || '';
+      el.className = 'mono ' + (kind === 'ok' ? 'ok' : kind === 'bad' ? 'bad' : '');
+    }
+
+    function appendBlock(title, content) {
+      const out = $('out');
+      const now = new Date().toISOString();
+      const block = `\n\n=== ${title} @ ${now} ===\n${content}`;
+      out.textContent = (out.textContent === 'Ready.' ? '' : out.textContent) + block;
+      out.scrollTop = out.scrollHeight;
+    }
+
+    async function run() {
+      const repoUrl = $('repoUrl').value.trim();
+      const ref = $('ref').value.trim();
+
+      if (!repoUrl) {
+        setStatus('repoUrl이 비어있어요', 'bad');
+        return;
+      }
+
+      const payload = { repoUrl };
+      if (ref) payload.ref = ref;
+
+      $('runBtn').disabled = true;
+      setStatus('요청 중…', '');
+      appendBlock('REQUEST', `POST /api/v1/runs\nContent-Type: application/json\n\n${pretty(payload)}`);
+
+      try {
+        const res = await fetch('/api/v1/runs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        const contentType = res.headers.get('content-type') || '';
+        const isJson = contentType.includes('application/json');
+        const body = isJson ? await res.json() : await res.text();
+
+        if (!res.ok) {
+          setStatus(`실패 (HTTP ${res.status})`, 'bad');
+          appendBlock('RESPONSE (ERROR)', `${res.status} ${res.statusText}\n\n${isJson ? pretty(body) : body}`);
+          return;
+        }
+
+        setStatus(`성공 (HTTP ${res.status})`, 'ok');
+        appendBlock('RESPONSE (OK)', `${res.status} ${res.statusText}\n\n${isJson ? pretty(body) : body}`);
+
+        if (isJson && body && (body.workspaceRoot || body.jobManifestPath)) {
+          const tips = [];
+          if (body.runId) tips.push(`runId: ${body.runId}`);
+          if (body.commitSha) tips.push(`commitSha: ${body.commitSha}`);
+          if (body.workspaceRoot) tips.push(`workspaceRoot: ${body.workspaceRoot}`);
+          if (body.jobManifestPath) tips.push(`jobManifestPath: ${body.jobManifestPath}`);
+          appendBlock('HINT', tips.join('\n'));
+        }
+
+      } catch (e) {
+        setStatus('요청 중 예외 발생', 'bad');
+        appendBlock('EXCEPTION', String(e && e.stack ? e.stack : e));
+      } finally {
+        $('runBtn').disabled = false;
+      }
+    }
+
+    $('runBtn').addEventListener('click', run);
+    $('clearBtn').addEventListener('click', () => {
+      $('out').textContent = 'Ready.';
+      setStatus('', '');
+    });
+</script>
+</body>
+</html>

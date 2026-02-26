@@ -61,6 +61,8 @@ dependencies {
 
     //Flyway
     implementation 'org.flywaydb:flyway-core'
+
+    implementation 'org.springframework:spring-webflux'
 }
 
 tasks.named('test') {
