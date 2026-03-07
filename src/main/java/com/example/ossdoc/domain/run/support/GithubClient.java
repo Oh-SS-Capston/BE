@@ -1,10 +1,13 @@
 package com.example.ossdoc.domain.run.support;
 
-import com.example.ossdoc.domain.run.exception.RunErrorCode;
+import com.example.ossdoc.domain.build.exception.BuildException;
+import com.example.ossdoc.domain.build.exception.code.BuildErrorCode;
+import com.example.ossdoc.domain.run.exception.code.RunErrorCode;
 import com.example.ossdoc.domain.run.exception.RunException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -12,6 +15,7 @@ import org.springframework.web.reactive.function.client.WebClient;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
+@Slf4j
 @Component
 @RequiredArgsConstructor
 public class GithubClient {
@@ -44,7 +48,8 @@ public class GithubClient {
             }
             return branch.asText();
         } catch (Exception e) {
-            throw new RunException(RunErrorCode.GITHUB_API_FAILED, e);
+            log.debug("git fail error={}", e.getMessage());
+            throw new RunException(RunErrorCode.GITHUB_API_FAILED);
         }
     }
 
@@ -68,7 +73,8 @@ public class GithubClient {
             }
             return sha.asText();
         } catch (Exception e) {
-            throw new RunException(RunErrorCode.GITHUB_API_FAILED, e);
+            log.debug("git fail error={}", e.getMessage());
+            throw new RunException(RunErrorCode.GITHUB_API_FAILED);
         }
     }
 
@@ -89,7 +95,8 @@ public class GithubClient {
             Files.write(targetZip, bytes);
             return targetZip;
         } catch (Exception e) {
-            throw new RunException(RunErrorCode.DOWNLOAD_FAILED, e);
+            log.debug("download fail error={}", e.getMessage());
+            throw new RunException(RunErrorCode.DOWNLOAD_FAILED);
         }
     }
 }
