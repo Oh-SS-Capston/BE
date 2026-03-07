@@ -1,5 +1,6 @@
 package com.example.ossdoc.domain.artifact.entity;
 
+import com.example.ossdoc.domain.artifact.enums.ArtifactKind;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.global.apiPayload.code.BaseCreatedEntity;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -28,8 +29,9 @@ public class Artifact extends BaseCreatedEntity {
     @JoinColumn(name = "run_id", nullable = false)
     private RepoRun run;
 
-    @Column(name = "kind", nullable = false)
-    private String kind;
+    @Enumerated(EnumType.STRING)
+    @Column(name = "kind", nullable = false, length = 50)
+    private ArtifactKind kind;
 
     @Column(name = "schema_version")
     private String schemaVersion;

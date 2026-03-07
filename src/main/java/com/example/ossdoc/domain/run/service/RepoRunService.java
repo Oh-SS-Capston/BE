@@ -1,6 +1,7 @@
 // domain/run/service/RepoRunService.java
 package com.example.ossdoc.domain.run.service;
 
+import com.example.ossdoc.domain.artifact.enums.ArtifactKind;
 import com.example.ossdoc.domain.artifact.service.ArtifactService;
 import com.example.ossdoc.domain.run.dto.RepoRunCreateRequest;
 import com.example.ossdoc.domain.run.dto.RepoRunCreateResponse;
@@ -82,7 +83,7 @@ public class RepoRunService {
         meta.put("commitSha", commitSha);
         meta.put("generatedAt", OffsetDateTime.now().toString());
 
-        artifactService.saveJobManifest(run, manifestPath.toString(), meta);
+        artifactService.saveJsonArtifact(run, ArtifactKind.JOB_MANIFEST, "0.1", manifestPath.toString(), meta);
 
         return RepoRunCreateResponse.builder()
                 .runId(runId)
