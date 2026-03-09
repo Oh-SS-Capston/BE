@@ -2,6 +2,7 @@
 package com.example.ossdoc.domain.artifact.service;
 
 import com.example.ossdoc.domain.artifact.entity.Artifact;
+import com.example.ossdoc.domain.artifact.enums.ArtifactKind;
 import com.example.ossdoc.domain.artifact.repository.ArtifactRepository;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -16,12 +17,12 @@ public class ArtifactService {
     private final ArtifactRepository artifactRepository;
 
     @Transactional
-    public Artifact saveJobManifest(RepoRun run, String path, JsonNode meta) {
+    public Artifact saveJsonArtifact(RepoRun run, ArtifactKind kind, String schemaVersion, String path, JsonNode meta) {
         Artifact artifact = new Artifact(
                 null,
                 run,
-                "JOB_MANIFEST",
-                "0.1",
+                kind,
+                schemaVersion,        // 예: "0.1"
                 "application/json",
                 path,
                 meta

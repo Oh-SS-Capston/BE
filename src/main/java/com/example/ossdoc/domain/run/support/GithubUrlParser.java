@@ -1,7 +1,7 @@
 // domain/run/support/GithubUrlParser.java
 package com.example.ossdoc.domain.run.support;
 
-import com.example.ossdoc.domain.run.exception.RunErrorCode;
+import com.example.ossdoc.domain.run.exception.code.RunErrorCode;
 import com.example.ossdoc.domain.run.exception.RunException;
 
 import java.util.regex.Matcher;

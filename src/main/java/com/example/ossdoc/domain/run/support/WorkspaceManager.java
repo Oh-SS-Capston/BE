@@ -1,17 +1,19 @@
 // domain/run/support/WorkspaceManager.java
 package com.example.ossdoc.domain.run.support;
 
-import com.example.ossdoc.domain.run.exception.RunErrorCode;
+import com.example.ossdoc.domain.run.exception.code.RunErrorCode;
 import com.example.ossdoc.domain.run.exception.RunException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.OffsetDateTime;
 
+@Slf4j
 @Component
 @RequiredArgsConstructor
 public class WorkspaceManager {
@@ -76,7 +78,8 @@ public class WorkspaceManager {
             Files.writeString(manifestPath, objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(root));
             return manifestPath;
         } catch (Exception e) {
-            throw new RunException(RunErrorCode.MANIFEST_WRITE_FAILED, e);
+            log.debug("manifest write fail error={}", e.getMessage());
+            throw new RunException(RunErrorCode.MANIFEST_WRITE_FAILED);
         }
     }
 }
