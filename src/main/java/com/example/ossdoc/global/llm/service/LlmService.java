@@ -6,6 +6,8 @@ import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.example.ossdoc.global.config.LlmConfig;
 import com.example.ossdoc.global.llm.dto.json.LlmResult;
+import com.example.ossdoc.global.llm.exception.LlmException;
+import com.example.ossdoc.global.llm.exception.code.LlmErrorCode;
 import com.example.ossdoc.global.llm.dto.request.LlmRequest;
 import com.example.ossdoc.global.llm.dto.response.LlmResponse;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -112,8 +114,7 @@ public class LlmService {
         log.info("[LlmService] Starting refinement. runId={}", request.getRunId());
 
         RepoRun run = repoRunRepository.findById(request.getRunId())
-                .orElseThrow(() -> new IllegalArgumentException(
-                        "RepoRun not found: " + request.getRunId()));
+                .orElseThrow(() -> new LlmException(LlmErrorCode.RUN_NOT_FOUND));
 
         String baseContext = buildContext(request);
 
@@ -192,7 +193,7 @@ public class LlmService {
 
             return objectMapper.writeValueAsString(root);
         } catch (JsonProcessingException e) {
-            throw new RuntimeException("Failed to build Claude request body", e);
+            throw new LlmException(LlmErrorCode.REQUEST_SERIALIZE_FAILED);
         }
     }
 
@@ -203,7 +204,8 @@ public class LlmService {
 
             if (root.has("error")) {
                 String msg = root.path("error").path("message").asText("unknown");
-                throw new RuntimeException("Claude API error: " + msg);
+                log.error("[LlmService] Claude API error: {}", msg);
+                throw new LlmException(LlmErrorCode.CLAUDE_API_ERROR);
             }
 
             String text = "";
@@ -217,7 +219,7 @@ public class LlmService {
             return objectMapper.readTree(stripFence(text.trim()));
         } catch (JsonProcessingException e) {
             log.error("[LlmService] Failed to parse Claude response: {}", raw);
-            throw new RuntimeException("LLM response is not valid JSON", e);
+            throw new LlmException(LlmErrorCode.RESPONSE_PARSE_FAILED);
         }
     }
 
