@@ -1,6 +1,7 @@
 package com.example.ossdoc.domain.run.entity;
 
 import com.example.ossdoc.domain.run.enums.RunStatus;
+import com.example.ossdoc.domain.user.entity.User;
 import com.example.ossdoc.global.apiPayload.code.BaseAuditedEntity;
 import com.example.ossdoc.global.apiPayload.code.BaseCreatedEntity;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -22,6 +23,10 @@ public class RepoRun extends BaseAuditedEntity {
     @Id
     @Column(name = "run_id", nullable = false)
     private String runId;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "owner_id")
+    private User owner;
 
     @Column(name = "repo_url", nullable = false)
     private String repoUrl;
@@ -48,4 +53,8 @@ public class RepoRun extends BaseAuditedEntity {
 
     @Column(name = "workspace_root")
     private String workspaceRoot;
+
+    public void assignOwner(User owner) {
+        this.owner = owner;
+    }
 }
