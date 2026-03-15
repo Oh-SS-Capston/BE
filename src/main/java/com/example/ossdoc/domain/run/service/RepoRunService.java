@@ -3,12 +3,16 @@ package com.example.ossdoc.domain.run.service;
 
 import com.example.ossdoc.domain.artifact.enums.ArtifactKind;
 import com.example.ossdoc.domain.artifact.service.ArtifactService;
+import com.example.ossdoc.domain.auth.exception.AuthException;
+import com.example.ossdoc.domain.auth.exception.code.AuthErrorCode;
 import com.example.ossdoc.domain.run.dto.RepoRunCreateRequest;
 import com.example.ossdoc.domain.run.dto.RepoRunCreateResponse;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.enums.RunStatus;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.example.ossdoc.domain.run.support.*;
+import com.example.ossdoc.domain.user.entity.User;
+import com.example.ossdoc.domain.user.repository.UserRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.RequiredArgsConstructor;
@@ -24,6 +28,7 @@ import java.util.UUID;
 public class RepoRunService {
 
     private final RepoRunRepository repoRunRepository;
+    private final UserRepository userRepository;
     private final ArtifactService artifactService;
 
     private final GithubClient githubClient;
@@ -31,7 +36,11 @@ public class RepoRunService {
     private final ObjectMapper objectMapper;
 
     @Transactional
-    public RepoRunCreateResponse createRun(RepoRunCreateRequest req) {
+    public RepoRunCreateResponse createRun(RepoRunCreateRequest req, Long userId) {
+        User owner= userRepository.findById(userId)
+                .orElseThrow(() -> new AuthException(AuthErrorCode.USER_NOT_FOUND));
+
+
         // 1) URL 파싱
         GithubRepoRef parsed = GithubUrlParser.parse(req.getRepoUrl(), req.getRef());
 
@@ -66,6 +75,7 @@ public class RepoRunService {
         // 7) DB 저장 (RepoRun)
         RepoRun run = new RepoRun(
                 runId,
+                owner,
                 req.getRepoUrl(),
                 commitSha,
                 RunStatus.QUEUED,
