@@ -29,4 +29,15 @@ public class ArtifactService {
         );
         return artifactRepository.save(artifact);
     }
+
+    @Transactional(readOnly = true)
+    public Artifact getLatestArtifact(String runId, ArtifactKind kind) {
+        return artifactRepository.findTopByRun_RunIdAndKindOrderByArtifactIdDesc(runId, kind)
+                .orElse(null);
+    }
+
+    @Transactional(readOnly = true)
+    public Artifact getArtifact(Long artifactId) {
+        return artifactRepository.findById(artifactId).orElse(null);
+    }
 }
