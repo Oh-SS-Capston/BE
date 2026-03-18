@@ -1,4 +1,3 @@
-// domain/run/service/RepoRunService.java
 package com.example.ossdoc.domain.run.service;
 
 import com.example.ossdoc.domain.artifact.enums.ArtifactKind;
@@ -37,9 +36,8 @@ public class RepoRunService {
 
     @Transactional
     public RepoRunCreateResponse createRun(RepoRunCreateRequest req, Long userId) {
-        User owner= userRepository.findById(userId)
+        User owner = userRepository.findById(userId)
                 .orElseThrow(() -> new AuthException(AuthErrorCode.USER_NOT_FOUND));
-
 
         // 1) URL 파싱
         GithubRepoRef parsed = GithubUrlParser.parse(req.getRepoUrl(), req.getRef());
@@ -54,25 +52,18 @@ public class RepoRunService {
         String commitSha = githubClient.resolveCommitSha(parsed.getOwner(), parsed.getRepo(), ref);
 
         // 4) runId / workspace 경로
-        String runId = "run_" + OffsetDateTime.now().toLocalDate().toString().replace("-", "") + "_" + UUID.randomUUID().toString().substring(0, 8);
+        String runId = "run_" + OffsetDateTime.now().toLocalDate().toString().replace("-", "")
+                + "_" + UUID.randomUUID().toString().substring(0, 8);
         Path wsRoot = workspaceManager.workspaceRoot(runId);
 
         // 5) zip 다운로드 → unzip
         Path zipPath = wsRoot.resolve("repo.zip");
         githubClient.downloadZip(parsed.getOwner(), parsed.getRepo(), commitSha, zipPath);
 
-        // GitHub zip은 보통 최상위 폴더가 "{repo}-{sha}" 형태로 한 번 감싸져 있음
         Path unzipRoot = wsRoot.resolve("repo");
         ZipUtils.unzip(zipPath, unzipRoot);
 
-        // 6) job_manifest.json 생성
-        Path manifestPath = workspaceManager.writeJobManifest(
-                wsRoot, runId, req.getRepoUrl(),
-                parsed.getOwner(), parsed.getRepo(),
-                ref, commitSha, unzipRoot
-        );
-
-        // 7) DB 저장 (RepoRun)
+        // 6) DB 저장 (RepoRun)
         RepoRun run = new RepoRun(
                 runId,
                 owner,
@@ -87,20 +78,20 @@ public class RepoRunService {
         );
         repoRunRepository.save(run);
 
-        // 8) DB 저장 (Artifact - job_manifest)
+        // 7) job_manifest Artifact → S3 + DB 저장 (로컬 파일 없이 meta 직접 구성)
         ObjectNode meta = objectMapper.createObjectNode();
         meta.put("ref", ref);
         meta.put("commitSha", commitSha);
         meta.put("generatedAt", OffsetDateTime.now().toString());
 
-        artifactService.saveJsonArtifact(run, ArtifactKind.JOB_MANIFEST, "0.1", manifestPath.toString(), meta);
+        artifactService.saveJsonArtifact(run, ArtifactKind.JOB_MANIFEST, "0.1",
+                "job_manifest.json", meta);
 
         return RepoRunCreateResponse.builder()
                 .runId(runId)
                 .status(run.getStatus())
                 .commitSha(commitSha)
                 .workspaceRoot(wsRoot.toString())
-                .jobManifestPath(manifestPath.toString())
                 .build();
     }
 }

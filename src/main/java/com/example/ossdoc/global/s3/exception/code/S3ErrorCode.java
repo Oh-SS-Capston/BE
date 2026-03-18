@@ -1,4 +1,4 @@
-package com.example.ossdoc.domain.run.exception.code;
+package com.example.ossdoc.global.s3.exception.code;
 
 import com.example.ossdoc.global.apiPayload.code.BaseCode;
 import com.example.ossdoc.global.apiPayload.code.ReasonDTO;
@@ -8,11 +8,23 @@ import org.springframework.http.HttpStatus;
 
 @Getter
 @RequiredArgsConstructor
-public enum RunErrorCode implements BaseCode {
-    INVALID_REPO_URL(HttpStatus.BAD_REQUEST, "RUN_400_001", "Invalid GitHub repo URL."),
-    GITHUB_API_FAILED(HttpStatus.BAD_GATEWAY, "RUN_502_001", "Failed to resolve repo info from GitHub."),
-    DOWNLOAD_FAILED(HttpStatus.BAD_GATEWAY, "RUN_502_002", "Failed to download repository zip."),
-    UNZIP_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "RUN_500_001", "Failed to unzip repository.");
+public enum S3ErrorCode implements BaseCode {
+
+    // 업로드 실패
+    UPLOAD_FAILED(HttpStatus.INTERNAL_SERVER_ERROR,
+            "S3_500_001", "S3 파일 업로드에 실패했습니다."),
+
+    // 삭제 실패
+    DELETE_FAILED(HttpStatus.INTERNAL_SERVER_ERROR,
+            "S3_500_002", "S3 파일 삭제에 실패했습니다."),
+
+    // JSON 직렬화 실패 (업로드 전처리 단계)
+    JSON_SERIALIZE_FAILED(HttpStatus.INTERNAL_SERVER_ERROR,
+            "S3_500_003", "Artifact JSON 직렬화에 실패했습니다."),
+
+    // 잘못된 S3 키/URL
+    INVALID_S3_KEY(HttpStatus.BAD_REQUEST,
+            "S3_400_001", "유효하지 않은 S3 경로입니다.");
 
     private final HttpStatus httpStatus;
     private final String code;

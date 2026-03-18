@@ -97,7 +97,8 @@ public class BuildResolveService {
                                 .anyMatch(m -> m.getClassesDirs() != null && !m.getClassesDirs().isEmpty()));
 
         // Artifact 등록(너희 artifact 도메인에 이미 있으니 재사용)
-        artifactService.saveJsonArtifact(run, ArtifactKind.BUILD_MANIFEST,"0.1", buildManifestPath.toString(), meta);
+        artifactService.saveJsonArtifact(run, ArtifactKind.BUILD_MANIFEST, "0.1",
+                "build_manifest.json", meta);
 
         return new BuildResolveResponse(runId, manifest.getBuildMode(), buildManifestPath.toString());
     }

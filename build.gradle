@@ -72,6 +72,11 @@ dependencies {
     implementation 'org.flywaydb:flyway-core'
 
     implementation 'org.springframework:spring-webflux'
+
+    // AWS SDK v2 (S3)
+    implementation platform('software.amazon.awssdk:bom:2.25.60')
+    implementation 'software.amazon.awssdk:s3'
+    implementation 'software.amazon.awssdk:auth'
 }
 
 tasks.named('test') {
