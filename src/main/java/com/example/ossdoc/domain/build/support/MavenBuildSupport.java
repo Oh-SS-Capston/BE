@@ -11,6 +11,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 @Slf4j
 @Component
@@ -19,38 +20,50 @@ public class MavenBuildSupport {
 
     private final ProcessRunner processRunner;
     private final BuildCommandProperties buildCommandProperties;
+    private final BuildPathNormalizer buildPathNormalizer;
 
     /**
      * Maven 컴파일 실행
      * - 테스트는 스킵하고 compile까지만 가볍게 수행
      */
-    public ProcessRunner.Result compile(Path repoRoot) {
+    public ProcessRunner.Result compile(Path repoRoot, Path mavenLocalRepoPath) {
+        return compile(repoRoot, mavenLocalRepoPath, null);
+    }
+
+    public ProcessRunner.Result compile(Path repoRoot, Path mavenLocalRepoPath, Map<String, String> environmentOverrides) {
         log.info("mvn path={}", repoRoot);
-        List<String> cmd = List.of(
-                selectMavenCmd(repoRoot),
-                "-q",
-                "-DskipTests",
-                "test-compile"
-        );
+        List<String> cmd = new ArrayList<>();
+        cmd.add(selectMavenCmd(repoRoot));
+        cmd.add("-q");
+        cmd.add("-DskipTests");
+        appendMavenLocalRepoOption(cmd, mavenLocalRepoPath);
+        cmd.add("test-compile");
 
         log.info("[BUILD] Maven compile start. repoRoot={}", repoRoot);
-        return processRunner.run(repoRoot, cmd, Duration.ofMinutes(20));
+        return processRunner.run(repoRoot, cmd, Duration.ofMinutes(20), environmentOverrides);
     }
 
     /**
      * dependency:build-classpath 로 classpath 파일 생성
      */
-    public ProcessRunner.Result buildClasspath(Path repoRoot, Path outputFile) {
-        List<String> cmd = List.of(
-                selectMavenCmd(repoRoot),
-                "-q",
-                "-DskipTests",
-                "dependency:build-classpath",
-                "-Dmdep.outputFile=" + outputFile.toString()
-        );
+    public ProcessRunner.Result buildClasspath(Path repoRoot, Path outputFile, Path mavenLocalRepoPath) {
+        return buildClasspath(repoRoot, outputFile, mavenLocalRepoPath, null);
+    }
+
+    public ProcessRunner.Result buildClasspath(Path repoRoot,
+                                               Path outputFile,
+                                               Path mavenLocalRepoPath,
+                                               Map<String, String> environmentOverrides) {
+        List<String> cmd = new ArrayList<>();
+        cmd.add(selectMavenCmd(repoRoot));
+        cmd.add("-q");
+        cmd.add("-DskipTests");
+        appendMavenLocalRepoOption(cmd, mavenLocalRepoPath);
+        cmd.add("dependency:build-classpath");
+        cmd.add("-Dmdep.outputFile=" + outputFile.toString());
 
         log.info("[BUILD] Maven classpath build start. repoRoot={}, output={}", repoRoot, outputFile);
-        return processRunner.run(repoRoot, cmd, Duration.ofMinutes(10));
+        return processRunner.run(repoRoot, cmd, Duration.ofMinutes(10), environmentOverrides);
     }
 
     /**
@@ -80,14 +93,14 @@ public class MavenBuildSupport {
                 .testRoots(testRoots)
                 .resourceRoots(resourceRoots)
                 .classesDirs(classesDirs)
-                .compileClasspath(classpath)
-                .runtimeClasspath(classpath)
+                .compileClasspath(buildPathNormalizer.toAbsolutePaths(repoRoot, classpath))
+                .runtimeClasspath(buildPathNormalizer.toAbsolutePaths(repoRoot, classpath))
                 .status(classesDirs.isEmpty() ? "PARTIAL" : "OK")
                 .failReason(null)
                 .build();
     }
 
-    public List<String> readClasspathFile(Path outputFile) {
+    public List<String> readClasspathFile(Path repoRoot, Path outputFile) {
         try {
             if (!Files.exists(outputFile)) {
                 return List.of();
@@ -102,7 +115,10 @@ public class MavenBuildSupport {
             List<String> result = new ArrayList<>();
             for (String entry : entries) {
                 if (!entry.isBlank()) {
-                    result.add(entry.trim());
+                    String normalized = buildPathNormalizer.toAbsolutePath(repoRoot, entry);
+                    if (normalized != null) {
+                        result.add(normalized);
+                    }
                 }
             }
             return result;
@@ -114,7 +130,7 @@ public class MavenBuildSupport {
 
     private void addIfExists(List<String> target, Path path) {
         if (Files.exists(path) && Files.isDirectory(path)) {
-            target.add(path.toString());
+            target.add(buildPathNormalizer.normalize(path));
         }
     }
 
@@ -129,6 +145,13 @@ public class MavenBuildSupport {
         if (Files.exists(repoRoot.resolve("mvnw.cmd"))) return "mvnw.cmd";
         if (Files.exists(repoRoot.resolve("mvnw"))) return "./mvnw";
         return buildCommandProperties.getMavenCommand();
+    }
+
+    private void appendMavenLocalRepoOption(List<String> command, Path mavenLocalRepoPath) {
+        if (mavenLocalRepoPath == null) {
+            return;
+        }
+        command.add("-Dmaven.repo.local=" + buildPathNormalizer.normalize(mavenLocalRepoPath));
     }
 
 }

@@ -34,10 +34,10 @@ public class GradleInitScriptWriter {
                       if (hasJava && prj.hasProperty("sourceSets")) {
                         def main = prj.sourceSets.main
                         def test = prj.sourceSets.test
-                        result.sourceRoots = main.java.srcDirs.collect { prj.rootProject.relativePath(it) }
-                        result.testRoots = test.java.srcDirs.collect { prj.rootProject.relativePath(it) }
-                        result.resourceRoots = main.resources.srcDirs.collect { prj.rootProject.relativePath(it) }
-                        result.classesDirs = main.output.classesDirs.files.collect { prj.rootProject.relativePath(it) }
+                        result.sourceRoots = main.java.srcDirs.collect { it.absolutePath }
+                        result.testRoots = test.java.srcDirs.collect { it.absolutePath }
+                        result.resourceRoots = main.resources.srcDirs.collect { it.absolutePath }
+                        result.classesDirs = main.output.classesDirs.files.collect { it.absolutePath }
 
                         try { result.compileClasspath = main.compileClasspath.files.collect { it.absolutePath } } catch (ignored) { result.compileClasspath = [] }
                         try { result.runtimeClasspath = main.runtimeClasspath.files.collect { it.absolutePath } } catch (ignored) { result.runtimeClasspath = [] }

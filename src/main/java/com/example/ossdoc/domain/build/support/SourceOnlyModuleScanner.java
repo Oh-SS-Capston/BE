@@ -1,6 +1,7 @@
 package com.example.ossdoc.domain.build.support;
 
 import com.example.ossdoc.domain.build.dto.json.BuildModuleManifest;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -11,7 +12,10 @@ import java.util.List;
 
 @Slf4j
 @Component
+@RequiredArgsConstructor
 public class SourceOnlyModuleScanner {
+
+    private final BuildPathNormalizer buildPathNormalizer;
 
     /**
      * SOURCE_ONLY 폴백용 스캐너
@@ -82,7 +86,7 @@ public class SourceOnlyModuleScanner {
     private void addIfExists(List<String> target, Path moduleRoot, String relativePath) {
         Path candidate = moduleRoot.resolve(relativePath);
         if (Files.exists(candidate) && Files.isDirectory(candidate)) {
-            target.add(candidate.toString());
+            target.add(buildPathNormalizer.normalize(candidate));
         }
     }
 
