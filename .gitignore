@@ -49,3 +49,4 @@ src/main/generated/
 workspace/
 
 /AGENTS.md
+.gradle-home/
