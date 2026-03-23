@@ -8,6 +8,7 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.Map;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -15,10 +16,17 @@ import java.util.concurrent.TimeUnit;
 public class ProcessRunner {
 
     public Result run(Path workingDir, List<String> command, Duration timeout) {
+        return run(workingDir, command, timeout, null);
+    }
+
+    public Result run(Path workingDir, List<String> command, Duration timeout, Map<String, String> environmentOverrides) {
         try {
             ProcessBuilder pb = new ProcessBuilder(command);
             pb.directory(workingDir.toFile());
             pb.redirectErrorStream(true);
+            if (environmentOverrides != null && !environmentOverrides.isEmpty()) {
+                pb.environment().putAll(environmentOverrides);
+            }
 
             Process p = pb.start();
 

@@ -5,6 +5,9 @@ import lombok.Setter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
+import java.util.List;
+
 @Getter
 @Setter
 @Component
@@ -12,15 +15,32 @@ import org.springframework.stereotype.Component;
 public class BuildCommandProperties {
 
     /**
-     * mvnw / mvnw.cmd 가 없을 때 사용할 Maven 실행 명령어
-     * 예: mvn
-     * 예: C:\\tools\\apache-maven-3.9.13\\bin\\mvn.cmd
+     * Maven command used when mvnw/mvnw.cmd is not present in the target repository.
      */
     private String mavenCommand = "mvn";
 
     /**
-     * gradlew / gradlew.bat 가 없을 때 사용할 Gradle 실행 명령어
-     * 예: gradle
+     * Gradle command used when gradlew/gradlew.bat is not present in the target repository.
      */
     private String gradleCommand = "gradle";
+
+    /**
+     * Ordered JAVA_HOME candidates for Gradle compatibility fallback retries.
+     */
+    private List<String> javaHomes = new ArrayList<>();
+
+    /**
+     * Enables isolated execution directories per run workspace.
+     */
+    private boolean isolatedExecution = true;
+
+    /**
+     * Relative directory (from workspace root) used as GRADLE_USER_HOME.
+     */
+    private String gradleUserHomeDir = ".gradle-home";
+
+    /**
+     * Relative directory (from workspace root) used as Maven local repository.
+     */
+    private String mavenLocalRepoDir = ".m2/repository";
 }

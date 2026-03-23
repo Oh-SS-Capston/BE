@@ -32,7 +32,7 @@ out/
 /dist/
 /nbdist/
 /.nb-gradle/
-
+s
 ### VS Code ###
 .vscode/
 
@@ -47,3 +47,6 @@ src/main/generated/
 
 #workspace
 workspace/
+
+/AGENTS.md
+.gradle-home/
