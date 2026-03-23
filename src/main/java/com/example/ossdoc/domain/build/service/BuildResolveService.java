@@ -10,27 +10,51 @@ import com.example.ossdoc.domain.build.enums.BuildMode;
 import com.example.ossdoc.domain.build.enums.BuildToolKind;
 import com.example.ossdoc.domain.build.exception.BuildException;
 import com.example.ossdoc.domain.build.exception.code.BuildErrorCode;
-import com.example.ossdoc.domain.build.support.*;
-import com.example.ossdoc.global.config.BuildCommandProperties;
+import com.example.ossdoc.domain.build.support.BuildManifestSelector;
+import com.example.ossdoc.domain.build.support.BuildManifestWriter;
+import com.example.ossdoc.domain.build.support.BuildPathNormalizer;
+import com.example.ossdoc.domain.build.support.BuildToolchainSupport;
+import com.example.ossdoc.domain.build.support.GradleBuildSupport;
+import com.example.ossdoc.domain.build.support.GradleDumpParser;
+import com.example.ossdoc.domain.build.support.GradleInitScriptWriter;
+import com.example.ossdoc.domain.build.support.MavenBuildSupport;
+import com.example.ossdoc.domain.build.support.MavenJavaVersionResolver;
+import com.example.ossdoc.domain.build.support.PomModuleScanner;
+import com.example.ossdoc.domain.build.support.ProcessRunner;
+import com.example.ossdoc.domain.build.support.RepoRootResolver;
+import com.example.ossdoc.domain.build.support.SourceOnlyModuleScanner;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
+import com.example.ossdoc.global.config.BuildCommandProperties;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
-import java.io.File;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.OffsetDateTime;
-import java.util.*;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.function.Function;
 
+/**
+ * 역할:
+ * 빌드 리졸브 전체 흐름을 오케스트레이션한다.
+ *
+ * 책임:
+ * 1) Run/Workspace/Repo 유효성 검증
+ * 2) 빌드 도구 감지 후 Gradle/Maven 실행 분기
+ * 3) 빌드 매니페스트 산출물 저장 및 응답 반환
+ *
+ * 비책임:
+ * 세부 실행 정책(Gradle 재시도, dump 파싱, 결과 점수화)은 support 클래스로 위임한다.
+ */
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -41,8 +65,6 @@ public class BuildResolveService {
     private final RepoRootResolver repoRootResolver;
 
     private final BuildDetector buildDetector;
-    private final ProcessRunner processRunner;
-    private final GradleInitScriptWriter gradleInitScriptWriter;
     private final BuildManifestWriter buildManifestWriter;
     private final SourceOnlyModuleScanner sourceOnlyModuleScanner;
     private final PomModuleScanner pomModuleScanner;
@@ -50,16 +72,30 @@ public class BuildResolveService {
     private final MavenJavaVersionResolver mavenJavaVersionResolver;
     private final BuildPathNormalizer buildPathNormalizer;
     private final BuildCommandProperties buildCommandProperties;
+    private final BuildToolchainSupport buildToolchainSupport;
+    private final BuildManifestSelector buildManifestSelector;
+    private final GradleBuildSupport gradleBuildSupport;
+    private final GradleInitScriptWriter gradleInitScriptWriter;
+    private final GradleDumpParser gradleDumpParser;
 
     private final ObjectMapper objectMapper;
 
+    /**
+     * 역할:
+     * Build Resolve 유스케이스의 단일 진입점.
+     *
+     * 책임:
+     * 1) 경로/도구 상태 검증
+     * 2) Gradle/Maven 단일 혹은 경쟁 실행
+     * 3) build_manifest 생성/저장 후 API 응답 생성
+     */
     public BuildResolveResponse resolve(String runId) {
         RepoRun run = repoRunRepository.findById(runId)
                 .orElseThrow(() -> new BuildException(BuildErrorCode.RUN_NOT_FOUND));
 
         Path workspaceRoot = Path.of(run.getWorkspaceRoot());
         if (!Files.exists(workspaceRoot)) {
-            log.debug("workspeaceRoot={}", workspaceRoot.toString());
+            log.debug("workspeaceRoot={}", workspaceRoot);
             throw new BuildException(BuildErrorCode.WORKSPACE_NOT_FOUND);
         }
 
@@ -67,7 +103,7 @@ public class BuildResolveService {
         Path actualRepoRoot = repoRootResolver.resolveActualRoot(repoRoot);
 
         if (!Files.exists(actualRepoRoot)) {
-            log.debug("actualRepoRoot={}", actualRepoRoot.toString());
+            log.debug("actualRepoRoot={}", actualRepoRoot);
             throw new BuildException(BuildErrorCode.REPO_ROOT_NOT_FOUND);
         }
 
@@ -76,10 +112,10 @@ public class BuildResolveService {
 
         BuildDetector.Detected detected = buildDetector.detect(actualRepoRoot);
 
-        BuildManifest manifest = switch (detected.tool()) {
-            case GRADLE -> resolveGradle(runId, actualRepoRoot, workspaceRoot, detected.wrapperExists(), tmpDir);
-            case MAVEN -> resolveMaven(runId, actualRepoRoot, workspaceRoot, detected.wrapperExists(), tmpDir);
-            case NONE -> BuildManifest.builder()
+        BuildManifest manifest;
+        if (!detected.hasAnyBuildTool()) {
+            // 빌드 도구 자체가 없으면 즉시 FAILED
+            manifest = BuildManifest.builder()
                     .runId(runId)
                     .detectedAt(OffsetDateTime.now())
                     .buildTool(BuildToolKind.NONE)
@@ -90,10 +126,38 @@ public class BuildResolveService {
                             .message(BuildErrorCode.BUILD_TOOL_NOT_FOUND.getMessage())
                             .build()))
                     .build();
-        };
+        } else if (detected.hasGradle() && detected.hasMaven()) {
+            // 혼합 프로젝트(Gradle+Maven)는 둘 다 실행 후 더 좋은 결과를 선택한다.
+            log.info("[BUILD] Both Gradle and Maven detected. Running competitive resolve. repoRoot={}", actualRepoRoot);
+            BuildManifest gradleManifest = resolveGradle(
+                    runId,
+                    actualRepoRoot,
+                    workspaceRoot,
+                    detected.gradleWrapperExists(),
+                    tmpDir.resolve("gradle")
+            );
+            BuildManifest mavenManifest = resolveMaven(
+                    runId,
+                    actualRepoRoot,
+                    workspaceRoot,
+                    detected.mavenWrapperExists(),
+                    tmpDir.resolve("maven")
+            );
+            manifest = buildManifestSelector.selectBetter(gradleManifest, mavenManifest);
+            log.info(
+                    "[BUILD] Competitive resolve selected tool={} mode={} (gradleMode={}, mavenMode={})",
+                    manifest.getBuildTool(),
+                    manifest.getBuildMode(),
+                    gradleManifest.getBuildMode(),
+                    mavenManifest.getBuildMode()
+            );
+        } else if (detected.hasGradle()) {
+            manifest = resolveGradle(runId, actualRepoRoot, workspaceRoot, detected.gradleWrapperExists(), tmpDir.resolve("gradle"));
+        } else {
+            manifest = resolveMaven(runId, actualRepoRoot, workspaceRoot, detected.mavenWrapperExists(), tmpDir.resolve("maven"));
+        }
 
         Path buildManifestPath = buildManifestWriter.write(artifactsDir, manifest);
-
         JsonNode manifestJson = objectMapper.valueToTree(manifest);
 
         artifactService.saveJsonArtifact(run, ArtifactKind.BUILD_MANIFEST, "0.1",
@@ -102,6 +166,15 @@ public class BuildResolveService {
         return new BuildResolveResponse(runId, manifest.getBuildMode(), buildPathNormalizer.normalize(buildManifestPath));
     }
 
+    /**
+     * 역할:
+     * Gradle 기반 빌드/리졸브를 수행한다.
+     *
+     * 책임:
+     * 1) ossdocDump 실행 후 모듈 메타데이터 수집
+     * 2) classes 컴파일 결과를 반영해 BuildMode 결정
+     * 3) 실패 시 SOURCE_ONLY 폴백 정보를 failures에 기록
+     */
     private BuildManifest resolveGradle(String runId, Path repoRoot, Path workspaceRoot, boolean wrapperUsed, Path tmpDir) {
         List<BuildModuleManifest> modules = new ArrayList<>();
         List<BuildFailure> failures = new ArrayList<>();
@@ -109,16 +182,22 @@ public class BuildResolveService {
         Path init = gradleInitScriptWriter.write(tmpDir);
 
         List<String> dumpCmd = List.of(
-                selectGradleCmd(repoRoot),
+                gradleBuildSupport.selectGradleCmd(repoRoot),
                 "-I", init.toString(),
                 "ossdocDump",
                 "-q",
                 "--no-daemon"
         );
 
-        ProcessRunner.Result dump = runGradleWithJavaFallback(repoRoot, workspaceRoot, dumpCmd, Duration.ofMinutes(10), "dump");
+        ProcessRunner.Result dump = gradleBuildSupport.runWithJavaFallback(
+                repoRoot,
+                workspaceRoot,
+                dumpCmd,
+                Duration.ofMinutes(10),
+                "dump"
+        );
         if (dump.getExitCode() == 0) {
-            modules.addAll(parseGradleDump(repoRoot, dump.getOutput(), failures));
+            modules.addAll(gradleDumpParser.parse(repoRoot, dump.getOutput(), failures));
 
             if (modules.isEmpty()) {
                 failures.add(BuildFailure.builder()
@@ -140,14 +219,20 @@ public class BuildResolveService {
         }
 
         List<String> compileCmd = List.of(
-                selectGradleCmd(repoRoot),
+                gradleBuildSupport.selectGradleCmd(repoRoot),
                 "classes",
                 "-x", "test",
                 "-x", "check",
                 "--no-daemon"
         );
 
-        ProcessRunner.Result compile = runGradleWithJavaFallback(repoRoot, workspaceRoot, compileCmd, Duration.ofMinutes(20), "compile");
+        ProcessRunner.Result compile = gradleBuildSupport.runWithJavaFallback(
+                repoRoot,
+                workspaceRoot,
+                compileCmd,
+                Duration.ofMinutes(20),
+                "compile"
+        );
 
         BuildMode mode = decideBuildMode(modules, compile);
         if (compile.getExitCode() != 0 && mode != BuildMode.FAILED) {
@@ -169,6 +254,14 @@ public class BuildResolveService {
                 .build();
     }
 
+    /**
+     * 역할:
+     * Maven 실행 불가/예외 상황에서 source-only 결과를 생성한다.
+     *
+     * 책임:
+     * 1) 소스 루트 스캔 결과만으로 최소 매니페스트 구성
+     * 2) 실패 원인을 BuildFailure로 명시
+     */
     private BuildManifest resolveMavenSourceOnly(String runId, Path repoRoot, boolean wrapperUsed, String reason, String logHint) {
         List<BuildModuleManifest> modules = sourceOnlyModuleScanner.scan(repoRoot);
 
@@ -192,70 +285,15 @@ public class BuildResolveService {
                 .build();
     }
 
-    private String selectGradleCmd(Path repoRoot) {
-        // Windows   gradlew.bat 
-        if (Files.exists(repoRoot.resolve("gradlew.bat"))) return "gradlew.bat";
-        if (Files.exists(repoRoot.resolve("gradlew"))) return "./gradlew";
-        return buildCommandProperties.getGradleCommand();
-    }
-
-    private ProcessRunner.Result runGradleWithJavaFallback(Path repoRoot,
-                                                           Path workspaceRoot,
-                                                           List<String> command,
-                                                           Duration timeout,
-                                                           String stage) {
-        Map<String, String> baseEnvironment = resolveGradleBaseEnvironment(workspaceRoot);
-        List<String> candidates = resolveJavaHomeCandidates(repoRoot);
-
-        ProcessRunner.Result first;
-        String selectedJavaHome = null;
-        if (candidates.isEmpty()) {
-            first = processRunner.run(repoRoot, command, timeout, baseEnvironment);
-        } else {
-            selectedJavaHome = candidates.get(0);
-            first = processRunner.run(repoRoot, command, timeout, buildEnvironment(baseEnvironment, selectedJavaHome));
-            log.info("[BUILD] Gradle {} initial JAVA_HOME={} (version-aware selection)", stage, selectedJavaHome);
-        }
-
-        if (first.getExitCode() == 0) {
-            return first;
-        }
-
-        Optional<String> compatibilityReason = detectJavaCompatibilityReason(BuildToolKind.GRADLE, first);
-        if (compatibilityReason.isEmpty()) {
-            if (selectedJavaHome != null && !isCurrentRuntimeJavaHome(selectedJavaHome)) {
-                ProcessRunner.Result baseline = processRunner.run(repoRoot, command, timeout, baseEnvironment);
-                if (baseline.getExitCode() == 0) {
-                    log.info("[BUILD] Gradle {} fallback to current runtime JVM succeeded", stage);
-                    return baseline;
-                }
-            }
-            return first;
-        }
-        log.info("[BUILD] Gradle {} detected Java compatibility issue: {}", stage, compatibilityReason.get());
-
-        ProcessRunner.Result last = first;
-        for (String javaHome : candidates) {
-            if (javaHome.equalsIgnoreCase(selectedJavaHome)) {
-                continue;
-            }
-
-            log.info("[BUILD] Gradle {} retry with JAVA_HOME={}", stage, javaHome);
-            ProcessRunner.Result retry = processRunner.run(
-                    repoRoot,
-                    command,
-                    timeout,
-                    buildEnvironment(baseEnvironment, javaHome)
-            );
-            if (retry.getExitCode() == 0) {
-                return retry;
-            }
-            last = retry;
-        }
-
-        return last;
-    }
-
+    /**
+     * 역할:
+     * Maven 실행 시 JAVA_HOME 후보를 순차 적용해 재시도한다.
+     *
+     * 책임:
+     * 1) 1순위 JDK로 실행
+     * 2) 호환성 에러 감지 시 후보 JDK 순차 재시도
+     * 3) 필요 시 현재 런타임 JVM으로 baseline 폴백
+     */
     private ProcessRunner.Result runMavenWithJavaFallback(Path mavenLocalRepoPath,
                                                           MavenJavaSelection selection,
                                                           String stage,
@@ -268,7 +306,7 @@ public class BuildResolveService {
             first = runner.apply(Map.of());
         } else {
             selectedJavaHome = candidates.get(0);
-            first = runner.apply(buildEnvironment(Map.of(), selectedJavaHome));
+            first = runner.apply(buildToolchainSupport.buildEnvironment(Map.of(), selectedJavaHome));
             log.info(
                     "[BUILD] Maven {} initial JAVA_HOME={} (requiredJava={}, repoLocal={})",
                     stage,
@@ -282,9 +320,9 @@ public class BuildResolveService {
             return first;
         }
 
-        Optional<String> compatibilityReason = detectJavaCompatibilityReason(BuildToolKind.MAVEN, first);
+        Optional<String> compatibilityReason = buildToolchainSupport.detectJavaCompatibilityReason(BuildToolKind.MAVEN, first);
         if (compatibilityReason.isEmpty()) {
-            if (selectedJavaHome != null && !isCurrentRuntimeJavaHome(selectedJavaHome)) {
+            if (selectedJavaHome != null && !buildToolchainSupport.isCurrentRuntimeJavaHome(selectedJavaHome)) {
                 ProcessRunner.Result baseline = runner.apply(Map.of());
                 if (baseline.getExitCode() == 0) {
                     log.info("[BUILD] Maven {} fallback to current runtime JVM succeeded", stage);
@@ -301,7 +339,7 @@ public class BuildResolveService {
                 continue;
             }
             log.info("[BUILD] Maven {} retry with JAVA_HOME={}", stage, javaHome);
-            ProcessRunner.Result retry = runner.apply(buildEnvironment(Map.of(), javaHome));
+            ProcessRunner.Result retry = runner.apply(buildToolchainSupport.buildEnvironment(Map.of(), javaHome));
             if (retry.getExitCode() == 0) {
                 return retry;
             }
@@ -313,197 +351,18 @@ public class BuildResolveService {
 
     private MavenJavaSelection resolveMavenJavaSelection(Path repoRoot) {
         Optional<Integer> requiredJavaMajor = mavenJavaVersionResolver.resolveRequiredJavaMajor(repoRoot);
-        List<String> javaHomes = resolveJavaHomeCandidatesForMaven(requiredJavaMajor);
+        List<String> javaHomes = buildToolchainSupport.resolveJavaHomeCandidatesForMaven(requiredJavaMajor);
         return new MavenJavaSelection(requiredJavaMajor, javaHomes);
     }
 
-    private Optional<String> detectJavaCompatibilityReason(BuildToolKind buildToolKind, ProcessRunner.Result result) {
-        String text = ((result.getOutput() == null ? "" : result.getOutput()) + "\n"
-                + (result.getError() == null ? "" : result.getError())).toLowerCase(Locale.ROOT);
-
-        List<String> commonSignals = List.of(
-                "unsupported class file major version",
-                "unsupported major.minor version",
-                "has been compiled by a more recent version",
-                "could not determine java version"
-        );
-        for (String signal : commonSignals) {
-            if (text.contains(signal)) {
-                return Optional.of(signal);
-            }
-        }
-
-        if (buildToolKind == BuildToolKind.GRADLE) {
-            List<String> gradleSignals = List.of(
-                    "this version of gradle supports java",
-                    "minimum supported gradle version"
-            );
-            for (String signal : gradleSignals) {
-                if (text.contains(signal)) {
-                    return Optional.of(signal);
-                }
-            }
-            return Optional.empty();
-        }
-
-        if (buildToolKind == BuildToolKind.MAVEN) {
-            List<String> mavenSignals = List.of(
-                    "invalid target release",
-                    "invalid source release",
-                    "release version",
-                    "source option",
-                    "target option",
-                    "no toolchain found for type jdk",
-                    "cannot find matching toolchain definitions for the following toolchain types",
-                    "error: source release",
-                    "error: target release"
-            );
-            for (String signal : mavenSignals) {
-                if (!text.contains(signal)) {
-                    continue;
-                }
-
-                if ("release version".equals(signal) && !text.contains("not supported")) {
-                    continue;
-                }
-                if (("source option".equals(signal) || "target option".equals(signal))
-                        && !text.contains("is no longer supported")) {
-                    continue;
-                }
-                return Optional.of(signal);
-            }
-        }
-
-        return Optional.empty();
-    }
-
-    private boolean isCurrentRuntimeJavaHome(String javaHome) {
-        String normalized = normalizePathString(javaHome);
-        if (normalized == null) {
-            return false;
-        }
-        String currentJavaHome = normalizePathString(System.getenv("JAVA_HOME"));
-        String currentRuntimeHome = normalizePathString(System.getProperty("java.home"));
-        return normalized.equalsIgnoreCase(currentJavaHome) || normalized.equalsIgnoreCase(currentRuntimeHome);
-    }
-
-    private List<String> resolveJavaHomeCandidates(Path repoRoot) {
-        List<JavaHomeCandidate> candidates = loadConfiguredJavaHomeCandidates();
-        if (candidates.isEmpty()) {
-            return List.of();
-        }
-
-        Optional<GradleVersion> gradleVersion = parseGradleVersionFromWrapper(repoRoot);
-        if (gradleVersion.isPresent()) {
-            GradleVersion version = gradleVersion.get();
-            int preferredJava = preferredJavaMajor(version);
-
-            candidates.sort((left, right) -> {
-                int tierCompare = Integer.compare(
-                        compatibilityTier(version, right.major()),
-                        compatibilityTier(version, left.major())
-                );
-                if (tierCompare != 0) {
-                    return tierCompare;
-                }
-
-                int leftDistance = Math.abs(left.major() - preferredJava);
-                int rightDistance = Math.abs(right.major() - preferredJava);
-                int distanceCompare = Integer.compare(leftDistance, rightDistance);
-                if (distanceCompare != 0) {
-                    return distanceCompare;
-                }
-                return Integer.compare(right.major(), left.major());
-            });
-        }
-        return toJavaHomePaths(candidates);
-    }
-
-    private List<String> resolveJavaHomeCandidatesForMaven(Optional<Integer> requiredJavaMajor) {
-        List<JavaHomeCandidate> candidates = loadConfiguredJavaHomeCandidates();
-        if (candidates.isEmpty()) {
-            return List.of();
-        }
-
-        if (requiredJavaMajor.isPresent()) {
-            int requiredMajor = requiredJavaMajor.get();
-            candidates.sort((left, right) -> {
-                boolean leftAdequate = left.major() >= requiredMajor;
-                boolean rightAdequate = right.major() >= requiredMajor;
-
-                if (leftAdequate != rightAdequate) {
-                    return Boolean.compare(rightAdequate, leftAdequate);
-                }
-
-                if (leftAdequate) {
-                    int leftDistance = Math.abs(left.major() - requiredMajor);
-                    int rightDistance = Math.abs(right.major() - requiredMajor);
-                    int distanceCompare = Integer.compare(leftDistance, rightDistance);
-                    if (distanceCompare != 0) {
-                        return distanceCompare;
-                    }
-                    return Integer.compare(left.major(), right.major());
-                }
-
-                return Integer.compare(right.major(), left.major());
-            });
-        }
-
-        return toJavaHomePaths(candidates);
-    }
-
-    private List<JavaHomeCandidate> loadConfiguredJavaHomeCandidates() {
-        List<String> configured = buildCommandProperties.getJavaHomes();
-        if (configured == null || configured.isEmpty()) {
-            return List.of();
-        }
-
-        List<JavaHomeCandidate> candidates = new ArrayList<>();
-        for (String candidate : configured) {
-            String normalized = normalizePathString(candidate);
-            if (normalized == null) {
-                continue;
-            }
-            Path javaHomePath = Path.of(normalized);
-            if (!Files.exists(javaHomePath) || !Files.isDirectory(javaHomePath)) {
-                continue;
-            }
-
-            Integer javaMajor = parseJavaMajorFromHome(javaHomePath);
-            if (javaMajor == null) {
-                continue;
-            }
-            candidates.add(new JavaHomeCandidate(normalized, javaMajor));
-        }
-        return candidates;
-    }
-
-    private List<String> toJavaHomePaths(List<JavaHomeCandidate> candidates) {
-        List<String> result = new ArrayList<>();
-        for (JavaHomeCandidate candidate : candidates) {
-            result.add(candidate.path());
-        }
-        return result;
-    }
-
-    private Map<String, String> resolveGradleBaseEnvironment(Path workspaceRoot) {
-        Map<String, String> env = new HashMap<>();
-        if (!buildCommandProperties.isIsolatedExecution()) {
-            return env;
-        }
-
-        Path gradleUserHome = workspaceRoot.resolve(buildCommandProperties.getGradleUserHomeDir())
-                .toAbsolutePath()
-                .normalize();
-        try {
-            Files.createDirectories(gradleUserHome);
-            env.put("GRADLE_USER_HOME", gradleUserHome.toString());
-        } catch (IOException e) {
-            log.warn("[BUILD] Failed to create GRADLE_USER_HOME directory. path={}", gradleUserHome, e);
-        }
-        return env;
-    }
-
+    /**
+     * 역할:
+     * 격리 실행 모드에서 Run 전용 Maven local repository 경로를 준비한다.
+     *
+     * 책임:
+     * 1) 디렉터리 생성 보장
+     * 2) 생성 실패 시 경고 로그 후 null 반환
+     */
     private Path resolveMavenLocalRepoPath(Path workspaceRoot) {
         if (!buildCommandProperties.isIsolatedExecution()) {
             return null;
@@ -518,196 +377,6 @@ public class BuildResolveService {
             log.warn("[BUILD] Failed to create Maven local repository path. path={}", mavenLocalRepo, e);
             return null;
         }
-    }
-
-    private Map<String, String> buildEnvironment(Map<String, String> baseEnvironment, String javaHome) {
-        Map<String, String> env = new HashMap<>(baseEnvironment);
-        env.put("JAVA_HOME", javaHome);
-
-        String binPath = javaHome + File.separator + "bin";
-        String currentPath = Optional.ofNullable(System.getenv("PATH")).orElse("");
-        String mergedPath = currentPath.isBlank() ? binPath : binPath + File.pathSeparator + currentPath;
-
-        env.put("PATH", mergedPath);
-        env.put("Path", mergedPath);
-        return env;
-    }
-
-    private Optional<GradleVersion> parseGradleVersionFromWrapper(Path repoRoot) {
-        Path wrapperProperties = repoRoot.resolve("gradle").resolve("wrapper").resolve("gradle-wrapper.properties");
-        if (!Files.exists(wrapperProperties)) {
-            return Optional.empty();
-        }
-
-        Pattern distributionPattern = Pattern.compile("gradle-([0-9]+(?:\\.[0-9]+){0,2})-(?:bin|all)\\.zip");
-        try {
-            for (String line : Files.readAllLines(wrapperProperties, StandardCharsets.UTF_8)) {
-                String trimmed = line == null ? "" : line.trim();
-                if (!trimmed.startsWith("distributionUrl=")) {
-                    continue;
-                }
-                Matcher matcher = distributionPattern.matcher(trimmed);
-                if (!matcher.find()) {
-                    return Optional.empty();
-                }
-
-                String rawVersion = matcher.group(1);
-                String[] parts = rawVersion.split("\\.");
-                int major = parseIntOrZero(parts, 0);
-                int minor = parseIntOrZero(parts, 1);
-                int patch = parseIntOrZero(parts, 2);
-
-                if (major <= 0) {
-                    return Optional.empty();
-                }
-                return Optional.of(new GradleVersion(major, minor, patch));
-            }
-        } catch (Exception e) {
-            log.debug("[BUILD] Failed to parse gradle wrapper version. repoRoot={}", repoRoot, e);
-        }
-        return Optional.empty();
-    }
-
-    private int parseIntOrZero(String[] parts, int index) {
-        if (parts == null || index >= parts.length) {
-            return 0;
-        }
-        try {
-            return Integer.parseInt(parts[index]);
-        } catch (NumberFormatException e) {
-            return 0;
-        }
-    }
-
-    private Integer parseJavaMajorFromHome(Path javaHome) {
-        Path releaseFile = javaHome.resolve("release");
-        if (Files.exists(releaseFile)) {
-            try {
-                for (String line : Files.readAllLines(releaseFile, StandardCharsets.UTF_8)) {
-                    String trimmed = line == null ? "" : line.trim();
-                    if (!trimmed.startsWith("JAVA_VERSION=")) {
-                        continue;
-                    }
-                    int firstQuote = trimmed.indexOf('"');
-                    int lastQuote = trimmed.lastIndexOf('"');
-                    if (firstQuote >= 0 && lastQuote > firstQuote) {
-                        String versionString = trimmed.substring(firstQuote + 1, lastQuote);
-                        Integer parsed = toMajorVersion(versionString);
-                        if (parsed != null) {
-                            return parsed;
-                        }
-                    }
-                }
-            } catch (Exception e) {
-                log.debug("[BUILD] Failed to read JDK release file. javaHome={}", javaHome, e);
-            }
-        }
-
-        String fallback = javaHome.toString();
-        Matcher matcher = Pattern.compile("(?:jdk|java)[-_]?([0-9]{1,2})", Pattern.CASE_INSENSITIVE).matcher(fallback);
-        if (matcher.find()) {
-            try {
-                return Integer.parseInt(matcher.group(1));
-            } catch (NumberFormatException ignored) {
-                return null;
-            }
-        }
-        return null;
-    }
-
-    private Integer toMajorVersion(String rawVersion) {
-        if (rawVersion == null || rawVersion.isBlank()) {
-            return null;
-        }
-
-        String version = rawVersion.trim();
-        if (version.startsWith("1.")) {
-            String[] parts = version.split("\\.");
-            if (parts.length > 1) {
-                try {
-                    return Integer.parseInt(parts[1]);
-                } catch (NumberFormatException ignored) {
-                    return null;
-                }
-            }
-            return null;
-        }
-
-        int dot = version.indexOf('.');
-        String majorPart = dot >= 0 ? version.substring(0, dot) : version;
-        try {
-            return Integer.parseInt(majorPart);
-        } catch (NumberFormatException e) {
-            return null;
-        }
-    }
-
-    private int preferredJavaMajor(GradleVersion version) {
-        if (version.major() <= 6) {
-            return 11;
-        }
-        if (version.major() == 7) {
-            return version.minor() < 3 ? 11 : 17;
-        }
-        if (version.major() == 8) {
-            return version.minor() < 5 ? 17 : 21;
-        }
-        return 21;
-    }
-
-    private int compatibilityTier(GradleVersion version, int javaMajor) {
-        if (version.major() <= 6) {
-            if (javaMajor <= 11) return 4;
-            if (javaMajor <= 16) return 3;
-            return 1;
-        }
-
-        if (version.major() == 7) {
-            if (version.minor() < 3) {
-                if (javaMajor <= 11) return 4;
-                if (javaMajor <= 16) return 3;
-                if (javaMajor == 17) return 2;
-                return 1;
-            }
-            if (javaMajor <= 17) return 4;
-            if (javaMajor <= 20) return 3;
-            return 1;
-        }
-
-        if (version.major() == 8) {
-            if (version.minor() < 5) {
-                if (javaMajor <= 17) return 4;
-                if (javaMajor <= 20) return 3;
-                return 2;
-            }
-            if (javaMajor <= 21) return 4;
-            if (javaMajor <= 23) return 3;
-            return 2;
-        }
-
-        if (javaMajor >= 21) return 4;
-        if (javaMajor >= 17) return 3;
-        return 2;
-    }
-
-    private String normalizePathString(String rawPath) {
-        if (rawPath == null || rawPath.isBlank()) {
-            return null;
-        }
-        try {
-            return Path.of(rawPath.trim()).toAbsolutePath().normalize().toString();
-        } catch (Exception e) {
-            return rawPath.trim();
-        }
-    }
-
-    private record MavenJavaSelection(Optional<Integer> requiredJavaMajor, List<String> javaHomes) {
-    }
-
-    private record JavaHomeCandidate(String path, int major) {
-    }
-
-    private record GradleVersion(int major, int minor, int patch) {
     }
 
     private BuildMode decideBuildMode(List<BuildModuleManifest> modules, ProcessRunner.Result compile) {
@@ -727,79 +396,22 @@ public class BuildResolveService {
         return base.substring(0, Math.min(600, base.length()));
     }
 
-    private List<BuildModuleManifest> parseGradleDump(Path repoRoot, String output, List<BuildFailure> failures) {
-        Pattern p = Pattern.compile("^OSS_DOC_DUMP=(\\{.*\\})$", Pattern.MULTILINE);
-        Matcher m = p.matcher(output);
-
-        List<BuildModuleManifest> modules = new ArrayList<>();
-        while (m.find()) {
-            try {
-                Map<String, Object> map = objectMapper.readValue(m.group(1), Map.class);
-
-                List<String> sourceRoots = readPathList(map, "sourceRoots", repoRoot);
-                List<String> testRoots = readPathList(map, "testRoots", repoRoot);
-                List<String> resourceRoots = readPathList(map, "resourceRoots", repoRoot);
-                List<String> classesDirs = readPathList(map, "classesDirs", repoRoot);
-                List<String> compileClasspath = readPathList(map, "compileClasspath", repoRoot);
-                List<String> runtimeClasspath = readPathList(map, "runtimeClasspath", repoRoot);
-
-                /**
-                 * OK ??classesDirs? ? ??ASM ? ??
-                 * PARTIAL ??sourceRoots??? ??AST ??
-                 * FAILED ??? ? ?
-                 */
-                String status;
-                if (!classesDirs.isEmpty()) {
-                    status = "OK";
-                } else if (!sourceRoots.isEmpty() || !testRoots.isEmpty() || !resourceRoots.isEmpty()) {
-                    status = "PARTIAL";
-                } else {
-                    status = "FAILED";
-                }
-
-                modules.add(BuildModuleManifest.builder()
-                        .moduleId((String) map.getOrDefault("projectPath", ""))
-                        .name((String) map.getOrDefault("name", ""))
-                        .sourceRoots(sourceRoots)
-                        .testRoots(testRoots)
-                        .resourceRoots(resourceRoots)
-                        .classesDirs(classesDirs)
-                        .compileClasspath(compileClasspath)
-                        .runtimeClasspath(runtimeClasspath)
-                        .status(status)
-                        .build());
-
-            } catch (Exception e) {
-                failures.add(BuildFailure.builder()
-                        .code(BuildErrorCode.GRADLE_DUMP_FAILED.getCode())
-                        .message("Failed to parse OSS_DOC_DUMP - " + e.getMessage())
-                        .build());
-            }
-        }
-        return modules;
-    }
-
-    private List<String> readPathList(Map<String, Object> map, String key, Path repoRoot) {
-        Object rawValue = map.get(key);
-        if (!(rawValue instanceof List<?> values)) {
-            return List.of();
-        }
-
-        List<String> pathValues = new ArrayList<>();
-        for (Object value : values) {
-            if (value instanceof String path && !path.isBlank()) {
-                pathValues.add(path);
-            }
-        }
-
-        return buildPathNormalizer.toAbsolutePaths(repoRoot, pathValues);
-    }
-
+    /**
+     * 역할:
+     * Maven 기반 빌드/리졸브를 수행한다.
+     *
+     * 책임:
+     * 1) 모듈 스캔 + classpath 생성
+     * 2) compile 수행 후 BuildMode 결정
+     * 3) 실패 시 SOURCE_ONLY로 안전 폴백
+     */
     private BuildManifest resolveMaven(String runId, Path repoRoot, Path workspaceRoot, boolean wrapperUsed, Path tmpDir) {
         List<BuildFailure> failures = new ArrayList<>();
         List<BuildModuleManifest> modules = new ArrayList<>();
 
         try {
+            Files.createDirectories(tmpDir);
+
             List<Path> moduleRoots = pomModuleScanner.scanModuleRoots(repoRoot);
 
             if (moduleRoots.isEmpty()) {
@@ -894,5 +506,7 @@ public class BuildResolveService {
             );
         }
     }
-}
 
+    private record MavenJavaSelection(Optional<Integer> requiredJavaMajor, List<String> javaHomes) {
+    }
+}
