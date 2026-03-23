@@ -11,5 +11,5 @@ import lombok.NoArgsConstructor;
 public class BuildResolveResponse {
     private String runId;
     private BuildMode buildMode;
-    private String buildManifestPath; // build_manifest.json 저장 경로
+    private String buildManifestPath; // build_manifest.json S3 URL
 }

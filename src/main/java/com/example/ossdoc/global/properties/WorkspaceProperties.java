@@ -13,7 +13,7 @@ public class WorkspaceProperties {
 
     /**
      * Base directory where per-run workspaces are created.
-     * Example: C:/data/oss
+     * Example: C:/data/ossdoc
      */
-    private String baseDir = "C:/data/oss";
+    private String baseDir = "C:/data/ossdoc";
 }

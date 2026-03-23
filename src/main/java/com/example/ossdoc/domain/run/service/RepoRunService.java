@@ -12,6 +12,7 @@ import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.example.ossdoc.domain.run.support.GithubClient;
 import com.example.ossdoc.domain.run.support.GithubRepoRef;
 import com.example.ossdoc.domain.run.support.GithubUrlParser;
+import com.example.ossdoc.domain.run.support.JobManifestWriter;
 import com.example.ossdoc.domain.run.support.WorkspaceManager;
 import com.example.ossdoc.domain.run.support.ZipUtils;
 import com.example.ossdoc.domain.user.entity.User;
@@ -37,6 +38,7 @@ public class RepoRunService {
     private final ArtifactService artifactService;
     private final GithubClient githubClient;
     private final WorkspaceManager workspaceManager;
+    private final JobManifestWriter jobManifestWriter;
     private final ObjectMapper objectMapper;
 
     @Transactional
@@ -98,6 +100,9 @@ public class RepoRunService {
         meta.put("ref", ref);
         meta.put("commitSha", commitSha);
         meta.put("generatedAt", OffsetDateTime.now().toString());
+
+        Path artifactsDir = workspaceManager.artifactsDir(wsRoot);
+        jobManifestWriter.write(artifactsDir, meta);
 
         artifactService.saveJsonArtifact(run, ArtifactKind.JOB_MANIFEST, "0.1",
                 "job_manifest.json", meta);

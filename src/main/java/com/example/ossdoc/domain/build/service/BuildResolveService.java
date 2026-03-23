@@ -12,7 +12,6 @@ import com.example.ossdoc.domain.build.exception.BuildException;
 import com.example.ossdoc.domain.build.exception.code.BuildErrorCode;
 import com.example.ossdoc.domain.build.support.BuildManifestSelector;
 import com.example.ossdoc.domain.build.support.BuildManifestWriter;
-import com.example.ossdoc.domain.build.support.BuildPathNormalizer;
 import com.example.ossdoc.domain.build.support.BuildToolchainSupport;
 import com.example.ossdoc.domain.build.support.GradleBuildSupport;
 import com.example.ossdoc.domain.build.support.GradleDumpParser;
@@ -26,8 +25,8 @@ import com.example.ossdoc.domain.build.support.SourceOnlyModuleScanner;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.example.ossdoc.global.config.BuildCommandProperties;
+import com.example.ossdoc.domain.artifact.entity.Artifact;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -70,15 +69,12 @@ public class BuildResolveService {
     private final PomModuleScanner pomModuleScanner;
     private final MavenBuildSupport mavenBuildSupport;
     private final MavenJavaVersionResolver mavenJavaVersionResolver;
-    private final BuildPathNormalizer buildPathNormalizer;
     private final BuildCommandProperties buildCommandProperties;
     private final BuildToolchainSupport buildToolchainSupport;
     private final BuildManifestSelector buildManifestSelector;
     private final GradleBuildSupport gradleBuildSupport;
     private final GradleInitScriptWriter gradleInitScriptWriter;
     private final GradleDumpParser gradleDumpParser;
-
-    private final ObjectMapper objectMapper;
 
     /**
      * 역할:
@@ -157,13 +153,12 @@ public class BuildResolveService {
             manifest = resolveMaven(runId, actualRepoRoot, workspaceRoot, detected.mavenWrapperExists(), tmpDir.resolve("maven"));
         }
 
-        Path buildManifestPath = buildManifestWriter.write(artifactsDir, manifest);
-        JsonNode manifestJson = objectMapper.valueToTree(manifest);
-
-        artifactService.saveJsonArtifact(run, ArtifactKind.BUILD_MANIFEST, "0.1",
+        JsonNode manifestJson = buildManifestWriter.toJson(manifest);
+        buildManifestWriter.write(artifactsDir, manifestJson);
+        Artifact savedManifest = artifactService.saveJsonArtifact(run, ArtifactKind.BUILD_MANIFEST, "0.1",
                 "build_manifest.json", manifestJson);
 
-        return new BuildResolveResponse(runId, manifest.getBuildMode(), buildPathNormalizer.normalize(buildManifestPath));
+        return new BuildResolveResponse(runId, manifest.getBuildMode(), savedManifest.getPath());
     }
 
     /**
