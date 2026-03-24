@@ -50,3 +50,7 @@ workspace/
 
 /AGENTS.md
 .gradle-home/
+
+/claude's generated markdown file
+*.md
+!**/README.md

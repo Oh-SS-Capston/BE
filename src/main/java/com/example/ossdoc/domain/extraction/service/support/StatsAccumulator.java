@@ -145,32 +145,12 @@ public class StatsAccumulator {
         edgeCandidates.increment();
     }
 
-    public void recordRelations(long count) {
-        if (count <= 0) {
-            return;
-        }
-        relations.add(count);
-        edgeCandidates.add(count);
-    }
-
     public void recordObservation() {
         observations.increment();
     }
 
-    public void recordObservations(long count) {
-        if (count > 0) {
-            observations.add(count);
-        }
-    }
-
     public void recordEvidence() {
         evidence.increment();
-    }
-
-    public void recordEvidence(long count) {
-        if (count > 0) {
-            evidence.add(count);
-        }
     }
 
     public void recordUnresolvedTypeRef() {
@@ -179,12 +159,6 @@ public class StatsAccumulator {
 
     public void recordError() {
         errors.increment();
-    }
-
-    public void recordErrors(long count) {
-        if (count > 0) {
-            errors.add(count);
-        }
     }
 
     public void recordSymbol(SymbolFact symbolFact) {

@@ -53,8 +53,15 @@ public record FactsExtractRequest(
         List<String> excludeGlobs
 ) {
     public FactsExtractRequest {
-        targetModules = targetModules == null ? List.of() : List.copyOf(targetModules);
-        includeGlobs = includeGlobs == null ? List.of() : List.copyOf(includeGlobs);
-        excludeGlobs = excludeGlobs == null ? List.of() : List.copyOf(excludeGlobs);
+        targetModules = filterBlanks(targetModules);
+        includeGlobs  = filterBlanks(includeGlobs);
+        excludeGlobs  = filterBlanks(excludeGlobs);
+    }
+
+    private static List<String> filterBlanks(List<String> values) {
+        if (values == null) return List.of();
+        return values.stream()
+                .filter(v -> v != null && !v.isBlank())
+                .toList();
     }
 }

@@ -14,6 +14,7 @@ import com.example.ossdoc.domain.extraction.dto.model.RootMergeResult;
 import com.example.ossdoc.domain.extraction.dto.model.StatsMeta;
 import com.example.ossdoc.domain.extraction.dto.request.FactsExtractRequest;
 import com.example.ossdoc.domain.extraction.dto.response.FactsExtractResponse;
+import com.example.ossdoc.domain.extraction.enums.BuildStatus;
 import com.example.ossdoc.domain.extraction.enums.ChunkStatus;
 import com.example.ossdoc.domain.extraction.exception.ExtractionErrorCode;
 import com.example.ossdoc.domain.extraction.exception.ExtractionException;
@@ -21,7 +22,7 @@ import com.example.ossdoc.domain.extraction.service.composer.FactsComposer;
 import com.example.ossdoc.domain.extraction.service.composer.FactsCompositionContext;
 import com.example.ossdoc.domain.extraction.service.extractor.ChunkFactsExtractionCoordinator;
 import com.example.ossdoc.domain.build.support.RepoRootResolver;
-import com.example.ossdoc.domain.extraction.service.support.BuildManifestS3Loader;
+import com.example.ossdoc.domain.extraction.service.support.BuildManifestLoader;
 import com.example.ossdoc.domain.extraction.service.support.ChunkPlanner;
 import com.example.ossdoc.domain.extraction.service.support.ExtractionClock;
 import com.example.ossdoc.domain.extraction.service.support.ExtractionMergeSupport;
@@ -36,6 +37,7 @@ import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.nio.file.Path;
@@ -55,15 +57,11 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
 
-    private static final String BUILD_STATUS_SUCCESS = "success";
-    private static final String BUILD_STATUS_FAILED = "failed";
-    private static final String BUILD_STATUS_PARTIAL = "partial";
-    private static final String BUILD_STATUS_SKIPPED = "skipped";
-    private static final String BUILD_STATUS_UNKNOWN = "unknown";
 
     private final ObjectMapper objectMapper;
     private final ExtractionClock extractionClock;
@@ -75,7 +73,7 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
     private final FactsWriter factsWriter;
     private final RepoRunRepository repoRunRepository;
     private final RepoRootResolver repoRootResolver;
-    private final BuildManifestS3Loader buildManifestS3Loader;
+    private final BuildManifestLoader buildManifestLoader;
 
     @Override
     public FactsExtractResponse extract(FactsExtractRequest request) {
@@ -85,6 +83,7 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
         WarningCollector warnings = new WarningCollector();
 
         ExtractionFacadeContext prepared = prepareFacadeContext(request, startedAt, warnings);
+        log.info("[EXTRACTION] Phase 1 완료 — 컨텍스트 준비 (runId={}, repoRoot={})", prepared.runId(), prepared.repoRoot());
 
         ExtractionPreflightResult preflightResult = extractionPreflightChecker.check(
                 request,
@@ -92,6 +91,9 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
                 prepared.repoRoot()
         );
         warnings.addAll(preflightResult.warnings());
+        log.info("[EXTRACTION] Phase 2 완료 — Preflight 검사 (mode={}, bytecodeAvailability={})",
+                preflightResult.resolvedMode(),
+                preflightResult.bytecodeAvailability() == null ? "N/A" : preflightResult.bytecodeAvailability().availability());
 
         ExtractionFacadeContext facadeContext = ExtractionFacadeContext.builder()
                 .request(prepared.request())
@@ -123,6 +125,8 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
                 chunkingPolicy
         );
 
+        log.info("[EXTRACTION] Phase 3 완료 — 청크 계획 (chunks={})", chunks.size());
+
         if (chunks.isEmpty()) {
             warnings.add("No extraction chunks were planned; resulting facts.json will be structurally valid but empty");
         }
@@ -132,11 +136,19 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
                 preflightResult,
                 facadeContext.repoRoot(),
                 chunks,
-                chunkingPolicy
+                chunkingPolicy,
+                warnings
         );
+
+        long successCount = chunkResults.stream().filter(r -> r.status() == ChunkStatus.SUCCEEDED).count();
+        long failedCount = chunkResults.stream().filter(r -> r.status() == ChunkStatus.FAILED).count();
+        log.info("[EXTRACTION] Phase 4 완료 — 병렬 추출 (total={}, success={}, failed={})",
+                chunkResults.size(), successCount, failedCount);
 
         ExtractionAggregate aggregate = buildAggregate(chunkResults);
         warnings.addAll(aggregate.warnings());
+        log.info("[EXTRACTION] Phase 5 완료 — 병합 (evidence={}, warnings={})",
+                aggregate.evidence().size(), aggregate.warnings().size());
 
         OffsetDateTime finishedAt = extractionClock.now();
 
@@ -157,6 +169,8 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
                 aggregate
         ));
 
+        log.info("[EXTRACTION] Phase 6 완료 — FactsDocument 구성");
+
         FactsWriteContext writeContext = new FactsWriteContext(
                 facadeContext.runId(),
                 facadeContext.artifactsRoot(),
@@ -164,7 +178,15 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
                 warnings.snapshot()
         );
 
-        return writeFactsAndBuildResponse(writeContext);
+        FactsExtractResponse response = writeFactsAndBuildResponse(writeContext);
+        log.info("[EXTRACTION] Phase 7 완료 — facts.json 저장 완료 (runId={})", facadeContext.runId());
+
+        List<String> finalWarnings = response.warnings();
+        if (finalWarnings != null && !finalWarnings.isEmpty()) {
+            finalWarnings.forEach(w -> log.warn("[EXTRACTION] Warning: {}", w));
+        }
+
+        return response;
     }
 
     private ExtractionFacadeContext prepareFacadeContext(
@@ -178,19 +200,19 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
                 .orElseThrow(() -> new ExtractionException(ExtractionErrorCode.RUN_NOT_FOUND));
 
         Path workspaceRoot = Path.of(run.getWorkspaceRoot()).normalize();
-        Path repoRoot = resolveRepoRoot(workspaceRoot);
-        Path artifactsRoot = workspaceRoot.resolve("artifacts").normalize();
-
-        BuildManifest buildManifest = buildManifestS3Loader.load(runId);
-        if (buildManifest == null) {
-            warnings.add("build_manifest could not be loaded from S3 for runId=" + runId);
-        }
-
         JobMeta jobMeta = JobMeta.builder()
                 .jobId(runId)
                 .repoUrl(run.getRepoUrl())
                 .commitSha(run.getCommitSha())
                 .build();
+
+        Path repoRoot = resolveRepoRoot(workspaceRoot);
+        Path artifactsRoot = workspaceRoot.resolve("artifacts").normalize();
+
+        BuildManifest buildManifest = buildManifestLoader.load(artifactsRoot);
+        if (buildManifest == null) {
+            warnings.add("build_manifest could not be loaded from local artifacts for runId=" + runId);
+        }
 
         Map<String, String> engineVersions = new LinkedHashMap<>();
         engineVersions.put("ast", "javaparser");
@@ -208,7 +230,7 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
                 .chunkingPolicy(ChunkingPolicy.standard())
                 .jobMeta(jobMeta)
                 .buildMeta(BuildMeta.builder()
-                        .status(BUILD_STATUS_UNKNOWN)
+                        .status(BuildStatus.UNKNOWN.code())
                         .mode(null)
                         .tool(null)
                         .javaVersionUsed(null)
@@ -231,10 +253,11 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
                 ? List.of("preflight result is missing")
                 : preflightResult.blockingReasons();
         warnings.addAll(blockingReasons);
+        log.error("[EXTRACTION] Preflight 실패 — 진행 불가 (reasons={})", String.join("; ", blockingReasons));
 
         throw new ExtractionException(
                 ExtractionErrorCode.EXTRACTION_PREFLIGHT_FAILED,
-                "runId=" + facadeContext.runId() + ", reasons=" + String.join("; ", blockingReasons)
+                buildExceptionDetail(facadeContext.runId(), String.join("; ", blockingReasons), warnings)
         );
     }
 
@@ -243,7 +266,8 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
             ExtractionPreflightResult preflightResult,
             Path repoRoot,
             List<ChunkDescriptor> chunks,
-            ChunkingPolicy chunkingPolicy
+            ChunkingPolicy chunkingPolicy,
+            WarningCollector warnings
     ) {
         if (chunks == null || chunks.isEmpty()) {
             return List.of();
@@ -282,7 +306,8 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
                     cancelPending(executor);
                     throw new ExtractionException(
                             ExtractionErrorCode.EXTRACTION_ORCHESTRATION_INTERRUPTED,
-                            "chunk result collection was interrupted",
+                            buildExceptionDetail(request != null ? request.runId() : "<unknown>",
+                                    "chunk result collection was interrupted", warnings),
                             e
                     );
                 }
@@ -295,7 +320,8 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
                     cancelPending(executor);
                     throw new ExtractionException(
                             ExtractionErrorCode.EXTRACTION_ORCHESTRATION_INTERRUPTED,
-                            "waiting for a completed chunk result was interrupted",
+                            buildExceptionDetail(request != null ? request.runId() : "<unknown>",
+                                    "waiting for a completed chunk result was interrupted", warnings),
                             e
                     );
                 } catch (ExecutionException e) {
@@ -303,7 +329,8 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
                     Throwable cause = e.getCause() == null ? e : e.getCause();
                     throw new ExtractionException(
                             ExtractionErrorCode.EXTRACTION_ORCHESTRATION_FAILED,
-                            "failed to retrieve completed chunk extraction result: " + safeMessage(cause),
+                            buildExceptionDetail(request != null ? request.runId() : "<unknown>",
+                                    "failed to retrieve completed chunk extraction result: " + safeMessage(cause), warnings),
                             cause
                     );
                 }
@@ -332,6 +359,9 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
                     throw failFastAbort(chunkResult.descriptor(), firstFailureMessage(chunkResult));
                 }
 
+                log.debug("[EXTRACTION] 청크 완료: {} (status={})",
+                        chunkResult.descriptor() != null ? chunkResult.descriptor().chunkId() : "<unknown>",
+                        chunkResult.status());
                 results.add(chunkResult);
             }
 
@@ -409,6 +439,13 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
         }
     }
 
+    private static String buildExceptionDetail(String runId, String reason, WarningCollector warnings) {
+        List<String> allWarnings = warnings.snapshot();
+        return "runId=" + runId
+                + ", reason=" + reason
+                + (allWarnings.isEmpty() ? "" : ", warnings=" + String.join("; ", allWarnings));
+    }
+
     private String safeMessage(Throwable throwable) {
         if (throwable == null) {
             return "unknown error";
@@ -475,7 +512,7 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
     ) {
         if (buildManifest == null) {
             return BuildMeta.builder()
-                    .status(BUILD_STATUS_UNKNOWN)
+                    .status(BuildStatus.UNKNOWN.code())
                     .mode(null)
                     .tool(null)
                     .javaVersionUsed(null)
@@ -535,15 +572,15 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
 
     private String resolveBuildStatus(String buildMode) {
         if (buildMode == null || buildMode.isBlank()) {
-            return BUILD_STATUS_UNKNOWN;
+            return BuildStatus.UNKNOWN.code();
         }
 
         return switch (buildMode) {
-            case "FULL", "COMPILE_ONLY" -> BUILD_STATUS_SUCCESS;
-            case "SOURCE_ONLY" -> BUILD_STATUS_PARTIAL;
-            case "FAILED" -> BUILD_STATUS_FAILED;
-            case "SKIPPED" -> BUILD_STATUS_SKIPPED;
-            default -> BUILD_STATUS_UNKNOWN;
+            case "FULL", "COMPILE_ONLY" -> BuildStatus.SUCCESS.code();
+            case "SOURCE_ONLY" -> BuildStatus.PARTIAL.code();
+            case "FAILED" -> BuildStatus.FAILED.code();
+            case "SKIPPED" -> BuildStatus.SKIPPED.code();
+            default -> BuildStatus.UNKNOWN.code();
         };
     }
 

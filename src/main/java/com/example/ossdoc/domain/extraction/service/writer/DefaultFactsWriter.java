@@ -11,8 +11,11 @@ import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Objects;
 
 /**
@@ -22,6 +25,7 @@ import java.util.Objects;
  * - facts.json S3 업로드
  * - FactsExtractResponse 생성
  */
+@Slf4j
 @Component
 public class DefaultFactsWriter implements FactsWriter {
 
@@ -46,6 +50,7 @@ public class DefaultFactsWriter implements FactsWriter {
     public FactsExtractResponse writeAndBuildResponse(FactsWriteContext context) {
         Objects.requireNonNull(context, "context must not be null");
         validateDocument(context.document());
+        saveToLocal(context);
         uploadToS3(context);
         return responseFactory.create(context);
     }
@@ -79,6 +84,19 @@ public class DefaultFactsWriter implements FactsWriter {
         }
         if (document.observations() == null) {
             throw new IllegalArgumentException("FactsDocument.observations must not be null");
+        }
+    }
+
+    private void saveToLocal(FactsWriteContext context) {
+        Path artifactsDir = context.artifactsRoot();
+        try {
+            Files.createDirectories(artifactsDir);
+            Path out = artifactsDir.resolve(FactsSchema.FACTS_FILE_NAME);
+            objectMapper.writerWithDefaultPrettyPrinter()
+                    .writeValue(out.toFile(), context.document());
+            log.info("[EXTRACTION] facts.json 로컬 저장 완료: {}", out);
+        } catch (Exception e) {
+            log.warn("[EXTRACTION] facts.json 로컬 저장 실패 (S3 업로드는 계속 진행): {}", e.getMessage());
         }
     }
 
