@@ -77,6 +77,10 @@ dependencies {
     implementation platform('software.amazon.awssdk:bom:2.25.60')
     implementation 'software.amazon.awssdk:s3'
     implementation 'software.amazon.awssdk:auth'
+
+    //JavaParser & ASM
+    implementation 'com.github.javaparser:javaparser-symbol-solver-core:3.28.0'
+    implementation 'org.ow2.asm:asm:9.9.1'
 }
 
 tasks.named('test') {

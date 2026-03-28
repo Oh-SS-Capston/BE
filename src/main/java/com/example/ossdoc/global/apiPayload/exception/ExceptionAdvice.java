@@ -120,7 +120,7 @@ public class ExceptionAdvice extends ResponseEntityExceptionHandler {
      */
     @ExceptionHandler(value = GeneralException.class)
     public ResponseEntity onThrowException(GeneralException generalException, HttpServletRequest request) {
-        return handleExceptionInternal(generalException, generalException.getCode(), null, request);
+        return handleExceptionInternal(generalException, generalException.getCode(), generalException.getDetailMessage(), null, request);
     }
 
     /**
@@ -134,11 +134,10 @@ public class ExceptionAdvice extends ResponseEntityExceptionHandler {
      * @return ApiResponse 형식의 에러 응답
      */
     private ResponseEntity<Object> handleExceptionInternal(Exception e, BaseCode code,
-                                                           HttpHeaders headers, HttpServletRequest request) {
+                                                           Object detail, HttpHeaders headers, HttpServletRequest request) {
 
         // BaseCode를 사용하여 실패 응답 생성
-        ApiResponse<Object> body = ApiResponse.onFailure(code, null);
-//        e.printStackTrace();
+        ApiResponse<Object> body = ApiResponse.onFailure(code, detail);
 
         // BaseCode에서 HttpStatus 정보 추출
         ReasonDTO reason = code.getReasonHttpStatus();
