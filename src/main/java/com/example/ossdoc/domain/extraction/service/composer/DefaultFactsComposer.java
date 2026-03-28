@@ -1,4 +1,5 @@
 package com.example.ossdoc.domain.extraction.service.composer;
+import com.example.ossdoc.domain.extraction.dto.context.FactsCompositionContext;
 
 import com.example.ossdoc.domain.extraction.dto.model.EvidenceFact;
 import com.example.ossdoc.domain.extraction.dto.model.ExtractionAggregate;
@@ -8,7 +9,7 @@ import com.example.ossdoc.domain.extraction.dto.model.ObservationTable;
 import com.example.ossdoc.domain.extraction.dto.model.RelationTable;
 import com.example.ossdoc.domain.extraction.dto.model.StatsMeta;
 import com.example.ossdoc.domain.extraction.dto.model.SymbolTable;
-import com.example.ossdoc.domain.extraction.service.support.FactsSchema;
+import com.example.ossdoc.domain.extraction.service.support.util.FactsSchema;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;

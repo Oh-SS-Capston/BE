@@ -1,4 +1,4 @@
-package com.example.ossdoc.domain.extraction.service.support;
+package com.example.ossdoc.domain.extraction.service.support.util;
 
 import com.example.ossdoc.domain.extraction.dto.model.SourceSpan;
 import com.example.ossdoc.domain.extraction.enums.EvidenceKind;

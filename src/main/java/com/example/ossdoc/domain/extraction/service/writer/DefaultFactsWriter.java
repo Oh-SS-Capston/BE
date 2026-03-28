@@ -1,4 +1,5 @@
 package com.example.ossdoc.domain.extraction.service.writer;
+import com.example.ossdoc.domain.extraction.dto.context.FactsWriteContext;
 
 import com.example.ossdoc.domain.artifact.enums.ArtifactKind;
 import com.example.ossdoc.domain.artifact.service.ArtifactService;
@@ -6,7 +7,7 @@ import com.example.ossdoc.domain.extraction.dto.model.FactsDocument;
 import com.example.ossdoc.domain.extraction.dto.response.FactsExtractResponse;
 import com.example.ossdoc.domain.extraction.exception.ExtractionErrorCode;
 import com.example.ossdoc.domain.extraction.exception.ExtractionException;
-import com.example.ossdoc.domain.extraction.service.support.FactsSchema;
+import com.example.ossdoc.domain.extraction.service.support.util.FactsSchema;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.fasterxml.jackson.databind.JsonNode;

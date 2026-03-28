@@ -1,4 +1,5 @@
 package com.example.ossdoc.domain.extraction.service.writer;
+import com.example.ossdoc.domain.extraction.dto.context.FactsWriteContext;
 
 import com.example.ossdoc.domain.extraction.dto.model.ExtractionMeta;
 import com.example.ossdoc.domain.extraction.dto.model.FactsDocument;
@@ -6,7 +7,7 @@ import com.example.ossdoc.domain.extraction.dto.model.StatsMeta;
 import com.example.ossdoc.domain.extraction.dto.response.FactsExtractResponse;
 import com.example.ossdoc.domain.extraction.enums.BytecodeAvailability;
 import com.example.ossdoc.domain.extraction.enums.ExtractionMode;
-import com.example.ossdoc.domain.extraction.service.support.FactsSchema;
+import com.example.ossdoc.domain.extraction.service.support.util.FactsSchema;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;

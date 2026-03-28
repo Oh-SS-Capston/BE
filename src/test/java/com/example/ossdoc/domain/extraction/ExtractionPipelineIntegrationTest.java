@@ -13,8 +13,15 @@ import com.example.ossdoc.domain.extraction.service.extractor.AsmBytecodeFactsEx
 import com.example.ossdoc.domain.extraction.service.extractor.ChunkFactsExtractionCoordinator;
 import com.example.ossdoc.domain.extraction.service.extractor.ExtractionContextFactory;
 import com.example.ossdoc.domain.extraction.service.extractor.JavaParserAstFactsExtractor;
-import com.example.ossdoc.domain.extraction.service.facade.DefaultFactsExtractionFacade;
-import com.example.ossdoc.domain.extraction.service.support.*;
+import com.example.ossdoc.domain.extraction.facade.DefaultFactsExtractionFacade;
+import com.example.ossdoc.domain.extraction.service.support.preflight.ExtractionPreflightChecker;
+import com.example.ossdoc.domain.extraction.service.support.preflight.BuildOutputVerifier;
+import com.example.ossdoc.domain.extraction.service.support.preflight.BytecodeAvailabilityChecker;
+import com.example.ossdoc.domain.extraction.service.support.preflight.ExtractionModeResolver;
+import com.example.ossdoc.domain.extraction.service.support.preflight.BuildManifestLoader;
+import com.example.ossdoc.domain.extraction.service.support.merge.ExtractionMergeSupport;
+import com.example.ossdoc.domain.extraction.service.support.planning.ChunkPlanner;
+import com.example.ossdoc.domain.extraction.service.support.util.ExtractionClock;
 import com.example.ossdoc.domain.extraction.service.writer.DefaultFactsWriter;
 import com.example.ossdoc.domain.extraction.service.writer.FactsResponseFactory;
 import com.example.ossdoc.domain.run.entity.RepoRun;

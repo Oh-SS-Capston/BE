@@ -1,4 +1,4 @@
-package com.example.ossdoc.domain.extraction.service.support;
+package com.example.ossdoc.domain.extraction.service.support.preflight;
 
 import com.example.ossdoc.domain.build.dto.json.BuildManifest;
 import com.fasterxml.jackson.databind.ObjectMapper;

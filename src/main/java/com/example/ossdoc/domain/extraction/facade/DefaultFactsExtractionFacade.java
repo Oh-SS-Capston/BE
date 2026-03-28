@@ -1,4 +1,5 @@
-package com.example.ossdoc.domain.extraction.service.facade;
+package com.example.ossdoc.domain.extraction.facade;
+import com.example.ossdoc.domain.extraction.dto.context.ExtractionFacadeContext;
 
 import com.example.ossdoc.domain.build.dto.json.BuildManifest;
 import com.example.ossdoc.domain.build.dto.json.BuildModuleManifest;
@@ -19,19 +20,19 @@ import com.example.ossdoc.domain.extraction.enums.ChunkStatus;
 import com.example.ossdoc.domain.extraction.exception.ExtractionErrorCode;
 import com.example.ossdoc.domain.extraction.exception.ExtractionException;
 import com.example.ossdoc.domain.extraction.service.composer.FactsComposer;
-import com.example.ossdoc.domain.extraction.service.composer.FactsCompositionContext;
+import com.example.ossdoc.domain.extraction.dto.context.FactsCompositionContext;
 import com.example.ossdoc.domain.extraction.service.extractor.ChunkFactsExtractionCoordinator;
 import com.example.ossdoc.domain.build.support.RepoRootResolver;
-import com.example.ossdoc.domain.extraction.service.support.BuildManifestLoader;
-import com.example.ossdoc.domain.extraction.service.support.ChunkPlanner;
-import com.example.ossdoc.domain.extraction.service.support.ExtractionClock;
-import com.example.ossdoc.domain.extraction.service.support.ExtractionMergeSupport;
-import com.example.ossdoc.domain.extraction.service.support.ExtractionPreflightChecker;
-import com.example.ossdoc.domain.extraction.service.support.ExtractionPreflightResult;
-import com.example.ossdoc.domain.extraction.service.support.FactsSchema;
-import com.example.ossdoc.domain.extraction.service.support.RepoPathUtils;
-import com.example.ossdoc.domain.extraction.service.support.WarningCollector;
-import com.example.ossdoc.domain.extraction.service.writer.FactsWriteContext;
+import com.example.ossdoc.domain.extraction.service.support.preflight.BuildManifestLoader;
+import com.example.ossdoc.domain.extraction.service.support.planning.ChunkPlanner;
+import com.example.ossdoc.domain.extraction.service.support.util.ExtractionClock;
+import com.example.ossdoc.domain.extraction.service.support.merge.ExtractionMergeSupport;
+import com.example.ossdoc.domain.extraction.service.support.preflight.ExtractionPreflightChecker;
+import com.example.ossdoc.domain.extraction.service.support.preflight.ExtractionPreflightResult;
+import com.example.ossdoc.domain.extraction.service.support.util.FactsSchema;
+import com.example.ossdoc.domain.extraction.service.support.util.RepoPathUtils;
+import com.example.ossdoc.domain.extraction.service.support.util.WarningCollector;
+import com.example.ossdoc.domain.extraction.dto.context.FactsWriteContext;
 import com.example.ossdoc.domain.extraction.service.writer.FactsWriter;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
@@ -40,6 +41,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
@@ -200,6 +202,11 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
                 .orElseThrow(() -> new ExtractionException(ExtractionErrorCode.RUN_NOT_FOUND));
 
         Path workspaceRoot = Path.of(run.getWorkspaceRoot()).normalize();
+        if (!Files.exists(workspaceRoot) || !Files.isDirectory(workspaceRoot)) {
+            throw new ExtractionException(ExtractionErrorCode.WORKSPACE_NOT_FOUND,
+                    "workspace root does not exist: " + workspaceRoot);
+        }
+
         JobMeta jobMeta = JobMeta.builder()
                 .jobId(runId)
                 .repoUrl(run.getRepoUrl())

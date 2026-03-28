@@ -1,4 +1,4 @@
-package com.example.ossdoc.domain.extraction.service.writer;
+package com.example.ossdoc.domain.extraction.dto.context;
 
 import com.example.ossdoc.domain.extraction.dto.model.FactsDocument;
 

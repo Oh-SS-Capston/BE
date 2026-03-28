@@ -1,4 +1,4 @@
-package com.example.ossdoc.domain.extraction.service.support;
+package com.example.ossdoc.domain.extraction.service.support.util;
 
 /**
  * facts.json 관련 고정 상수

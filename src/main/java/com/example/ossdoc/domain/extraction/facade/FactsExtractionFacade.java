@@ -1,4 +1,4 @@
-package com.example.ossdoc.domain.extraction.service.facade;
+package com.example.ossdoc.domain.extraction.facade;
 
 import com.example.ossdoc.domain.extraction.dto.request.FactsExtractRequest;
 import com.example.ossdoc.domain.extraction.dto.response.FactsExtractResponse;

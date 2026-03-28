@@ -1,4 +1,6 @@
 package com.example.ossdoc.domain.extraction.service.extractor;
+import com.example.ossdoc.domain.extraction.dto.context.ExtractionSink;
+import com.example.ossdoc.domain.extraction.dto.context.ExtractionContext;
 
 import com.example.ossdoc.domain.extraction.dto.model.ChunkResult;
 import com.example.ossdoc.domain.extraction.dto.model.EvidenceFact;
@@ -18,11 +20,11 @@ import com.example.ossdoc.domain.extraction.enums.RelationKind;
 import com.example.ossdoc.domain.extraction.enums.SymbolFactKind;
 import com.example.ossdoc.domain.extraction.enums.SymbolOriginKind;
 import com.example.ossdoc.domain.extraction.enums.TypeKind;
-import com.example.ossdoc.domain.extraction.service.support.EvidenceIdGenerator;
-import com.example.ossdoc.domain.extraction.service.support.RelationResolutionFactory;
-import com.example.ossdoc.domain.extraction.service.support.RepoPathUtils;
-import com.example.ossdoc.domain.extraction.service.support.SymbolIdFactory;
-import com.example.ossdoc.domain.extraction.service.support.TypeRefFactory;
+import com.example.ossdoc.domain.extraction.service.support.util.EvidenceIdGenerator;
+import com.example.ossdoc.domain.extraction.service.support.util.RelationResolutionFactory;
+import com.example.ossdoc.domain.extraction.service.support.util.RepoPathUtils;
+import com.example.ossdoc.domain.extraction.service.support.util.SymbolIdFactory;
+import com.example.ossdoc.domain.extraction.service.support.util.TypeRefFactory;
 import com.github.javaparser.JavaParser;
 import com.github.javaparser.ParseProblemException;
 import com.github.javaparser.ParseResult;

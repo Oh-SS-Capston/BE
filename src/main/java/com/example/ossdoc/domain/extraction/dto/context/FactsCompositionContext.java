@@ -1,4 +1,4 @@
-package com.example.ossdoc.domain.extraction.service.composer;
+package com.example.ossdoc.domain.extraction.dto.context;
 
 import com.example.ossdoc.domain.extraction.dto.model.BuildMeta;
 import com.example.ossdoc.domain.extraction.dto.model.ExtractionAggregate;

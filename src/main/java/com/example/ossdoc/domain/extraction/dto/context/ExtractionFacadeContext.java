@@ -1,11 +1,11 @@
-package com.example.ossdoc.domain.extraction.service.facade;
+package com.example.ossdoc.domain.extraction.dto.context;
 
 import com.example.ossdoc.domain.build.dto.json.BuildManifest;
 import com.example.ossdoc.domain.extraction.dto.model.BuildMeta;
 import com.example.ossdoc.domain.extraction.dto.model.ChunkingPolicy;
 import com.example.ossdoc.domain.extraction.dto.model.JobMeta;
 import com.example.ossdoc.domain.extraction.dto.request.FactsExtractRequest;
-import com.example.ossdoc.domain.extraction.service.support.ExtractionPreflightResult;
+import com.example.ossdoc.domain.extraction.service.support.preflight.ExtractionPreflightResult;
 import lombok.Builder;
 
 import java.nio.file.Path;

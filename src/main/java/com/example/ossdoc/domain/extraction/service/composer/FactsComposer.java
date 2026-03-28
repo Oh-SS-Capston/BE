@@ -1,4 +1,5 @@
 package com.example.ossdoc.domain.extraction.service.composer;
+import com.example.ossdoc.domain.extraction.dto.context.FactsCompositionContext;
 
 import com.example.ossdoc.domain.extraction.dto.model.FactsDocument;
 

@@ -1,4 +1,5 @@
 package com.example.ossdoc.domain.extraction.service.extractor;
+import com.example.ossdoc.domain.extraction.dto.context.ExtractionContext;
 
 import com.example.ossdoc.domain.extraction.dto.model.ChunkResult;
 import com.example.ossdoc.domain.extraction.enums.ChunkKind;

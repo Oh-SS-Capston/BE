@@ -1,8 +1,8 @@
-package com.example.ossdoc.domain.extraction.service.extractor;
+package com.example.ossdoc.domain.extraction.dto.context;
 
 import com.example.ossdoc.domain.extraction.dto.model.ChunkDescriptor;
 import com.example.ossdoc.domain.extraction.enums.ChunkKind;
-import com.example.ossdoc.domain.extraction.service.support.RepoPathUtils;
+import com.example.ossdoc.domain.extraction.service.support.util.RepoPathUtils;
 import lombok.Builder;
 
 import java.nio.file.Path;

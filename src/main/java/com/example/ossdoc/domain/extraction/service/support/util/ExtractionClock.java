@@ -1,4 +1,4 @@
-package com.example.ossdoc.domain.extraction.service.support;
+package com.example.ossdoc.domain.extraction.service.support.util;
 
 import org.springframework.stereotype.Component;
 

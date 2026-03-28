@@ -1,4 +1,7 @@
-package com.example.ossdoc.domain.extraction.service.support;
+package com.example.ossdoc.domain.extraction.service.support.planning;
+import com.example.ossdoc.domain.extraction.service.support.util.HashSupport;
+import com.example.ossdoc.domain.extraction.service.support.util.RepoPathUtils;
+import com.example.ossdoc.domain.extraction.service.support.preflight.ExtractionPreflightResult;
 
 import com.example.ossdoc.domain.extraction.dto.model.ChunkDescriptor;
 import com.example.ossdoc.domain.extraction.dto.model.ChunkingPolicy;

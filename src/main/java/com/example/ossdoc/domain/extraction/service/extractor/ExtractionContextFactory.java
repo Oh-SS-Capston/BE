@@ -1,8 +1,9 @@
 package com.example.ossdoc.domain.extraction.service.extractor;
+import com.example.ossdoc.domain.extraction.dto.context.ExtractionContext;
 
 import com.example.ossdoc.domain.extraction.dto.model.ChunkDescriptor;
 import com.example.ossdoc.domain.extraction.dto.request.FactsExtractRequest;
-import com.example.ossdoc.domain.extraction.service.support.ExtractionPreflightResult;
+import com.example.ossdoc.domain.extraction.service.support.preflight.ExtractionPreflightResult;
 import org.springframework.stereotype.Component;
 
 import java.nio.file.Path;

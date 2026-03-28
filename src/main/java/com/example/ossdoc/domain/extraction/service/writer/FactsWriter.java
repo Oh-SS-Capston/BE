@@ -1,4 +1,5 @@
 package com.example.ossdoc.domain.extraction.service.writer;
+import com.example.ossdoc.domain.extraction.dto.context.FactsWriteContext;
 
 import com.example.ossdoc.domain.extraction.dto.response.FactsExtractResponse;
 

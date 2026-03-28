@@ -1,4 +1,4 @@
-package com.example.ossdoc.domain.extraction.service.extractor;
+package com.example.ossdoc.domain.extraction.dto.context;
 
 import com.example.ossdoc.domain.extraction.dto.model.ChunkDescriptor;
 import com.example.ossdoc.domain.extraction.dto.model.ChunkResult;
@@ -15,8 +15,8 @@ import com.example.ossdoc.domain.extraction.enums.ChunkStatus;
 import com.example.ossdoc.domain.extraction.enums.ObservationKind;
 import com.example.ossdoc.domain.extraction.enums.RelationKind;
 import com.example.ossdoc.domain.extraction.enums.SymbolFactKind;
-import com.example.ossdoc.domain.extraction.service.support.StatsAccumulator;
-import com.example.ossdoc.domain.extraction.service.support.WarningCollector;
+import com.example.ossdoc.domain.extraction.service.support.merge.StatsAccumulator;
+import com.example.ossdoc.domain.extraction.service.support.util.WarningCollector;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -28,7 +28,7 @@ import java.util.Objects;
  * extractor 내부의 mutable collector.
  * 최종 반환 직전에 ChunkResult immutable 객체로 변환한다.
  */
-class ExtractionSink {
+public class ExtractionSink {
 
     private final ChunkKind chunkKind;
 
@@ -64,44 +64,44 @@ class ExtractionSink {
     private final WarningCollector warnings = new WarningCollector();
     private final WarningCollector errors = new WarningCollector();
 
-    ExtractionSink(ChunkKind chunkKind) {
+    public ExtractionSink(ChunkKind chunkKind) {
         this.chunkKind = chunkKind;
     }
 
-    void addWarning(String warning) {
+    public void addWarning(String warning) {
         warnings.add(warning);
     }
 
-    void addWarnings(List<String> items) {
+    public void addWarnings(List<String> items) {
         warnings.addAll(items);
     }
 
-    void addError(String error) {
+    public void addError(String error) {
         errors.add(error);
         stats.recordError();
     }
 
-    void recordFileScanned() {
+    public void recordFileScanned() {
         stats.recordScannedFileKind(chunkKind);
     }
 
-    void recordFileParsed() {
+    public void recordFileParsed() {
         stats.recordParsedFileKind(chunkKind);
     }
 
-    void recordFileSkipped() {
+    public void recordFileSkipped() {
         stats.recordFileSkipped();
     }
 
-    void recordError() {
+    public void recordError() {
         stats.recordError();
     }
 
-    void recordUnresolvedTypeRef() {
+    public void recordUnresolvedTypeRef() {
         stats.recordUnresolvedTypeRef();
     }
 
-    void addEvidence(EvidenceFact fact) {
+    public void addEvidence(EvidenceFact fact) {
         if (fact == null || fact.id() == null || fact.id().isBlank()) {
             return;
         }
@@ -111,7 +111,7 @@ class ExtractionSink {
         }
     }
 
-    void addSymbol(SymbolFact fact) {
+    public void addSymbol(SymbolFact fact) {
         if (fact == null || fact.symbol() == null || fact.symbol().isBlank() || fact.kind() == null) {
             return;
         }
@@ -123,7 +123,7 @@ class ExtractionSink {
         }
     }
 
-    void addRelation(RelationFact fact) {
+    public void addRelation(RelationFact fact) {
         if (fact == null || fact.kind() == null || fact.srcSymbol() == null || fact.srcSymbol().isBlank()) {
             return;
         }
@@ -136,7 +136,7 @@ class ExtractionSink {
         }
     }
 
-    void addObservation(ObservationFact fact) {
+    public void addObservation(ObservationFact fact) {
         if (fact == null || fact.kind() == null) {
             return;
         }
@@ -149,7 +149,7 @@ class ExtractionSink {
         }
     }
 
-    ChunkResult toChunkResult(ChunkDescriptor descriptor) {
+    public ChunkResult toChunkResult(ChunkDescriptor descriptor) {
         StatsMeta snapshot = stats.snapshot();
         List<String> errorList = errors.snapshot();
 
@@ -201,7 +201,7 @@ class ExtractionSink {
                 .build();
     }
 
-    ExtractedFacts toExtractedFacts() {
+    public ExtractedFacts toExtractedFacts() {
         return new ExtractedFacts(
                 Map.copyOf(evidence),
                 SymbolTable.builder()

@@ -1,4 +1,5 @@
-package com.example.ossdoc.domain.extraction.service.support;
+package com.example.ossdoc.domain.extraction.service.support.merge;
+import com.example.ossdoc.domain.extraction.service.support.util.WarningCollector;
 
 import com.example.ossdoc.domain.extraction.dto.model.ChunkResult;
 import com.example.ossdoc.domain.extraction.dto.model.EvidenceFact;

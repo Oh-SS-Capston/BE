@@ -1,10 +1,11 @@
 package com.example.ossdoc.domain.extraction.service.extractor;
+import com.example.ossdoc.domain.extraction.dto.context.ExtractionContext;
 
 import com.example.ossdoc.domain.extraction.dto.model.ChunkDescriptor;
 import com.example.ossdoc.domain.extraction.dto.model.ChunkResult;
 import com.example.ossdoc.domain.extraction.dto.request.FactsExtractRequest;
 import com.example.ossdoc.domain.extraction.enums.ChunkKind;
-import com.example.ossdoc.domain.extraction.service.support.ExtractionPreflightResult;
+import com.example.ossdoc.domain.extraction.service.support.preflight.ExtractionPreflightResult;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
