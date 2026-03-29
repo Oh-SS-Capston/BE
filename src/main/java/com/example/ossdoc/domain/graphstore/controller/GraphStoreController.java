@@ -16,7 +16,6 @@ import org.springframework.web.bind.annotation.*;
 @RequiredArgsConstructor
 @RequestMapping("/api/v1/graphstore")
 public class GraphStoreController {
-
     private final GraphStoreIngestService graphStoreIngestService;
 
     @PostMapping("/ingest")
