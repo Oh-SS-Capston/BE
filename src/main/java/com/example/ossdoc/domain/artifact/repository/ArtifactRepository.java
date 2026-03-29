@@ -1,4 +1,3 @@
-// domain/artifact/repository/ArtifactRepository.java
 package com.example.ossdoc.domain.artifact.repository;
 
 import com.example.ossdoc.domain.artifact.entity.Artifact;
@@ -8,5 +7,6 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import java.util.Optional;
 
 public interface ArtifactRepository extends JpaRepository<Artifact, Long> {
-    Optional<Artifact> findTopByRun_RunIdAndKindOrderByArtifactIdDesc(String runId, ArtifactKind kind);
+
+    Optional<Artifact> findTopByRun_RunIdAndKindOrderByCreatedAtDesc(String runId, ArtifactKind kind);
 }

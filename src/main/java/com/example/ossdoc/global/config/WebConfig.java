@@ -18,7 +18,6 @@ public class WebConfig {
     private final CorsProperties corsProperties;
 
     @Bean
-    @Primary
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration config = new CorsConfiguration();
 

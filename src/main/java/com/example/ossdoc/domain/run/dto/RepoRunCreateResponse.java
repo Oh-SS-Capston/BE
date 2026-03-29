@@ -1,4 +1,3 @@
-// domain/run/dto/RepoRunCreateResponse.java
 package com.example.ossdoc.domain.run.dto;
 
 import com.example.ossdoc.domain.run.enums.RunStatus;
@@ -12,5 +11,4 @@ public class RepoRunCreateResponse {
     private RunStatus status;
     private String commitSha;
     private String workspaceRoot;
-    private String jobManifestPath;
 }

@@ -1,6 +1,6 @@
 package com.example.ossdoc.domain.graphstore.converter;
 
-import com.example.ossdoc.domain.graphstore.dto.facts.SymbolFactDto;
+import com.example.ossdoc.domain.graphstore.dto.facts.normalized.NormalizedSymbolFact;
 import com.example.ossdoc.domain.graphstore.entity.SymbolEntity;
 import com.example.ossdoc.domain.graphstore.enums.AccessLevel;
 import com.example.ossdoc.domain.graphstore.enums.OriginKind;
@@ -8,13 +8,12 @@ import com.example.ossdoc.domain.graphstore.enums.SymbolKind;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.stereotype.Component;
 
 @Component
 public class FactsSymbolConverter {
 
-    public SymbolEntity toEntity(String symbolId, RepoRun run, SymbolFactDto dto) {
+    public SymbolEntity toEntity(String symbolId, RepoRun run, NormalizedSymbolFact dto) {
         JsonNode modifiers = buildModifiers(dto);
         JsonNode signature = buildSignature(dto);
 
@@ -22,40 +21,40 @@ public class FactsSymbolConverter {
                 symbolId,
                 run,
                 null, // module 미연동
-                toSymbolKind(dto.getKind()),
-                dto.getSymbol(),
+                toSymbolKind(dto.kind()),
+                dto.symbol(),
                 resolveSimpleName(dto),
-                toAccessLevel(dto.getAccess()),
+                toAccessLevel(dto.access()),
                 modifiers,
                 null, // owner는 2차 연결
                 signature,
-                null, // sourceFile 미연동
+                null, // sourceFile은 FileIndex 타입이라 현재는 null
                 null,
                 null,
-                toOriginKind(dto.getOrigin())
+                toOriginKind(dto.origin())
         );
     }
 
-    private JsonNode buildModifiers(SymbolFactDto dto) {
+    private JsonNode buildModifiers(NormalizedSymbolFact dto) {
         var array = JsonNodeFactory.instance.arrayNode();
-        if (dto.getModifiers() != null) {
-            dto.getModifiers().forEach(array::add);
+        if (dto.modifiers() != null) {
+            dto.modifiers().forEach(array::add);
         }
         return array;
     }
 
-    private JsonNode buildSignature(SymbolFactDto dto) {
-        if (dto.getSignature() != null && !dto.getSignature().isNull()) {
-            return dto.getSignature();
+    private JsonNode buildSignature(NormalizedSymbolFact dto) {
+        if (dto.signature() != null && !dto.signature().isNull()) {
+            return dto.signature();
         }
         return JsonNodeFactory.instance.objectNode();
     }
 
-    private String resolveSimpleName(SymbolFactDto dto) {
-        if (dto.getName() != null && !dto.getName().isBlank()) {
-            return dto.getName();
+    private String resolveSimpleName(NormalizedSymbolFact dto) {
+        if (dto.name() != null && !dto.name().isBlank()) {
+            return dto.name();
         }
-        String symbol = dto.getSymbol();
+        String symbol = dto.symbol();
         if (symbol == null || symbol.isBlank()) return null;
         int idx = Math.max(symbol.lastIndexOf('.'), symbol.lastIndexOf('#'));
         return idx >= 0 ? symbol.substring(idx + 1) : symbol;
@@ -66,6 +65,7 @@ public class FactsSymbolConverter {
         return switch (value.trim().toUpperCase()) {
             case "MODULE" -> SymbolKind.MODULE;
             case "PACKAGE" -> SymbolKind.PACKAGE;
+            case "CONSTRUCTOR" -> SymbolKind.CONSTRUCTOR;
             case "METHOD" -> SymbolKind.METHOD;
             case "FIELD" -> SymbolKind.FIELD;
             default -> SymbolKind.TYPE;

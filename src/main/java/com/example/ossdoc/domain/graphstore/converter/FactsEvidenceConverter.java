@@ -1,6 +1,6 @@
 package com.example.ossdoc.domain.graphstore.converter;
 
-import com.example.ossdoc.domain.graphstore.dto.facts.EvidenceFactDto;
+import com.example.ossdoc.domain.graphstore.dto.facts.normalized.NormalizedEvidenceFact;
 import com.example.ossdoc.domain.graphstore.entity.Evidence;
 import com.example.ossdoc.domain.graphstore.enums.EvidenceType;
 import com.example.ossdoc.domain.run.entity.RepoRun;
@@ -9,16 +9,16 @@ import org.springframework.stereotype.Component;
 @Component
 public class FactsEvidenceConverter {
 
-    public Evidence toEntity(RepoRun run, EvidenceFactDto dto) {
+    public Evidence toEntity(RepoRun run, NormalizedEvidenceFact dto) {
         return new Evidence(
                 null,
                 run,
-                toEvidenceType(dto.getType()),
+                toEvidenceType(dto.type()),
                 null, // FileIndex 연동 전이라 null
-                dto.getStartLine(),
-                dto.getEndLine(),
-                dto.getSnippet(),
-                dto.getHash()
+                dto.startLine(),
+                dto.endLine(),
+                dto.snippet(),
+                dto.hash()
         );
     }
 

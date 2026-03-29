@@ -1,6 +1,6 @@
 package com.example.ossdoc.domain.graphstore.converter;
 
-import com.example.ossdoc.domain.graphstore.dto.facts.RelationFactDto;
+import com.example.ossdoc.domain.graphstore.dto.facts.normalized.NormalizedRelationFact;
 import com.example.ossdoc.domain.graphstore.entity.Edge;
 import com.example.ossdoc.domain.graphstore.entity.SymbolEntity;
 import com.example.ossdoc.domain.graphstore.enums.EdgeType;
@@ -14,40 +14,48 @@ import org.springframework.stereotype.Component;
 @Component
 public class FactsEdgeConverter {
 
-    public Edge toEntity(RepoRun run, RelationFactDto dto, SymbolEntity fromSymbol, SymbolEntity toSymbol) {
+    public Edge toEntity(RepoRun run, NormalizedRelationFact dto, SymbolEntity fromSymbol, SymbolEntity toSymbol) {
         JsonNode toRawRef = resolveToRawRef(dto, toSymbol);
         ResolutionStatus resolutionStatus = resolveResolution(dto, toSymbol);
 
         return new Edge(
                 null,
                 run,
-                toEdgeType(dto.getKind()),
+                toEdgeType(dto.kind()),
                 fromSymbol,
                 toSymbol,
                 toRawRef,
-                toOriginKind(dto.getOrigin()),
+                toOriginKind(dto.origin()),
                 resolutionStatus,
-                dto.getConfidenceHint()
+                dto.confidenceHint()
         );
     }
 
-    private JsonNode resolveToRawRef(RelationFactDto dto, SymbolEntity toSymbol) {
-        if (toSymbol != null) return null;
-        if (dto.getDstTypeRef() != null && !dto.getDstTypeRef().isNull()) {
-            return dto.getDstTypeRef();
+    private JsonNode resolveToRawRef(NormalizedRelationFact dto, SymbolEntity toSymbol) {
+        if (toSymbol != null) {
+            return null;
         }
-        if (dto.getDstSymbol() != null && !dto.getDstSymbol().isBlank()) {
+
+        if (dto.dstRawRef() != null && !dto.dstRawRef().isBlank()) {
             var node = JsonNodeFactory.instance.objectNode();
-            node.put("raw", dto.getDstSymbol());
+            node.put("raw", dto.dstRawRef());
             node.put("unresolved", true);
             return node;
         }
+
+        if (dto.dstSymbol() != null && !dto.dstSymbol().isBlank()) {
+            var node = JsonNodeFactory.instance.objectNode();
+            node.put("raw", dto.dstSymbol());
+            node.put("unresolved", true);
+            return node;
+        }
+
         return null;
     }
 
-    private ResolutionStatus resolveResolution(RelationFactDto dto, SymbolEntity toSymbol) {
-        if (dto.getResolution() != null) {
-            return switch (dto.getResolution().trim().toUpperCase()) {
+    private ResolutionStatus resolveResolution(NormalizedRelationFact dto, SymbolEntity toSymbol) {
+        if (dto.resolutionStatus() != null) {
+            return switch (dto.resolutionStatus().trim().toUpperCase()) {
                 case "PARTIAL" -> ResolutionStatus.PARTIAL;
                 case "UNRESOLVED" -> ResolutionStatus.UNRESOLVED;
                 default -> ResolutionStatus.RESOLVED;
@@ -62,11 +70,13 @@ public class FactsEdgeConverter {
             case "CONTAINS" -> EdgeType.CONTAINS;
             case "EXTENDS" -> EdgeType.EXTENDS;
             case "IMPLEMENTS" -> EdgeType.IMPLEMENTS;
+            case "OVERRIDES" -> EdgeType.OVERRIDES;
+            case "ACCESSES_FIELD" -> EdgeType.ACCESSES_FIELD;
             case "HAS_FIELD", "FIELD_TYPE" -> EdgeType.HAS_FIELD;
             case "PARAM", "PARAM_TYPE" -> EdgeType.PARAM;
             case "RETURNS", "RETURN_TYPE" -> EdgeType.RETURNS;
             case "THROWS", "THROWS_TYPE" -> EdgeType.THROWS;
-            case "ANNOTATED_WITH" -> EdgeType.ANNOTATED_WITH;
+            case "ANNOTATED_WITH", "ANNOTATED_BY" -> EdgeType.ANNOTATED_WITH;
             default -> EdgeType.CALLS;
         };
     }

@@ -13,7 +13,7 @@ public enum RunErrorCode implements BaseCode {
     GITHUB_API_FAILED(HttpStatus.BAD_GATEWAY, "RUN_502_001", "Failed to resolve repo info from GitHub."),
     DOWNLOAD_FAILED(HttpStatus.BAD_GATEWAY, "RUN_502_002", "Failed to download repository zip."),
     UNZIP_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "RUN_500_001", "Failed to unzip repository."),
-    MANIFEST_WRITE_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "RUN_500_002", "Failed to write job_manifest.json.");
+    JOB_MANIFEST_WRITE_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "RUN_500_002", "Failed to write job_manifest.json");
 
     private final HttpStatus httpStatus;
     private final String code;
