@@ -75,4 +75,13 @@ public class SymbolEntity extends BaseAuditedEntity {
     @Enumerated(EnumType.STRING)
     @Column(name = "origin", nullable = false)
     private OriginKind origin = OriginKind.AST;
+
+    public void assignOwner(SymbolEntity owner) {
+        this.owner = owner;
+    }
+
+    public void assignSourceSpan(Integer startLine, Integer endLine) {
+        this.sourceStartLine = startLine;
+        this.sourceEndLine = endLine;
+    }
 }
