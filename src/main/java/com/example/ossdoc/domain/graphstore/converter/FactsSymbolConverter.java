@@ -1,6 +1,6 @@
 package com.example.ossdoc.domain.graphstore.converter;
 
-import com.example.ossdoc.domain.graphstore.dto.facts.normalized.NormalizedSymbolFact;
+import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedSymbolFact;
 import com.example.ossdoc.domain.graphstore.entity.SymbolEntity;
 import com.example.ossdoc.domain.graphstore.enums.AccessLevel;
 import com.example.ossdoc.domain.graphstore.enums.OriginKind;

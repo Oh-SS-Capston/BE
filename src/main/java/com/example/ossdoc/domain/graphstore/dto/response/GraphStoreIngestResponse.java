@@ -1,4 +1,4 @@
-package com.example.ossdoc.domain.graphstore.dto;
+package com.example.ossdoc.domain.graphstore.dto.response;
 
 import lombok.Builder;
 import lombok.Getter;

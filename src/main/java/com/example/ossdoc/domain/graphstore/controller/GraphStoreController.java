@@ -2,8 +2,8 @@ package com.example.ossdoc.domain.graphstore.controller;
 
 import com.example.ossdoc.domain.auth.exception.AuthException;
 import com.example.ossdoc.domain.auth.exception.code.AuthErrorCode;
-import com.example.ossdoc.domain.graphstore.dto.GraphStoreIngestRequest;
-import com.example.ossdoc.domain.graphstore.dto.GraphStoreIngestResponse;
+import com.example.ossdoc.domain.graphstore.dto.request.GraphStoreIngestRequest;
+import com.example.ossdoc.domain.graphstore.dto.response.GraphStoreIngestResponse;
 import com.example.ossdoc.domain.graphstore.service.GraphStoreIngestService;
 import com.example.ossdoc.global.apiPayload.ApiResponse;
 import com.example.ossdoc.global.security.jwt.AuthenticatedUser;

@@ -1,4 +1,4 @@
-package com.example.ossdoc.domain.graphstore.dto;
+package com.example.ossdoc.domain.graphstore.dto.request;
 
 import jakarta.validation.constraints.NotBlank;
 import lombok.Getter;

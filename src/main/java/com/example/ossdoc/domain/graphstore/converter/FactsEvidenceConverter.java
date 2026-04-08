@@ -1,6 +1,6 @@
 package com.example.ossdoc.domain.graphstore.converter;
 
-import com.example.ossdoc.domain.graphstore.dto.facts.normalized.NormalizedEvidenceFact;
+import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedEvidenceFact;
 import com.example.ossdoc.domain.graphstore.entity.Evidence;
 import com.example.ossdoc.domain.graphstore.enums.EvidenceType;
 import com.example.ossdoc.domain.run.entity.RepoRun;

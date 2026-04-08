@@ -1,4 +1,4 @@
-package com.example.ossdoc.domain.graphstore.dto.facts.normalized;
+package com.example.ossdoc.domain.graphstore.model.normalized;
 
 import java.math.BigDecimal;
 import java.util.List;

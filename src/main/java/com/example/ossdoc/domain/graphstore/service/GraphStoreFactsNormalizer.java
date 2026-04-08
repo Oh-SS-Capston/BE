@@ -1,9 +1,9 @@
 package com.example.ossdoc.domain.graphstore.service;
 
-import com.example.ossdoc.domain.graphstore.dto.facts.normalized.NormalizedEvidenceFact;
-import com.example.ossdoc.domain.graphstore.dto.facts.normalized.NormalizedFactsDocument;
-import com.example.ossdoc.domain.graphstore.dto.facts.normalized.NormalizedRelationFact;
-import com.example.ossdoc.domain.graphstore.dto.facts.normalized.NormalizedSymbolFact;
+import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedEvidenceFact;
+import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedFactsDocument;
+import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedRelationFact;
+import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedSymbolFact;
 import com.example.ossdoc.domain.graphstore.dto.facts.raw.RawEvidenceFactDto;
 import com.example.ossdoc.domain.graphstore.dto.facts.raw.RawFactsDocumentDto;
 import com.example.ossdoc.domain.graphstore.dto.facts.raw.RawRelationFactDto;

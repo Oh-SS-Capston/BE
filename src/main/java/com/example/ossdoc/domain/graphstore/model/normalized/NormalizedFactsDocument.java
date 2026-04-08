@@ -1,4 +1,4 @@
-package com.example.ossdoc.domain.graphstore.dto.facts.normalized;
+package com.example.ossdoc.domain.graphstore.model.normalized;
 
 import java.util.List;
 import java.util.Map;

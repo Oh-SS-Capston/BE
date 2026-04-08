@@ -1,6 +1,6 @@
 package com.example.ossdoc.domain.graphstore.converter;
 
-import com.example.ossdoc.domain.graphstore.dto.facts.normalized.NormalizedRelationFact;
+import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedRelationFact;
 import com.example.ossdoc.domain.graphstore.entity.Edge;
 import com.example.ossdoc.domain.graphstore.entity.SymbolEntity;
 import com.example.ossdoc.domain.graphstore.enums.EdgeType;
