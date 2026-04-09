@@ -18,6 +18,7 @@ import org.hibernate.type.SqlTypes;
 @Getter
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 @AllArgsConstructor
+
 public class Artifact extends BaseCreatedEntity {
 
     @Id
