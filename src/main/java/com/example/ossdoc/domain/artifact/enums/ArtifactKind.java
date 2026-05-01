@@ -13,6 +13,6 @@ public enum ArtifactKind {
     LLM_API_DOCS,
 
     //군집화 결과물 추가
-    RAKINGS_JSON,
+    RANKINGS_JSON,
     SUBSYSTEMS_JSON
 }
