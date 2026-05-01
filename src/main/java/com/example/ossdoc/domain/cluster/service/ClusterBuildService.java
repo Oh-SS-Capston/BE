@@ -82,8 +82,8 @@ public class ClusterBuildService {
                 run.getRunId(),
                 subsystems.size(),
                 rankingResult.symbolRankings().size(),
-                rankingsArtifact.getId(),
-                subsystemsArtifact.getId()
+                rankingsArtifact.getArtifactId(),
+                subsystemsArtifact.getArtifactId()
         );
     }
 }
