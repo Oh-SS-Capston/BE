@@ -21,4 +21,6 @@ public interface EdgeRepository extends JpaRepository<Edge, Long> {
             String fromSymbolId,
             EdgeType edgeType
     );
+
+    List<Edge> findAllByRun_RunId(String runId);
 }
