@@ -36,9 +36,6 @@ s
 ### VS Code ###
 .vscode/
 
-## application ###
-/src/main/resources/application.yml
-
 # QueryDSL generated sources
 src/main/generated/
 
