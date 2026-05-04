@@ -6,7 +6,7 @@ import lombok.Getter;
 import java.util.List;
 
 @Getter
-@Builder
+@Builder(toBuilder = true)
 public class Subsystem {
     private String subsystemId;
     private String name;

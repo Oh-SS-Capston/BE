@@ -64,7 +64,7 @@ public class ClusterBuildService {
                         "iterations", request.getIterations(),
                         "graphMode", "UNDIRECTED_WEIGHTED_TYPE_GRAPH"
                 ))
-                .subsystems(subsystems)
+                .subsystems(rankingResult.enrichedSubsystems())
                 .build();
 
         RankingsJsonDto rankingsJson = RankingsJsonDto.builder()
