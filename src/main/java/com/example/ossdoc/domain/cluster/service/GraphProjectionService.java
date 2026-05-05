@@ -33,7 +33,7 @@ public class GraphProjectionService {
     public ProjectedGraph loadProjectedGraph(String runId) {
         List<SymbolEntity> typeSymbols;
         try {
-            typeSymbols = symbolRepository.findAllByRun_RunIdAndSymbolKind(runId, SymbolKind.TYPE);
+            typeSymbols = symbolRepository.findAllByRunIdAndSymbolKind(runId, SymbolKind.TYPE);
         } catch (Exception e) {
             throw new ClusterException(ClusterErrorCode.CLUSTER_PROJECTION_FAILED);
         }
@@ -44,7 +44,7 @@ public class GraphProjectionService {
 
         Set<String> publicApiSymbolIds;
         try {
-            publicApiSymbolIds = publicApiEntryRepository.findAllByRun_RunId(runId).stream()
+            publicApiSymbolIds = publicApiEntryRepository.findAllByRunId(runId).stream()
                     .map(PublicApiEntry::getSymbol)
                     .map(SymbolEntity::getSymbolId)
                     .collect(Collectors.toSet());
