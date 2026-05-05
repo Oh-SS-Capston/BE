@@ -3,8 +3,8 @@ package com.example.ossdoc.domain.cluster.service;
 import com.example.ossdoc.domain.artifact.entity.Artifact;
 import com.example.ossdoc.domain.artifact.enums.ArtifactKind;
 import com.example.ossdoc.domain.artifact.service.ArtifactService;
-import com.example.ossdoc.domain.cluster.dto.output.RankingsJsonDto;
-import com.example.ossdoc.domain.cluster.dto.output.SubsystemsJsonDto;
+import com.example.ossdoc.domain.cluster.artifact.output.RankingsJson;
+import com.example.ossdoc.domain.cluster.artifact.output.SubsystemsJson;
 import com.example.ossdoc.domain.cluster.exception.ClusterException;
 import com.example.ossdoc.domain.cluster.exception.code.ClusterErrorCode;
 import com.example.ossdoc.domain.run.entity.RepoRun;
@@ -20,7 +20,7 @@ public class ClusterArtifactPublisher {
     private final ArtifactService artifactService;
     private final ObjectMapper objectMapper;
 
-    public Artifact publishRankings(RepoRun run, RankingsJsonDto dto) {
+    public Artifact publishRankings(RepoRun run, RankingsJson dto) {
         try {
             JsonNode content = objectMapper.valueToTree(dto);
             return artifactService.saveJsonArtifact(
@@ -37,7 +37,7 @@ public class ClusterArtifactPublisher {
         }
     }
 
-    public Artifact publishSubsystems(RepoRun run, SubsystemsJsonDto dto) {
+    public Artifact publishSubsystems(RepoRun run, SubsystemsJson dto) {
         try {
             JsonNode content = objectMapper.valueToTree(dto);
             return artifactService.saveJsonArtifact(

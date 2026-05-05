@@ -1,8 +1,8 @@
 package com.example.ossdoc.domain.cluster.service;
 
 import com.example.ossdoc.domain.artifact.entity.Artifact;
-import com.example.ossdoc.domain.cluster.dto.output.RankingsJsonDto;
-import com.example.ossdoc.domain.cluster.dto.output.SubsystemsJsonDto;
+import com.example.ossdoc.domain.cluster.artifact.output.RankingsJson;
+import com.example.ossdoc.domain.cluster.artifact.output.SubsystemsJson;
 import com.example.ossdoc.domain.cluster.dto.request.ClusterBuildRequest;
 import com.example.ossdoc.domain.cluster.dto.response.ClusterBuildResponse;
 import com.example.ossdoc.domain.cluster.exception.ClusterException;
@@ -86,7 +86,7 @@ public class ClusterBuildService {
         }
 
         try {
-            SubsystemsJsonDto subsystemsJson = SubsystemsJsonDto.builder()
+            SubsystemsJson subsystemsJson = SubsystemsJson.builder()
                     .schemaVersion("1.0")
                     .runId(run.getRunId())
                     .generatedAt(OffsetDateTime.now())
@@ -99,7 +99,7 @@ public class ClusterBuildService {
                     .subsystems(subsystems)
                     .build();
 
-            RankingsJsonDto rankingsJson = RankingsJsonDto.builder()
+            RankingsJson rankingsJson = RankingsJson.builder()
                     .schemaVersion("1.0")
                     .runId(run.getRunId())
                     .generatedAt(OffsetDateTime.now())

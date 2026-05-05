@@ -1,4 +1,4 @@
-package com.example.ossdoc.domain.cluster.dto.output;
+package com.example.ossdoc.domain.cluster.artifact.output;
 
 import com.example.ossdoc.domain.cluster.model.subsystem.Subsystem;
 import lombok.Builder;
@@ -10,7 +10,7 @@ import java.util.Map;
 
 @Getter
 @Builder
-public class SubsystemsJsonDto {
+public class SubsystemsJson {
     private String schemaVersion;
     private String runId;
     private OffsetDateTime generatedAt;

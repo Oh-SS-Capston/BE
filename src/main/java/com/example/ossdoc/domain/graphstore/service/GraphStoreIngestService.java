@@ -176,7 +176,7 @@ public class GraphStoreIngestService {
                 continue;
             }
 
-            SymbolEntity existing = symbolRepository.findByRun_RunIdAndQualifiedName(run.getRunId(), dto.symbol())
+            SymbolEntity existing = symbolRepository.findByRunIdAndQualifiedName(run.getRunId(), dto.symbol())
                     .orElse(null);
 
             SymbolEntity symbol;

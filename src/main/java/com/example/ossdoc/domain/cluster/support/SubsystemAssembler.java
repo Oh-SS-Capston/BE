@@ -1,15 +1,14 @@
-package com.example.ossdoc.domain.cluster.service;
+package com.example.ossdoc.domain.cluster.support;
 
 import com.example.ossdoc.domain.cluster.model.ProjectedGraph;
 import com.example.ossdoc.domain.cluster.model.ProjectedNode;
 import com.example.ossdoc.domain.cluster.model.subsystem.Subsystem;
-import com.example.ossdoc.domain.cluster.support.PackageTokenExtractor;
 import lombok.RequiredArgsConstructor;
-import org.springframework.stereotype.Service;
+import org.springframework.stereotype.Component;
 
 import java.util.*;
 
-@Service
+@Component
 @RequiredArgsConstructor
 public class SubsystemAssembler {
 
