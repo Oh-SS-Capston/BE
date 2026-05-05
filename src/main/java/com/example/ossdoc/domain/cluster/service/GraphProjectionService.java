@@ -1,5 +1,7 @@
 package com.example.ossdoc.domain.cluster.service;
 
+import com.example.ossdoc.domain.cluster.exception.ClusterException;
+import com.example.ossdoc.domain.cluster.exception.code.ClusterErrorCode;
 import com.example.ossdoc.domain.cluster.model.ProjectedEdge;
 import com.example.ossdoc.domain.cluster.model.ProjectedGraph;
 import com.example.ossdoc.domain.cluster.model.ProjectedNode;
@@ -29,18 +31,32 @@ public class GraphProjectionService {
     private final EdgeWeightPolicy edgeWeightPolicy;
 
     public ProjectedGraph loadProjectedGraph(String runId) {
-        List<SymbolEntity> typeSymbols = symbolRepository.findAllByRun_RunIdAndSymbolKind(runId, SymbolKind.TYPE);
-        Set<String> publicApiSymbolIds = publicApiEntryRepository.findAllByRun_RunId(runId).stream()
-                .map(PublicApiEntry::getSymbol)
-                .map(SymbolEntity::getSymbolId)
-                .collect(Collectors.toSet());
+        List<SymbolEntity> typeSymbols;
+        try {
+            typeSymbols = symbolRepository.findAllByRun_RunIdAndSymbolKind(runId, SymbolKind.TYPE);
+        } catch (Exception e) {
+            throw new ClusterException(ClusterErrorCode.CLUSTER_PROJECTION_FAILED);
+        }
+
+        if (typeSymbols == null || typeSymbols.isEmpty()) {
+            throw new ClusterException(ClusterErrorCode.CLUSTER_GRAPH_EMPTY);
+        }
+
+        Set<String> publicApiSymbolIds;
+        try {
+            publicApiSymbolIds = publicApiEntryRepository.findAllByRun_RunId(runId).stream()
+                    .map(PublicApiEntry::getSymbol)
+                    .map(SymbolEntity::getSymbolId)
+                    .collect(Collectors.toSet());
+        } catch (Exception e) {
+            throw new ClusterException(ClusterErrorCode.CLUSTER_PROJECTION_FAILED);
+        }
 
         List<ProjectedNode> nodes = new ArrayList<>();
         Map<String, Integer> nodeIndexMap = new HashMap<>();
 
         for (int i = 0; i < typeSymbols.size(); i++) {
             SymbolEntity symbol = typeSymbols.get(i);
-
             String packageName = extractPackageName(symbol.getQualifiedName());
 
             nodes.add(ProjectedNode.builder()
@@ -55,7 +71,12 @@ public class GraphProjectionService {
             nodeIndexMap.put(symbol.getSymbolId(), i);
         }
 
-        List<Edge> allEdges = edgeRepository.findAllByRun_RunId(runId);
+        List<Edge> allEdges;
+        try {
+            allEdges = edgeRepository.findAllByRun_RunId(runId);
+        } catch (Exception e) {
+            throw new ClusterException(ClusterErrorCode.CLUSTER_PROJECTION_FAILED);
+        }
 
         Map<String, Double> undirectedWeightMap = new HashMap<>();
 
@@ -67,11 +88,7 @@ public class GraphProjectionService {
             Integer fromIndex = nodeIndexMap.get(edge.getFromSymbol().getSymbolId());
             Integer toIndex = nodeIndexMap.get(edge.getToSymbol().getSymbolId());
 
-            if (fromIndex == null || toIndex == null) {
-                continue;
-            }
-
-            if (fromIndex.equals(toIndex)) {
+            if (fromIndex == null || toIndex == null || fromIndex.equals(toIndex)) {
                 continue;
             }
 
