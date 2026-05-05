@@ -10,5 +10,9 @@ public enum ArtifactKind {
     LLM_REFINED_RULES,
     LLM_SCENARIO_SPECS,
     LLM_SUBSYSTEM_SUMMARIES,
-    LLM_API_DOCS
+    LLM_API_DOCS,
+
+    //군집화 결과물 추가
+    RANKINGS_JSON,
+    SUBSYSTEMS_JSON
 }
