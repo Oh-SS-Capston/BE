@@ -1,12 +1,13 @@
 package com.example.ossdoc.domain.cluster.service;
 
-import com.example.ossdoc.domain.cluster.dto.output.SubsystemsJsonDto;
+import com.example.ossdoc.domain.cluster.artifact.output.SubsystemsJsonDto;
 import com.example.ossdoc.domain.artifact.entity.Artifact;
 import com.example.ossdoc.domain.cluster.dto.request.ClusterBuildRequest;
 import com.example.ossdoc.domain.cluster.dto.response.ClusterBuildResponse;
 import com.example.ossdoc.domain.cluster.model.CommunityResult;
 import com.example.ossdoc.domain.cluster.model.ProjectedGraph;
 import com.example.ossdoc.domain.cluster.model.subsystem.Subsystem;
+import com.example.ossdoc.domain.cluster.support.SubsystemAssembler;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import org.junit.jupiter.api.DisplayName;
