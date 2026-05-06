@@ -79,7 +79,7 @@ class GraphProjectionServiceTest {
         when(edge2.getResolution()).thenReturn(ResolutionStatus.RESOLVED);
         when(edge2.getConfidence()).thenReturn(new BigDecimal("0.5"));
 
-        when(edgeRepository.findAllByRun_RunId("run-1"))
+        when(edgeRepository.findAllByRunRunId("run-1"))
                 .thenReturn(List.of(edge1, edge2));
 
         // when

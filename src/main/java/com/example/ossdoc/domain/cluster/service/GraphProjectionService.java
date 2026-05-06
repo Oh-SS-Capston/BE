@@ -73,7 +73,7 @@ public class GraphProjectionService {
 
         List<Edge> allEdges;
         try {
-            allEdges = edgeRepository.findAllByRun_RunId(runId);
+            allEdges = edgeRepository.findAllByRunRunId(runId);
         } catch (Exception e) {
             throw new ClusterException(ClusterErrorCode.CLUSTER_PROJECTION_FAILED);
         }
