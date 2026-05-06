@@ -24,6 +24,7 @@ import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -33,10 +34,36 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 @Service
+@Slf4j
 @RequiredArgsConstructor
 @Transactional(readOnly = true)
 public class ClassMapBuildService {
     private static final Set<String> HIDDEN_PACKAGE_TOKENS = Set.of("internal", "impl", "support", "generated", "test");
+    private static final List<String> NON_PRODUCTION_PATH_MARKERS = List.of(
+            "/src/test/",
+            "/src/it/",
+            "/src/integrationtest/",
+            "/src/integration-test/",
+            "/example/",
+            "/examples/",
+            "/sample/",
+            "/samples/",
+            "/demo/",
+            "/demos/"
+    );
+    private static final Set<String> NON_PRODUCTION_PACKAGE_TOKENS = Set.of(
+            "test",
+            "tests",
+            "it",
+            "example",
+            "examples",
+            "sample",
+            "samples",
+            "demo",
+            "demos",
+            "benchmark",
+            "benchmarks"
+    );
     private static final List<EdgeType> INCLUDED_EDGE_TYPES = List.of(
             EdgeType.EXTENDS,
             EdgeType.IMPLEMENTS,
@@ -225,9 +252,15 @@ public class ClassMapBuildService {
     private FilterResult filterCandidateTypes(List<SymbolEntity> typeSymbols, Set<String> publicApiTypeIds) {
         int hiddenByAccess = 0;
         int hiddenByPackage = 0;
+        int hiddenByNonProduction = 0;
         LinkedHashSet<String> candidateTypeIds = new LinkedHashSet<>();
 
         for (SymbolEntity type : typeSymbols) {
+            if (isNonProductionType(type)) {
+                hiddenByNonProduction++;
+                continue;
+            }
+
             boolean forceInclude = publicApiTypeIds.contains(type.getSymbolId());
             boolean visibleApi = isPublicOrProtected(type.getAccess());
             if (!forceInclude && !visibleApi) {
@@ -244,7 +277,14 @@ public class ClassMapBuildService {
             candidateTypeIds.add(type.getSymbolId());
         }
 
-        return new FilterResult(candidateTypeIds, hiddenByAccess, hiddenByPackage);
+        log.info(
+                "[CLASSMAP] candidate filter summary. hiddenByAccess={}, hiddenByPackage={}, hiddenByNonProduction={}",
+                hiddenByAccess,
+                hiddenByPackage,
+                hiddenByNonProduction
+        );
+
+        return new FilterResult(candidateTypeIds, hiddenByAccess, hiddenByPackage + hiddenByNonProduction);
     }
 
     /**
@@ -707,6 +747,55 @@ public class ClassMapBuildService {
             }
         }
         return false;
+    }
+
+    /**
+     * 테스트/예제 성격 타입인지 source path, 패키지, 이름 규칙으로 판별한다.
+     */
+    private boolean isNonProductionType(SymbolEntity type) {
+        if (type == null) {
+            return false;
+        }
+
+        String sourcePath = normalizePath(type.getSourceFile() == null ? null : type.getSourceFile().getPath());
+        if (sourcePath != null) {
+            for (String marker : NON_PRODUCTION_PATH_MARKERS) {
+                if (sourcePath.contains(marker)) {
+                    return true;
+                }
+            }
+        }
+
+        String packageName = extractPackageName(type);
+        if (packageName != null && !packageName.isBlank()) {
+            String[] tokens = packageName.toLowerCase(Locale.ROOT).split("\\.");
+            for (String token : tokens) {
+                if (NON_PRODUCTION_PACKAGE_TOKENS.contains(token)) {
+                    return true;
+                }
+            }
+        }
+
+        String simpleName = trimToNull(type.getSimpleName());
+        if (simpleName != null) {
+            String lower = simpleName.toLowerCase(Locale.ROOT);
+            if (lower.endsWith("test") || lower.endsWith("tests") || lower.endsWith("testcase")) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * 운영체제 경로 구분자를 통일해 비교 가능한 경로 문자열로 정규화한다.
+     */
+    private String normalizePath(String rawPath) {
+        String value = trimToNull(rawPath);
+        if (value == null) {
+            return null;
+        }
+        return value.replace('\\', '/').toLowerCase(Locale.ROOT);
     }
 
     /**
