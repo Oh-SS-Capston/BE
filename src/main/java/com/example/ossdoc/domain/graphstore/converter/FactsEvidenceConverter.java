@@ -1,20 +1,24 @@
 package com.example.ossdoc.domain.graphstore.converter;
 
-import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedEvidenceFact;
 import com.example.ossdoc.domain.graphstore.entity.Evidence;
 import com.example.ossdoc.domain.graphstore.enums.EvidenceType;
+import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedEvidenceFact;
+import com.example.ossdoc.domain.module.entity.FileIndex;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import org.springframework.stereotype.Component;
 
 @Component
 public class FactsEvidenceConverter {
 
-    public Evidence toEntity(RepoRun run, NormalizedEvidenceFact dto) {
+    /**
+     * 정규화된 evidence fact를 Evidence 엔티티로 변환한다.
+     */
+    public Evidence toEntity(RepoRun run, NormalizedEvidenceFact dto, FileIndex fileIndex) {
         return new Evidence(
                 null,
                 run,
                 toEvidenceType(dto.type()),
-                null, // FileIndex 연동 전이라 null
+                fileIndex,
                 dto.startLine(),
                 dto.endLine(),
                 dto.snippet(),
@@ -22,6 +26,9 @@ public class FactsEvidenceConverter {
         );
     }
 
+    /**
+     * facts 원본 type 문자열을 내부 EvidenceType으로 변환한다.
+     */
     private EvidenceType toEvidenceType(String value) {
         if (value == null) return EvidenceType.AST;
         return switch (value.trim().toUpperCase()) {

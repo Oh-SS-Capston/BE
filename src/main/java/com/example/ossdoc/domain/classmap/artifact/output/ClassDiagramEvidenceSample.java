@@ -7,6 +7,7 @@ import lombok.Getter;
 @Getter
 @Builder
 public class ClassDiagramEvidenceSample {
+    private String filePath;
     private Integer startLine;
     private Integer endLine;
     private String snippet;

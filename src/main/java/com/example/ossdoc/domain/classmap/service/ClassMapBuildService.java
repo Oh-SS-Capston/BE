@@ -638,6 +638,7 @@ public class ClassMapBuildService {
                 .filter(Objects::nonNull)
                 .limit(2)
                 .map(evidence -> ClassDiagramEvidenceSample.builder()
+                        .filePath(evidence.getFile() == null ? null : evidence.getFile().getPath())
                         .startLine(evidence.getStartLine())
                         .endLine(evidence.getEndLine())
                         .snippet(trimSnippet(evidence.getSnippet()))

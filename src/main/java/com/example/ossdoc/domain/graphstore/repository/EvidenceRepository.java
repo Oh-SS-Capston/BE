@@ -21,4 +21,16 @@ public interface EvidenceRepository extends JpaRepository<Evidence, Long> {
             Integer endLine,
             String snippet
     );
+
+    /**
+     * 파일까지 일치하는 evidence 중복 여부를 확인한다.
+     */
+    List<Evidence> findByRun_RunIdAndEvidenceTypeAndFile_FileIdAndStartLineAndEndLineAndSnippet(
+            String runId,
+            EvidenceType evidenceType,
+            Long fileId,
+            Integer startLine,
+            Integer endLine,
+            String snippet
+    );
 }
