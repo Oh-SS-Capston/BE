@@ -7,6 +7,7 @@ public record NormalizedFactsDocument(
         String schemaVersion,
         Map<String, NormalizedEvidenceFact> evidence,
         List<NormalizedSymbolFact> symbols,
-        List<NormalizedRelationFact> relations
+        List<NormalizedRelationFact> relations,
+        int observationCount
 ) {
 }

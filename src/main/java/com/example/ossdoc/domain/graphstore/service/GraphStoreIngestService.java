@@ -29,6 +29,7 @@ import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -38,6 +39,7 @@ import java.util.Map;
 import java.util.Objects;
 
 @Service
+@Slf4j
 @RequiredArgsConstructor
 public class GraphStoreIngestService {
 
@@ -82,6 +84,10 @@ public class GraphStoreIngestService {
 
         NormalizedFactsDocument facts = graphStoreFactsNormalizer.normalize(rawFacts);
         validateFacts(facts);
+        if (facts.observationCount() > 0) {
+            log.warn("[GRAPHSTORE] observations {}건이 감지되었지만 현재 ingest 대상에는 포함되지 않습니다. runId={}",
+                    facts.observationCount(), run.getRunId());
+        }
 
         EvidenceSaveResult evidenceSaveResult = saveEvidence(run, facts);
         SymbolSaveResult symbolSaveResult = saveSymbols(run, facts, evidenceSaveResult.evidenceMap());
@@ -95,6 +101,8 @@ public class GraphStoreIngestService {
                 .edgesSaved(edgeSaveResult.edgesSaved())
                 .edgeEvidenceSaved(edgeSaveResult.edgeEvidenceSaved())
                 .skippedRelations(edgeSaveResult.skippedRelations())
+                .observationsDetected(facts.observationCount())
+                .observationsIgnored(facts.observationCount())
                 .build();
     }
 

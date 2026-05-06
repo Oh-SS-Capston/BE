@@ -79,7 +79,7 @@ public class ClassMapBuildService {
         try {
             List<SymbolEntity> typeSymbols = symbolRepository.findAllByRunIdAndSymbolKind(run.getRunId(), SymbolKind.TYPE);
             List<SymbolEntity> methodSymbols = symbolRepository.findAllByRunIdAndSymbolKind(run.getRunId(), SymbolKind.METHOD);
-            List<Edge> allEdges = edgeRepository.findAllByRunRunId(run.getRunId());
+            List<Edge> allEdges = edgeRepository.findAllByRun_RunId(run.getRunId());
             Set<String> publicApiTypeIds = loadPublicApiTypeIds(run.getRunId());
             Map<String, RankingSignal> rankingSignals = loadRankingSignals(run.getRunId());
 
