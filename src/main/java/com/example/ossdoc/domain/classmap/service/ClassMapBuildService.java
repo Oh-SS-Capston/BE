@@ -2,8 +2,6 @@
 package com.example.ossdoc.domain.classmap.service;
 
 import com.example.ossdoc.domain.artifact.entity.Artifact;
-import com.example.ossdoc.domain.artifact.enums.ArtifactKind;
-import com.example.ossdoc.domain.artifact.repository.ArtifactRepository;
 import com.example.ossdoc.domain.classmap.artifact.output.*;
 import com.example.ossdoc.domain.classmap.dto.request.ClassMapBuildRequest;
 import com.example.ossdoc.domain.classmap.dto.response.ClassMapBuildResponse;
@@ -56,7 +54,6 @@ public class ClassMapBuildService {
     );
 
     private final RepoRunRepository repoRunRepository;
-    private final ArtifactRepository artifactRepository;
     private final SymbolRepository symbolRepository;
     private final EdgeRepository edgeRepository;
     private final EdgeEvidenceRepository edgeEvidenceRepository;
@@ -80,7 +77,6 @@ public class ClassMapBuildService {
             List<SymbolEntity> methodSymbols = symbolRepository.findAllByRunIdAndSymbolKind(run.getRunId(), SymbolKind.METHOD);
             List<Edge> allEdges = edgeRepository.findAllByRun_RunId(run.getRunId());
             Set<String> publicApiTypeIds = publicApiEntrySyncService.ensureTypeEntries(run, typeSymbols);
-            Map<String, RankingSignal> rankingSignals = loadRankingSignals(run.getRunId());
 
             Map<String, SymbolEntity> typeById = typeSymbols.stream()
                     .collect(Collectors.toMap(SymbolEntity::getSymbolId, s -> s, (a, b) -> a, LinkedHashMap::new));
@@ -98,11 +94,16 @@ public class ClassMapBuildService {
             Set<String> configTypeIds = detectConfigTypes(candidateTypeIds, typeById, allEdges);
             Set<String> extensionPointTypeIds = detectExtensionPointTypes(candidateTypeIds, typeById, allEdges);
 
-            Map<String, Double> scoreByTypeId = buildTypeScoreMap(candidateTypeIds, aggregateResult.degreeByTypeId(), rankingSignals);
+            Map<String, Double> scoreByTypeId = buildTypeScoreMap(
+                    candidateTypeIds,
+                    aggregateResult.degreeByTypeId(),
+                    publicApiTypeIds,
+                    configTypeIds,
+                    extensionPointTypeIds
+            );
             Set<String> startHereTypeIds = pickStartHereTypes(
                     candidateTypeIds,
                     scoreByTypeId,
-                    rankingSignals,
                     request.safeStartHereTopN()
             );
 
@@ -115,7 +116,7 @@ public class ClassMapBuildService {
                     .map(Map.Entry::getKey)
                     .collect(Collectors.toSet());
 
-            Comparator<String> nodePriority = nodePriorityComparator(scoreByTypeId, rankingSignals, typeById);
+            Comparator<String> nodePriority = nodePriorityComparator(scoreByTypeId, typeById);
             LinkedHashSet<String> selectedTypeIds = selectTypeIds(
                     candidateTypeIds,
                     publicApiTypeIds,
@@ -216,39 +217,6 @@ public class ClassMapBuildService {
         } catch (Exception e) {
             throw new ClassMapException(ClassMapErrorCode.CLASS_MAP_BUILD_FAILED);
         }
-    }
-
-    /**
-     * 최신 rankings artifact에서 타입 우선순위 신호(rank/score)를 읽는다.
-     */
-    private Map<String, RankingSignal> loadRankingSignals(String runId) {
-        Optional<Artifact> rankingsArtifact = artifactRepository
-                .findTopByRun_RunIdAndKindOrderByCreatedAtDesc(runId, ArtifactKind.RANKINGS_JSON);
-        if (rankingsArtifact.isEmpty()) {
-            return Map.of();
-        }
-
-        JsonNode root = rankingsArtifact.get().getMeta();
-        if (root == null || root.isNull()) {
-            return Map.of();
-        }
-
-        JsonNode symbolRankings = root.path("symbolRankings");
-        if (!symbolRankings.isArray()) {
-            return Map.of();
-        }
-
-        Map<String, RankingSignal> result = new HashMap<>();
-        for (JsonNode item : symbolRankings) {
-            String symbolId = trimToNull(item.path("symbolId").asText(null));
-            if (symbolId == null) {
-                continue;
-            }
-            int rank = item.path("rank").asInt(Integer.MAX_VALUE);
-            double score = item.path("score").asDouble(0.0);
-            result.put(symbolId, new RankingSignal(rank, score));
-        }
-        return result;
     }
 
     /**
@@ -427,17 +395,24 @@ public class ClassMapBuildService {
     private Map<String, Double> buildTypeScoreMap(
             Set<String> candidateTypeIds,
             Map<String, Integer> degreeByTypeId,
-            Map<String, RankingSignal> rankingSignals
+            Set<String> publicApiTypeIds,
+            Set<String> configTypeIds,
+            Set<String> extensionPointTypeIds
     ) {
         Map<String, Double> scoreByTypeId = new HashMap<>();
         for (String typeId : candidateTypeIds) {
-            RankingSignal rankingSignal = rankingSignals.get(typeId);
-            if (rankingSignal != null) {
-                scoreByTypeId.put(typeId, rankingSignal.score);
-                continue;
-            }
             int degree = degreeByTypeId.getOrDefault(typeId, 0);
-            scoreByTypeId.put(typeId, (double) degree);
+            double score = degree;
+            if (publicApiTypeIds.contains(typeId)) {
+                score += 3.0;
+            }
+            if (configTypeIds.contains(typeId)) {
+                score += 1.5;
+            }
+            if (extensionPointTypeIds.contains(typeId)) {
+                score += 1.5;
+            }
+            scoreByTypeId.put(typeId, score);
         }
         return scoreByTypeId;
     }
@@ -448,18 +423,8 @@ public class ClassMapBuildService {
     private Set<String> pickStartHereTypes(
             Set<String> candidateTypeIds,
             Map<String, Double> scoreByTypeId,
-            Map<String, RankingSignal> rankingSignals,
             int topN
     ) {
-        if (!rankingSignals.isEmpty()) {
-            return rankingSignals.entrySet().stream()
-                    .filter(entry -> candidateTypeIds.contains(entry.getKey()))
-                    .sorted(Comparator.comparingInt(entry -> entry.getValue().rank))
-                    .limit(topN)
-                    .map(Map.Entry::getKey)
-                    .collect(Collectors.toCollection(LinkedHashSet::new));
-        }
-
         return candidateTypeIds.stream()
                 .sorted((left, right) -> Double.compare(
                         scoreByTypeId.getOrDefault(right, 0.0),
@@ -474,24 +439,9 @@ public class ClassMapBuildService {
      */
     private Comparator<String> nodePriorityComparator(
             Map<String, Double> scoreByTypeId,
-            Map<String, RankingSignal> rankingSignals,
             Map<String, SymbolEntity> typeById
     ) {
         return (left, right) -> {
-            RankingSignal leftRank = rankingSignals.get(left);
-            RankingSignal rightRank = rankingSignals.get(right);
-
-            if (leftRank != null && rightRank != null) {
-                int byRank = Integer.compare(leftRank.rank, rightRank.rank);
-                if (byRank != 0) {
-                    return byRank;
-                }
-            } else if (leftRank != null) {
-                return -1;
-            } else if (rightRank != null) {
-                return 1;
-            }
-
             int byScore = Double.compare(
                     scoreByTypeId.getOrDefault(right, 0.0),
                     scoreByTypeId.getOrDefault(left, 0.0)
@@ -889,9 +839,6 @@ public class ClassMapBuildService {
      */
     private String edgeKey(String sourceId, String targetId, EdgeType edgeType) {
         return sourceId + "|" + edgeType.name() + "|" + targetId;
-    }
-
-    private record RankingSignal(int rank, double score) {
     }
 
     private record FilterResult(Set<String> candidateTypeIds, int hiddenByAccessCount, int hiddenByPackageCount) {
