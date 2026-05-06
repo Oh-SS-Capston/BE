@@ -3,17 +3,16 @@ package com.example.ossdoc.domain.extraction.enums;
 import com.fasterxml.jackson.annotation.JsonValue;
 
 /**
- * symbol 자체의 생성 출처
+ * 파이프라인 프로파일
  */
-public enum SymbolOriginKind {
-    AST("ast"),
-    BYTECODE("bytecode"),
-    GENERATED("generated"),
-    AST_AND_BYTECODE("ast_and_bytecode");
+public enum PipelineProfile {
+    FULL("full"),
+    LIBRARY("library"),
+    MINIMAL("minimal");
 
     private final String code;
 
-    SymbolOriginKind(String code) {
+    PipelineProfile(String code) {
         this.code = code;
     }
 

@@ -3,18 +3,16 @@ package com.example.ossdoc.domain.extraction.enums;
 import com.fasterxml.jackson.annotation.JsonValue;
 
 /**
- * evidence 종류
+ * 분류 수행 주체
  */
-public enum EvidenceKind {
-    AST("AST"),
-    BYTECODE("BYTECODE"),
-    RESOURCE("RESOURCE"),
-    README("README"),
-    TEST("TEST");
+public enum ClassifiedBy {
+    HEURISTIC("heuristic"),
+    USER("user"),
+    LLM("llm");
 
     private final String code;
 
-    EvidenceKind(String code) {
+    ClassifiedBy(String code) {
         this.code = code;
     }
 

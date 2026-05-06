@@ -5,8 +5,6 @@ import com.example.ossdoc.domain.extraction.dto.model.ExtractionMeta;
 import com.example.ossdoc.domain.extraction.dto.model.FactsDocument;
 import com.example.ossdoc.domain.extraction.dto.model.StatsMeta;
 import com.example.ossdoc.domain.extraction.dto.response.FactsExtractResponse;
-import com.example.ossdoc.domain.extraction.enums.BytecodeAvailability;
-import com.example.ossdoc.domain.extraction.enums.ExtractionMode;
 import com.example.ossdoc.domain.extraction.service.support.util.FactsSchema;
 import org.springframework.stereotype.Component;
 
@@ -28,9 +26,7 @@ public class FactsResponseFactory {
         return FactsExtractResponse.builder()
                 .runId(context.runId())
                 .mode(resolveMode(extraction))
-                .bytecodeAvailability(resolveBytecodeAvailability(extraction))
                 .schemaVersion(resolveSchemaVersion(document))
-                .scannedModules(resolveScannedModules(extraction))
                 .stats(resolveStats(document))
                 .warnings(mergeWarnings(context.additionalWarnings(), extraction == null ? null : extraction.warnings()))
                 .build();
@@ -41,19 +37,8 @@ public class FactsResponseFactory {
         return (v == null || v.isBlank()) ? FactsSchema.SCHEMA_VERSION : v;
     }
 
-    private ExtractionMode resolveMode(ExtractionMeta extraction) {
+    private String resolveMode(ExtractionMeta extraction) {
         return extraction == null ? null : extraction.mode();
-    }
-
-    private BytecodeAvailability resolveBytecodeAvailability(ExtractionMeta extraction) {
-        return extraction == null ? null : extraction.bytecodeAvailability();
-    }
-
-    private List<String> resolveScannedModules(ExtractionMeta extraction) {
-        if (extraction == null || extraction.scannedModules() == null) {
-            return List.of();
-        }
-        return List.copyOf(extraction.scannedModules());
     }
 
     private StatsMeta resolveStats(FactsDocument document) {

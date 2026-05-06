@@ -10,11 +10,10 @@ import com.example.ossdoc.domain.extraction.dto.model.RelationTable;
 import com.example.ossdoc.domain.extraction.dto.model.StatsMeta;
 import com.example.ossdoc.domain.extraction.dto.model.SymbolFact;
 import com.example.ossdoc.domain.extraction.dto.model.SymbolTable;
-import com.example.ossdoc.domain.extraction.enums.ChunkKind;
 import com.example.ossdoc.domain.extraction.enums.ChunkStatus;
 import com.example.ossdoc.domain.extraction.enums.ObservationKind;
 import com.example.ossdoc.domain.extraction.enums.RelationKind;
-import com.example.ossdoc.domain.extraction.enums.SymbolFactKind;
+import com.example.ossdoc.domain.extraction.enums.SymbolKind;
 import com.example.ossdoc.domain.extraction.service.support.merge.StatsAccumulator;
 import com.example.ossdoc.domain.extraction.service.support.util.WarningCollector;
 
@@ -30,42 +29,32 @@ import java.util.Objects;
  */
 public class ExtractionSink {
 
-    private final ChunkKind chunkKind;
-
     private final Map<String, EvidenceFact> evidence = new LinkedHashMap<>();
-    private final Map<String, SymbolFact> modules = new LinkedHashMap<>();
-    private final Map<String, SymbolFact> packages = new LinkedHashMap<>();
     private final Map<String, SymbolFact> types = new LinkedHashMap<>();
     private final Map<String, SymbolFact> constructors = new LinkedHashMap<>();
     private final Map<String, SymbolFact> methods = new LinkedHashMap<>();
     private final Map<String, SymbolFact> fields = new LinkedHashMap<>();
 
-    private final Map<String, RelationFact> contains = new LinkedHashMap<>();
-    private final Map<String, RelationFact> extendsRelations = new LinkedHashMap<>();
-    private final Map<String, RelationFact> implementsRelations = new LinkedHashMap<>();
-    private final Map<String, RelationFact> overrides = new LinkedHashMap<>();
     private final Map<String, RelationFact> calls = new LinkedHashMap<>();
+    private final Map<String, RelationFact> overrides = new LinkedHashMap<>();
     private final Map<String, RelationFact> accessesField = new LinkedHashMap<>();
-    private final Map<String, RelationFact> fieldType = new LinkedHashMap<>();
-    private final Map<String, RelationFact> paramType = new LinkedHashMap<>();
-    private final Map<String, RelationFact> returnType = new LinkedHashMap<>();
-    private final Map<String, RelationFact> throwsType = new LinkedHashMap<>();
-    private final Map<String, RelationFact> annotatedBy = new LinkedHashMap<>();
 
     private final Map<String, ObservationFact> diInjectionSites = new LinkedHashMap<>();
     private final Map<String, ObservationFact> diProviders = new LinkedHashMap<>();
     private final Map<String, ObservationFact> spiProviders = new LinkedHashMap<>();
-    private final Map<String, ObservationFact> eventPublish = new LinkedHashMap<>();
-    private final Map<String, ObservationFact> eventSubscribe = new LinkedHashMap<>();
-    private final Map<String, ObservationFact> reflectionUses = new LinkedHashMap<>();
+    private final Map<String, ObservationFact> eventPublications = new LinkedHashMap<>();
+    private final Map<String, ObservationFact> eventSubscriptions = new LinkedHashMap<>();
+    private final Map<String, ObservationFact> reflectionSites = new LinkedHashMap<>();
+    private final Map<String, ObservationFact> httpEndpoints = new LinkedHashMap<>();
+    private final Map<String, ObservationFact> scheduling = new LinkedHashMap<>();
+    private final Map<String, ObservationFact> asyncMethods = new LinkedHashMap<>();
     private final Map<String, ObservationFact> configWiring = new LinkedHashMap<>();
 
     private final StatsAccumulator stats = new StatsAccumulator();
     private final WarningCollector warnings = new WarningCollector();
     private final WarningCollector errors = new WarningCollector();
 
-    public ExtractionSink(ChunkKind chunkKind) {
-        this.chunkKind = chunkKind;
+    public ExtractionSink() {
     }
 
     public void addWarning(String warning) {
@@ -82,11 +71,11 @@ public class ExtractionSink {
     }
 
     public void recordFileScanned() {
-        stats.recordScannedFileKind(chunkKind);
+        stats.recordFileScanned();
     }
 
     public void recordFileParsed() {
-        stats.recordParsedFileKind(chunkKind);
+        stats.recordFileParsed();
     }
 
     public void recordFileSkipped() {
@@ -99,6 +88,10 @@ public class ExtractionSink {
 
     public void recordUnresolvedTypeRef() {
         stats.recordUnresolvedTypeRef();
+    }
+
+    public void recordTotalTypeRef() {
+        stats.recordTotalTypeRef();
     }
 
     public void addEvidence(EvidenceFact fact) {
@@ -154,29 +147,22 @@ public class ExtractionSink {
         List<String> errorList = errors.snapshot();
 
         boolean hasProducedFacts = !evidence.isEmpty()
-                || !modules.isEmpty()
-                || !packages.isEmpty()
                 || !types.isEmpty()
                 || !constructors.isEmpty()
                 || !methods.isEmpty()
                 || !fields.isEmpty()
-                || !contains.isEmpty()
-                || !extendsRelations.isEmpty()
-                || !implementsRelations.isEmpty()
-                || !overrides.isEmpty()
                 || !calls.isEmpty()
+                || !overrides.isEmpty()
                 || !accessesField.isEmpty()
-                || !fieldType.isEmpty()
-                || !paramType.isEmpty()
-                || !returnType.isEmpty()
-                || !throwsType.isEmpty()
-                || !annotatedBy.isEmpty()
                 || !diInjectionSites.isEmpty()
                 || !diProviders.isEmpty()
                 || !spiProviders.isEmpty()
-                || !eventPublish.isEmpty()
-                || !eventSubscribe.isEmpty()
-                || !reflectionUses.isEmpty()
+                || !eventPublications.isEmpty()
+                || !eventSubscriptions.isEmpty()
+                || !reflectionSites.isEmpty()
+                || !httpEndpoints.isEmpty()
+                || !scheduling.isEmpty()
+                || !asyncMethods.isEmpty()
                 || !configWiring.isEmpty();
 
         ChunkStatus status;
@@ -205,33 +191,26 @@ public class ExtractionSink {
         return new ExtractedFacts(
                 Map.copyOf(evidence),
                 SymbolTable.builder()
-                        .modules(List.copyOf(modules.values()))
-                        .packages(List.copyOf(packages.values()))
                         .types(List.copyOf(types.values()))
                         .constructors(List.copyOf(constructors.values()))
                         .methods(List.copyOf(methods.values()))
                         .fields(List.copyOf(fields.values()))
                         .build(),
                 RelationTable.builder()
-                        .contains(List.copyOf(contains.values()))
-                        .extendsRelations(List.copyOf(extendsRelations.values()))
-                        .implementsRelations(List.copyOf(implementsRelations.values()))
-                        .overrides(List.copyOf(overrides.values()))
                         .calls(List.copyOf(calls.values()))
+                        .overrides(List.copyOf(overrides.values()))
                         .accessesField(List.copyOf(accessesField.values()))
-                        .fieldType(List.copyOf(fieldType.values()))
-                        .paramType(List.copyOf(paramType.values()))
-                        .returnType(List.copyOf(returnType.values()))
-                        .throwsType(List.copyOf(throwsType.values()))
-                        .annotatedBy(List.copyOf(annotatedBy.values()))
                         .build(),
                 ObservationTable.builder()
                         .diInjectionSites(List.copyOf(diInjectionSites.values()))
                         .diProviders(List.copyOf(diProviders.values()))
                         .spiProviders(List.copyOf(spiProviders.values()))
-                        .eventPublish(List.copyOf(eventPublish.values()))
-                        .eventSubscribe(List.copyOf(eventSubscribe.values()))
-                        .reflectionUses(List.copyOf(reflectionUses.values()))
+                        .eventPublications(List.copyOf(eventPublications.values()))
+                        .eventSubscriptions(List.copyOf(eventSubscriptions.values()))
+                        .reflectionSites(List.copyOf(reflectionSites.values()))
+                        .httpEndpoints(List.copyOf(httpEndpoints.values()))
+                        .scheduling(List.copyOf(scheduling.values()))
+                        .asyncMethods(List.copyOf(asyncMethods.values()))
                         .configWiring(List.copyOf(configWiring.values()))
                         .build(),
                 stats.snapshot(),
@@ -242,8 +221,6 @@ public class ExtractionSink {
 
     private List<SymbolFact> allSymbols() {
         List<SymbolFact> items = new ArrayList<>();
-        items.addAll(modules.values());
-        items.addAll(packages.values());
         items.addAll(types.values());
         items.addAll(constructors.values());
         items.addAll(methods.values());
@@ -253,17 +230,9 @@ public class ExtractionSink {
 
     private List<RelationFact> allRelations() {
         List<RelationFact> items = new ArrayList<>();
-        items.addAll(contains.values());
-        items.addAll(extendsRelations.values());
-        items.addAll(implementsRelations.values());
-        items.addAll(overrides.values());
         items.addAll(calls.values());
+        items.addAll(overrides.values());
         items.addAll(accessesField.values());
-        items.addAll(fieldType.values());
-        items.addAll(paramType.values());
-        items.addAll(returnType.values());
-        items.addAll(throwsType.values());
-        items.addAll(annotatedBy.values());
         return List.copyOf(items);
     }
 
@@ -272,17 +241,18 @@ public class ExtractionSink {
         items.addAll(diInjectionSites.values());
         items.addAll(diProviders.values());
         items.addAll(spiProviders.values());
-        items.addAll(eventPublish.values());
-        items.addAll(eventSubscribe.values());
-        items.addAll(reflectionUses.values());
+        items.addAll(eventPublications.values());
+        items.addAll(eventSubscriptions.values());
+        items.addAll(reflectionSites.values());
+        items.addAll(httpEndpoints.values());
+        items.addAll(scheduling.values());
+        items.addAll(asyncMethods.values());
         items.addAll(configWiring.values());
         return List.copyOf(items);
     }
 
-    private Map<String, SymbolFact> symbolBucket(SymbolFactKind kind) {
+    private Map<String, SymbolFact> symbolBucket(SymbolKind kind) {
         return switch (kind) {
-            case MODULE -> modules;
-            case PACKAGE -> packages;
             case TYPE -> types;
             case CONSTRUCTOR -> constructors;
             case METHOD -> methods;
@@ -292,17 +262,9 @@ public class ExtractionSink {
 
     private Map<String, RelationFact> relationBucket(RelationKind kind) {
         return switch (kind) {
-            case CONTAINS -> contains;
-            case EXTENDS -> extendsRelations;
-            case IMPLEMENTS -> implementsRelations;
-            case OVERRIDES -> overrides;
             case CALLS -> calls;
+            case OVERRIDES -> overrides;
             case ACCESSES_FIELD -> accessesField;
-            case FIELD_TYPE -> fieldType;
-            case PARAM_TYPE -> paramType;
-            case RETURN_TYPE -> returnType;
-            case THROWS_TYPE -> throwsType;
-            case ANNOTATED_BY -> annotatedBy;
         };
     }
 
@@ -311,9 +273,12 @@ public class ExtractionSink {
             case DI_INJECTION_SITE -> diInjectionSites;
             case DI_PROVIDER -> diProviders;
             case SPI_PROVIDER -> spiProviders;
-            case EVENT_PUBLISH -> eventPublish;
-            case EVENT_SUBSCRIBE -> eventSubscribe;
-            case REFLECTION_USE -> reflectionUses;
+            case EVENT_PUBLICATION -> eventPublications;
+            case EVENT_SUBSCRIPTION -> eventSubscriptions;
+            case REFLECTION_SITE -> reflectionSites;
+            case HTTP_ENDPOINT -> httpEndpoints;
+            case SCHEDULED_TASK -> scheduling;
+            case ASYNC_METHOD -> asyncMethods;
             case CONFIG_WIRING -> configWiring;
         };
     }
@@ -333,7 +298,6 @@ public class ExtractionSink {
                 fact.kind().code(),
                 nullSafe(fact.siteSymbol()),
                 nullSafe(fact.targetSymbol()),
-                nullSafe(fact.serviceInterfaceSymbol()),
                 nullSafe(fact.targetTypeRef() == null ? null : fact.targetTypeRef().raw()),
                 nullSafe(fact.note())
         );

@@ -36,12 +36,6 @@ public record ObservationFact(
         @JsonProperty("target_type_ref")
         TypeRef targetTypeRef,
 
-        /**
-         * SPI 같이 서비스 인터페이스 심볼이 따로 있을 때 사용
-         */
-        @JsonProperty("service_interface_symbol")
-        String serviceInterfaceSymbol,
-
         @JsonProperty("note")
         String note,
 
@@ -50,6 +44,9 @@ public record ObservationFact(
 
         @JsonProperty("origin")
         FactOriginKind origin,
+
+        @JsonProperty("confidence_hint")
+        Double confidenceHint,
 
         @JsonProperty("attrs")
         Map<String, Object> attrs

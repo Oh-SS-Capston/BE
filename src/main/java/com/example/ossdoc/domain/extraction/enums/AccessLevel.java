@@ -8,7 +8,7 @@ import com.fasterxml.jackson.annotation.JsonValue;
 public enum AccessLevel {
     PUBLIC("public"),
     PROTECTED("protected"),
-    PACKAGE("package"),
+    PACKAGE_PRIVATE("package_private"),
     PRIVATE("private");
 
     private final String code;

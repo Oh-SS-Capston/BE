@@ -12,12 +12,6 @@ import java.util.List;
 @Builder
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public record SymbolTable(
-        @JsonProperty("modules")
-        List<SymbolFact> modules,
-
-        @JsonProperty("packages")
-        List<SymbolFact> packages,
-
         @JsonProperty("types")
         List<SymbolFact> types,
 

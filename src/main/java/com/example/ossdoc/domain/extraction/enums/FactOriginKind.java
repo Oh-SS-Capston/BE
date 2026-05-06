@@ -6,11 +6,11 @@ import com.fasterxml.jackson.annotation.JsonValue;
  * relation / observation 등의 출처
  */
 public enum FactOriginKind {
-    AST("AST"),
-    BYTECODE("BYTECODE"),
-    MERGED("MERGED"),
-    OBSERVED("OBSERVED"),
-    RESOURCE("RESOURCE");
+    AST("ast"),
+    BYTECODE("bytecode"),
+    AST_AND_BYTECODE("ast_and_bytecode"),
+    OBSERVED("observed"),
+    RESOURCE("resource");
 
     private final String code;
 

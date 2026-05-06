@@ -13,7 +13,7 @@ import com.fasterxml.jackson.annotation.JsonValue;
  *   <li>{@code NON_SEALED} — sealed 계층에서 하위 클래스의 상속 제한을 해제하는 수정자</li>
  * </ul>
  */
-public enum ModifierKind {
+public enum Modifier {
     STATIC("static"),
     FINAL("final"),
     ABSTRACT("abstract"),
@@ -28,7 +28,7 @@ public enum ModifierKind {
 
     private final String code;
 
-    ModifierKind(String code) {
+    Modifier(String code) {
         this.code = code;
     }
 

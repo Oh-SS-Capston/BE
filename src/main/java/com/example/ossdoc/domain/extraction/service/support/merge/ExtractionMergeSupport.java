@@ -16,7 +16,7 @@ import com.example.ossdoc.domain.extraction.dto.model.SymbolTable;
 import com.example.ossdoc.domain.extraction.enums.MergeStage;
 import com.example.ossdoc.domain.extraction.enums.ObservationKind;
 import com.example.ossdoc.domain.extraction.enums.RelationKind;
-import com.example.ossdoc.domain.extraction.enums.SymbolFactKind;
+import com.example.ossdoc.domain.extraction.enums.SymbolKind;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -212,7 +212,6 @@ public class ExtractionMergeSupport {
                 safeCode(observation.kind()),
                 nullToEmpty(observation.siteSymbol()),
                 nullToEmpty(observation.targetSymbol()),
-                nullToEmpty(observation.serviceInterfaceSymbol()),
                 nullToEmpty(observation.note())
         );
     }
@@ -228,29 +227,19 @@ public class ExtractionMergeSupport {
     private SymbolTable toSymbolTable(Collection<SymbolFact> values) {
         List<SymbolFact> all = values == null ? List.of() : new ArrayList<>(values);
         return SymbolTable.builder()
-                .modules(filterSymbols(all, SymbolFactKind.MODULE))
-                .packages(filterSymbols(all, SymbolFactKind.PACKAGE))
-                .types(filterSymbols(all, SymbolFactKind.TYPE))
-                .constructors(filterSymbols(all, SymbolFactKind.CONSTRUCTOR))
-                .methods(filterSymbols(all, SymbolFactKind.METHOD))
-                .fields(filterSymbols(all, SymbolFactKind.FIELD))
+                .types(filterSymbols(all, SymbolKind.TYPE))
+                .constructors(filterSymbols(all, SymbolKind.CONSTRUCTOR))
+                .methods(filterSymbols(all, SymbolKind.METHOD))
+                .fields(filterSymbols(all, SymbolKind.FIELD))
                 .build();
     }
 
     private RelationTable toRelationTable(Collection<RelationFact> values) {
         List<RelationFact> all = values == null ? List.of() : new ArrayList<>(values);
         return RelationTable.builder()
-                .contains(filterRelations(all, RelationKind.CONTAINS))
-                .extendsRelations(filterRelations(all, RelationKind.EXTENDS))
-                .implementsRelations(filterRelations(all, RelationKind.IMPLEMENTS))
-                .overrides(filterRelations(all, RelationKind.OVERRIDES))
                 .calls(filterRelations(all, RelationKind.CALLS))
+                .overrides(filterRelations(all, RelationKind.OVERRIDES))
                 .accessesField(filterRelations(all, RelationKind.ACCESSES_FIELD))
-                .fieldType(filterRelations(all, RelationKind.FIELD_TYPE))
-                .paramType(filterRelations(all, RelationKind.PARAM_TYPE))
-                .returnType(filterRelations(all, RelationKind.RETURN_TYPE))
-                .throwsType(filterRelations(all, RelationKind.THROWS_TYPE))
-                .annotatedBy(filterRelations(all, RelationKind.ANNOTATED_BY))
                 .build();
     }
 
@@ -260,14 +249,17 @@ public class ExtractionMergeSupport {
                 .diInjectionSites(filterObservations(all, ObservationKind.DI_INJECTION_SITE))
                 .diProviders(filterObservations(all, ObservationKind.DI_PROVIDER))
                 .spiProviders(filterObservations(all, ObservationKind.SPI_PROVIDER))
-                .eventPublish(filterObservations(all, ObservationKind.EVENT_PUBLISH))
-                .eventSubscribe(filterObservations(all, ObservationKind.EVENT_SUBSCRIBE))
-                .reflectionUses(filterObservations(all, ObservationKind.REFLECTION_USE))
+                .eventPublications(filterObservations(all, ObservationKind.EVENT_PUBLICATION))
+                .eventSubscriptions(filterObservations(all, ObservationKind.EVENT_SUBSCRIPTION))
+                .reflectionSites(filterObservations(all, ObservationKind.REFLECTION_SITE))
+                .httpEndpoints(filterObservations(all, ObservationKind.HTTP_ENDPOINT))
+                .scheduling(filterObservations(all, ObservationKind.SCHEDULED_TASK))
+                .asyncMethods(filterObservations(all, ObservationKind.ASYNC_METHOD))
                 .configWiring(filterObservations(all, ObservationKind.CONFIG_WIRING))
                 .build();
     }
 
-    private List<SymbolFact> filterSymbols(List<SymbolFact> values, SymbolFactKind kind) {
+    private List<SymbolFact> filterSymbols(List<SymbolFact> values, SymbolKind kind) {
         return values.stream()
                 .filter(Objects::nonNull)
                 .filter(value -> value.kind() == kind)

@@ -43,33 +43,26 @@ public record ExtractedFacts(
         return new ExtractedFacts(
                 Map.of(),
                 SymbolTable.builder()
-                        .modules(List.of())
-                        .packages(List.of())
                         .types(List.of())
                         .constructors(List.of())
                         .methods(List.of())
                         .fields(List.of())
                         .build(),
                 RelationTable.builder()
-                        .contains(List.of())
-                        .extendsRelations(List.of())
-                        .implementsRelations(List.of())
-                        .overrides(List.of())
                         .calls(List.of())
+                        .overrides(List.of())
                         .accessesField(List.of())
-                        .fieldType(List.of())
-                        .paramType(List.of())
-                        .returnType(List.of())
-                        .throwsType(List.of())
-                        .annotatedBy(List.of())
                         .build(),
                 ObservationTable.builder()
                         .diInjectionSites(List.of())
                         .diProviders(List.of())
                         .spiProviders(List.of())
-                        .eventPublish(List.of())
-                        .eventSubscribe(List.of())
-                        .reflectionUses(List.of())
+                        .eventPublications(List.of())
+                        .eventSubscriptions(List.of())
+                        .reflectionSites(List.of())
+                        .httpEndpoints(List.of())
+                        .scheduling(List.of())
+                        .asyncMethods(List.of())
                         .configWiring(List.of())
                         .build(),
                 StatsMeta.builder().build(),
@@ -104,56 +97,41 @@ public record ExtractedFacts(
         return new ExtractedFacts(
                 mergedEvidence,
                 SymbolTable.builder()
-                        .modules(mergeLists(this.symbols.modules(), other.symbols.modules()))
-                        .packages(mergeLists(this.symbols.packages(), other.symbols.packages()))
                         .types(mergeLists(this.symbols.types(), other.symbols.types()))
                         .constructors(mergeLists(this.symbols.constructors(), other.symbols.constructors()))
                         .methods(mergeLists(this.symbols.methods(), other.symbols.methods()))
                         .fields(mergeLists(this.symbols.fields(), other.symbols.fields()))
                         .build(),
                 RelationTable.builder()
-                        .contains(mergeLists(this.relations.contains(), other.relations.contains()))
-                        .extendsRelations(mergeLists(this.relations.extendsRelations(), other.relations.extendsRelations()))
-                        .implementsRelations(mergeLists(this.relations.implementsRelations(), other.relations.implementsRelations()))
-                        .overrides(mergeLists(this.relations.overrides(), other.relations.overrides()))
                         .calls(mergeLists(this.relations.calls(), other.relations.calls()))
+                        .overrides(mergeLists(this.relations.overrides(), other.relations.overrides()))
                         .accessesField(mergeLists(this.relations.accessesField(), other.relations.accessesField()))
-                        .fieldType(mergeLists(this.relations.fieldType(), other.relations.fieldType()))
-                        .paramType(mergeLists(this.relations.paramType(), other.relations.paramType()))
-                        .returnType(mergeLists(this.relations.returnType(), other.relations.returnType()))
-                        .throwsType(mergeLists(this.relations.throwsType(), other.relations.throwsType()))
-                        .annotatedBy(mergeLists(this.relations.annotatedBy(), other.relations.annotatedBy()))
                         .build(),
                 ObservationTable.builder()
                         .diInjectionSites(mergeLists(this.observations.diInjectionSites(), other.observations.diInjectionSites()))
                         .diProviders(mergeLists(this.observations.diProviders(), other.observations.diProviders()))
                         .spiProviders(mergeLists(this.observations.spiProviders(), other.observations.spiProviders()))
-                        .eventPublish(mergeLists(this.observations.eventPublish(), other.observations.eventPublish()))
-                        .eventSubscribe(mergeLists(this.observations.eventSubscribe(), other.observations.eventSubscribe()))
-                        .reflectionUses(mergeLists(this.observations.reflectionUses(), other.observations.reflectionUses()))
+                        .eventPublications(mergeLists(this.observations.eventPublications(), other.observations.eventPublications()))
+                        .eventSubscriptions(mergeLists(this.observations.eventSubscriptions(), other.observations.eventSubscriptions()))
+                        .reflectionSites(mergeLists(this.observations.reflectionSites(), other.observations.reflectionSites()))
+                        .httpEndpoints(mergeLists(this.observations.httpEndpoints(), other.observations.httpEndpoints()))
+                        .scheduling(mergeLists(this.observations.scheduling(), other.observations.scheduling()))
+                        .asyncMethods(mergeLists(this.observations.asyncMethods(), other.observations.asyncMethods()))
                         .configWiring(mergeLists(this.observations.configWiring(), other.observations.configWiring()))
                         .build(),
                 StatsMeta.builder()
                         .filesScanned(this.stats.filesScanned() + other.stats.filesScanned())
                         .filesParsed(this.stats.filesParsed() + other.stats.filesParsed())
                         .filesSkipped(this.stats.filesSkipped() + other.stats.filesSkipped())
-                        .astFilesScanned(this.stats.astFilesScanned() + other.stats.astFilesScanned())
-                        .classFilesScanned(this.stats.classFilesScanned() + other.stats.classFilesScanned())
-                        .astFilesParsed(this.stats.astFilesParsed() + other.stats.astFilesParsed())
-                        .classFilesParsed(this.stats.classFilesParsed() + other.stats.classFilesParsed())
-                        .chunksTotal(this.stats.chunksTotal() + other.stats.chunksTotal())
-                        .chunksSucceeded(this.stats.chunksSucceeded() + other.stats.chunksSucceeded())
-                        .chunksFailed(this.stats.chunksFailed() + other.stats.chunksFailed())
-                        .chunksPartial(this.stats.chunksPartial() + other.stats.chunksPartial())
                         .types(this.stats.types() + other.stats.types())
                         .constructors(this.stats.constructors() + other.stats.constructors())
                         .methods(this.stats.methods() + other.stats.methods())
                         .fields(this.stats.fields() + other.stats.fields())
-                        .edgeCandidates(this.stats.edgeCandidates() + other.stats.edgeCandidates())
                         .relations(this.stats.relations() + other.stats.relations())
                         .observations(this.stats.observations() + other.stats.observations())
                         .evidence(this.stats.evidence() + other.stats.evidence())
-                        .unresolvedTypeRefs(this.stats.unresolvedTypeRefs() + other.stats.unresolvedTypeRefs())
+                        .unresolvedTypeRefsTotal(this.stats.unresolvedTypeRefsTotal() + other.stats.unresolvedTypeRefsTotal())
+                        .totalTypeRefsTotal(this.stats.totalTypeRefsTotal() + other.stats.totalTypeRefsTotal())
                         .errors(this.stats.errors() + other.stats.errors())
                         .build(),
                 mergeLists(this.warnings, other.warnings),
@@ -163,8 +141,6 @@ public record ExtractedFacts(
 
     private List<SymbolFact> mergeSymbolLists() {
         List<SymbolFact> merged = new ArrayList<>();
-        merged.addAll(symbols.modules());
-        merged.addAll(symbols.packages());
         merged.addAll(symbols.types());
         merged.addAll(symbols.constructors());
         merged.addAll(symbols.methods());
@@ -174,17 +150,9 @@ public record ExtractedFacts(
 
     private List<RelationFact> mergeRelationLists() {
         List<RelationFact> merged = new ArrayList<>();
-        merged.addAll(relations.contains());
-        merged.addAll(relations.extendsRelations());
-        merged.addAll(relations.implementsRelations());
-        merged.addAll(relations.overrides());
         merged.addAll(relations.calls());
+        merged.addAll(relations.overrides());
         merged.addAll(relations.accessesField());
-        merged.addAll(relations.fieldType());
-        merged.addAll(relations.paramType());
-        merged.addAll(relations.returnType());
-        merged.addAll(relations.throwsType());
-        merged.addAll(relations.annotatedBy());
         return List.copyOf(merged);
     }
 
@@ -193,9 +161,12 @@ public record ExtractedFacts(
         merged.addAll(observations.diInjectionSites());
         merged.addAll(observations.diProviders());
         merged.addAll(observations.spiProviders());
-        merged.addAll(observations.eventPublish());
-        merged.addAll(observations.eventSubscribe());
-        merged.addAll(observations.reflectionUses());
+        merged.addAll(observations.eventPublications());
+        merged.addAll(observations.eventSubscriptions());
+        merged.addAll(observations.reflectionSites());
+        merged.addAll(observations.httpEndpoints());
+        merged.addAll(observations.scheduling());
+        merged.addAll(observations.asyncMethods());
         merged.addAll(observations.configWiring());
         return List.copyOf(merged);
     }

@@ -1,5 +1,6 @@
 package com.example.ossdoc.domain.extraction.service.support.util;
 
+import com.example.ossdoc.domain.extraction.dto.model.ParamFact;
 import com.example.ossdoc.domain.extraction.dto.model.SignatureFact;
 import com.example.ossdoc.domain.extraction.dto.model.TypeRef;
 
@@ -49,7 +50,7 @@ public final class SymbolIdFactory {
         }
 
         return signature.params().stream()
-                .map(SymbolIdFactory::renderTypeRef)
+                .map(param -> renderTypeRef(param.typeRef()))
                 .collect(Collectors.joining(","));
     }
 

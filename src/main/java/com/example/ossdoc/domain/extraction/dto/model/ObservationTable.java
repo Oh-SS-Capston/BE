@@ -21,14 +21,23 @@ public record ObservationTable(
         @JsonProperty("spi_providers")
         List<ObservationFact> spiProviders,
 
-        @JsonProperty("event_publish")
-        List<ObservationFact> eventPublish,
+        @JsonProperty("event_publications")
+        List<ObservationFact> eventPublications,
 
-        @JsonProperty("event_subscribe")
-        List<ObservationFact> eventSubscribe,
+        @JsonProperty("event_subscriptions")
+        List<ObservationFact> eventSubscriptions,
 
-        @JsonProperty("reflection_uses")
-        List<ObservationFact> reflectionUses,
+        @JsonProperty("reflection_sites")
+        List<ObservationFact> reflectionSites,
+
+        @JsonProperty("http_endpoints")
+        List<ObservationFact> httpEndpoints,
+
+        @JsonProperty("scheduling")
+        List<ObservationFact> scheduling,
+
+        @JsonProperty("async_methods")
+        List<ObservationFact> asyncMethods,
 
         @JsonProperty("config_wiring")
         List<ObservationFact> configWiring

@@ -10,6 +10,7 @@ import com.example.ossdoc.domain.extraction.dto.model.ChunkingPolicy;
 import com.example.ossdoc.domain.extraction.dto.model.ExtractionAggregate;
 import com.example.ossdoc.domain.extraction.dto.model.FactsDocument;
 import com.example.ossdoc.domain.extraction.dto.model.JobMeta;
+import com.example.ossdoc.domain.extraction.dto.model.ModuleRef;
 import com.example.ossdoc.domain.extraction.dto.model.ModuleMergeResult;
 import com.example.ossdoc.domain.extraction.dto.model.RootMergeResult;
 import com.example.ossdoc.domain.extraction.dto.model.StatsMeta;
@@ -17,6 +18,7 @@ import com.example.ossdoc.domain.extraction.dto.request.FactsExtractRequest;
 import com.example.ossdoc.domain.extraction.dto.response.FactsExtractResponse;
 import com.example.ossdoc.domain.extraction.enums.BuildStatus;
 import com.example.ossdoc.domain.extraction.enums.ChunkStatus;
+import com.example.ossdoc.domain.extraction.enums.ExtractionMode;
 import com.example.ossdoc.domain.extraction.exception.ExtractionErrorCode;
 import com.example.ossdoc.domain.extraction.exception.ExtractionException;
 import com.example.ossdoc.domain.extraction.service.composer.FactsComposer;
@@ -110,7 +112,7 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
                 .preflightResult(preflightResult)
                 .chunkingPolicy(prepared.chunkingPolicy())
                 .jobMeta(prepared.jobMeta())
-                .buildMeta(buildBuildMeta(prepared.buildManifest(), preflightResult, prepared.repoRoot()))
+                .buildMeta(buildBuildMeta(prepared.buildManifest(), preflightResult, prepared.repoRoot(), preflightResult.resolvedMode()))
                 .engineVersions(prepared.engineVersions())
                 .build();
 
@@ -159,14 +161,9 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
                 facadeContext.jobMeta(),
                 facadeContext.buildMeta(),
                 preflightResult.resolvedMode(),
-                preflightResult.bytecodeAvailability() == null ? null : preflightResult.bytecodeAvailability().availability(),
                 facadeContext.startedAt(),
                 finishedAt,
-                facadeContext.engineVersions(),
                 warnings.snapshot(),
-                scannedModules(preflightResult),
-                scannedSourceRoots(preflightResult, facadeContext.repoRoot()),
-                scannedBytecodeRoots(preflightResult, facadeContext.repoRoot()),
                 request.includeObservations(),
                 aggregate
         ));
@@ -237,14 +234,12 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
                 .chunkingPolicy(ChunkingPolicy.standard())
                 .jobMeta(jobMeta)
                 .buildMeta(BuildMeta.builder()
-                        .status(BuildStatus.UNKNOWN.code())
-                        .mode(null)
+                        .status(BuildStatus.FAILED.code())
                         .tool(null)
-                        .javaVersionUsed(null)
+                        .javaVersionUsed(System.getProperty("java.specification.version"))
                         .classpathFingerprint(null)
+                        .asmUnavailable(true)
                         .modules(List.of())
-                        .bytecodeRoots(List.of())
-                        .classpathEntries(List.of())
                         .build())
                 .engineVersions(engineVersions)
                 .build();
@@ -471,8 +466,6 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
                 .observations(List.of())
                 .stats(StatsMeta.builder()
                         .filesScanned(chunk == null ? 0L : chunk.fileCount())
-                        .chunksTotal(1L)
-                        .chunksFailed(1L)
                         .errors(1L)
                         .build())
                 .warnings(List.of())
@@ -515,58 +508,44 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
     private BuildMeta buildBuildMeta(
             BuildManifest buildManifest,
             ExtractionPreflightResult preflightResult,
-            Path repoRoot
+            Path repoRoot,
+            ExtractionMode mode
     ) {
+        boolean asmUnavailable = mode == null
+                || mode == ExtractionMode.AST_ONLY
+                || mode == ExtractionMode.AST_PLUS_PARTIAL_BYTECODE;
+
         if (buildManifest == null) {
             return BuildMeta.builder()
-                    .status(BuildStatus.UNKNOWN.code())
-                    .mode(null)
+                    .status(BuildStatus.FAILED.code())
                     .tool(null)
-                    .javaVersionUsed(null)
+                    .javaVersionUsed(System.getProperty("java.specification.version"))
                     .classpathFingerprint(null)
+                    .asmUnavailable(true)
                     .modules(List.of())
-                    .bytecodeRoots(List.of())
-                    .classpathEntries(List.of())
                     .build();
         }
 
         List<BuildModuleManifest> modules = buildManifest.getModules() == null ? List.of() : buildManifest.getModules();
-        List<String> moduleIds = modules.stream()
-                .map(this::safeModuleId)
+        List<ModuleRef> moduleRefs = modules.stream()
+                .map(m -> ModuleRef.builder()
+                        .name(safeModuleId(m))
+                        .path(null)
+                        .build())
                 .distinct()
                 .toList();
 
-        List<String> bytecodeRoots = modules.stream()
-                .map(BuildModuleManifest::getClassesDirs)
-                .filter(Objects::nonNull)
-                .flatMap(List::stream)
-                .filter(value -> value != null && !value.isBlank())
-                .map(value -> normalizeRepoRelative(repoRoot, value))
-                .distinct()
-                .toList();
-
-        List<String> classpathEntries = modules.stream()
-                .map(BuildModuleManifest::getCompileClasspath)
-                .filter(Objects::nonNull)
-                .flatMap(List::stream)
-                .filter(value -> value != null && !value.isBlank())
-                .map(value -> normalizeRepoRelative(repoRoot, value))
-                .distinct()
-                .toList();
-
-        String mode = resolveBuildMode(buildManifest);
-        String status = resolveBuildStatus(mode);
+        String buildMode = resolveBuildMode(buildManifest);
+        String status = resolveBuildStatus(buildMode);
         String tool = buildManifest.getBuildTool() == null ? null : buildManifest.getBuildTool().name();
 
         return BuildMeta.builder()
                 .status(status)
-                .mode(mode)
                 .tool(tool)
-                .javaVersionUsed(null)
+                .javaVersionUsed(System.getProperty("java.specification.version"))
                 .classpathFingerprint(classpathFingerprint(preflightResult))
-                .modules(moduleIds)
-                .bytecodeRoots(bytecodeRoots)
-                .classpathEntries(classpathEntries)
+                .asmUnavailable(asmUnavailable)
+                .modules(moduleRefs)
                 .build();
     }
 
@@ -579,15 +558,15 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
 
     private String resolveBuildStatus(String buildMode) {
         if (buildMode == null || buildMode.isBlank()) {
-            return BuildStatus.UNKNOWN.code();
+            return BuildStatus.FAILED.code();
         }
 
         return switch (buildMode) {
             case "FULL", "COMPILE_ONLY" -> BuildStatus.SUCCESS.code();
             case "SOURCE_ONLY" -> BuildStatus.PARTIAL.code();
             case "FAILED" -> BuildStatus.FAILED.code();
-            case "SKIPPED" -> BuildStatus.SKIPPED.code();
-            default -> BuildStatus.UNKNOWN.code();
+            case "SKIPPED" -> BuildStatus.FAILED.code();
+            default -> BuildStatus.FAILED.code();
         };
     }
 

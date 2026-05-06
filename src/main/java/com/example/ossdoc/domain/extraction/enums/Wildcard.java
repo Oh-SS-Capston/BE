@@ -3,17 +3,16 @@ package com.example.ossdoc.domain.extraction.enums;
 import com.fasterxml.jackson.annotation.JsonValue;
 
 /**
- * symbol 자체의 생성 출처
+ * 와일드카드 타입 종류
  */
-public enum SymbolOriginKind {
-    AST("ast"),
-    BYTECODE("bytecode"),
-    GENERATED("generated"),
-    AST_AND_BYTECODE("ast_and_bytecode");
+public enum Wildcard {
+    UNBOUNDED("unbounded"),
+    EXTENDS("extends"),
+    SUPER("super");
 
     private final String code;
 
-    SymbolOriginKind(String code) {
+    Wildcard(String code) {
         this.code = code;
     }
 

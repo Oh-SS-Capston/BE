@@ -13,10 +13,10 @@ import java.util.List;
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public record SignatureFact(
         /**
-         * 메서드/생성자 파라미터 타입들
+         * 메서드/생성자 파라미터
          */
         @JsonProperty("params")
-        List<TypeRef> params,
+        List<ParamFact> params,
 
         /**
          * 메서드 반환 타입

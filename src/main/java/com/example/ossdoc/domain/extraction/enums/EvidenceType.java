@@ -3,17 +3,18 @@ package com.example.ossdoc.domain.extraction.enums;
 import com.fasterxml.jackson.annotation.JsonValue;
 
 /**
- * symbol 자체의 생성 출처
+ * evidence 종류
  */
-public enum SymbolOriginKind {
+public enum EvidenceType {
     AST("ast"),
     BYTECODE("bytecode"),
-    GENERATED("generated"),
-    AST_AND_BYTECODE("ast_and_bytecode");
+    RESOURCE("resource"),
+    README("readme"),
+    TEST("test");
 
     private final String code;
 
-    SymbolOriginKind(String code) {
+    EvidenceType(String code) {
         this.code = code;
     }
 

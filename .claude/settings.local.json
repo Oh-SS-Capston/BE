@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find C:Oh-SSBEsrctestjavacomexampleossdocdomainextraction -type f -name *.java)",
+      "Bash(grep -n \"^import\\\\|^$\" /c/Oh-SS/BE/src/test/java/com/example/ossdoc/domain/extraction/ExtractionPipelineIntegrationTest.java)",
+      "Bash(cd:*)",
+      "Bash(./gradlew compileJava)"
+    ]
+  }
+}

@@ -1,8 +1,8 @@
 package com.example.ossdoc.domain.extraction.dto.model;
 
 import com.example.ossdoc.domain.extraction.enums.AccessLevel;
-import com.example.ossdoc.domain.extraction.enums.ModifierKind;
-import com.example.ossdoc.domain.extraction.enums.SymbolFactKind;
+import com.example.ossdoc.domain.extraction.enums.Modifier;
+import com.example.ossdoc.domain.extraction.enums.SymbolKind;
 import com.example.ossdoc.domain.extraction.enums.SymbolOriginKind;
 import com.example.ossdoc.domain.extraction.enums.TypeKind;
 import com.fasterxml.jackson.annotation.JsonInclude;
@@ -23,7 +23,7 @@ public record SymbolFact(
         String symbol,
 
         @JsonProperty("kind")
-        SymbolFactKind kind,
+        SymbolKind kind,
 
         @JsonProperty("type_kind")
         TypeKind typeKind,
@@ -37,8 +37,8 @@ public record SymbolFact(
         /**
          * method / constructor / field의 owner type
          */
-        @JsonProperty("owner_type_symbol")
-        String ownerTypeSymbol,
+        @JsonProperty("owner_symbol")
+        String ownerSymbol,
 
         /**
          * type의 package symbol
@@ -74,7 +74,7 @@ public record SymbolFact(
         AccessLevel access,
 
         @JsonProperty("modifiers")
-        Set<ModifierKind> modifiers,
+        Set<Modifier> modifiers,
 
         @JsonProperty("origin")
         SymbolOriginKind origin,
@@ -106,22 +106,26 @@ public record SymbolFact(
         @JsonProperty("source_file")
         String sourceFile,
 
-        /**
-         * bytecode 관점 부가 정보
-         */
-        @JsonProperty("is_bridge")
-        Boolean isBridge,
+        // --- Phase 11A 추가 ---
 
-        @JsonProperty("is_synthetic")
-        Boolean isSynthetic,
+        @JsonProperty("doc_comment")
+        String docComment,
 
-        @JsonProperty("bytecode_descriptor")
-        String bytecodeDescriptor,
+        @JsonProperty("type_params")
+        List<TypeParam> typeParams,
 
-        /**
-         * 같은 파일/클래스 내의 local call 후보
-         */
-        @JsonProperty("local_calls")
-        List<String> localCalls
+        @JsonProperty("test_coverage_hint")
+        Boolean testCoverageHint,
+
+        // --- Phase 11B 추가 ---
+
+        @JsonProperty("throws_unchecked")
+        List<TypeRef> throwsUnchecked,
+
+        @JsonProperty("has_conditional_throw")
+        Boolean hasConditionalThrow,
+
+        @JsonProperty("state_mutations")
+        List<StateMutation> stateMutations
 ) {
 }

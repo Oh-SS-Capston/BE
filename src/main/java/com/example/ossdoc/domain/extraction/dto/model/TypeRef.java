@@ -1,5 +1,6 @@
 package com.example.ossdoc.domain.extraction.dto.model;
 
+import com.example.ossdoc.domain.extraction.enums.Wildcard;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Builder;
@@ -45,6 +46,9 @@ public record TypeRef(
          * 예: List<String>
          */
         @JsonProperty("source_text")
-        String sourceText
+        String sourceText,
+
+        @JsonProperty("wildcard")
+        Wildcard wildcard
 ) {
 }

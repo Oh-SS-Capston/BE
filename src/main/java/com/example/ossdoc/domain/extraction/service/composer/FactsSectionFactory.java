@@ -9,8 +9,10 @@ import com.example.ossdoc.domain.extraction.dto.model.RelationFact;
 import com.example.ossdoc.domain.extraction.dto.model.RelationTable;
 import com.example.ossdoc.domain.extraction.dto.model.SymbolFact;
 import com.example.ossdoc.domain.extraction.dto.model.SymbolTable;
+import com.example.ossdoc.domain.extraction.enums.EvidenceType;
 
 import java.util.ArrayList;
+import java.util.Objects;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -38,7 +40,6 @@ final class FactsSectionFactory {
     private static final Comparator<ObservationFact> OBSERVATION_ORDER = Comparator
             .comparing((ObservationFact it) -> safe(it.siteSymbol()))
             .thenComparing(it -> safe(it.targetSymbol()))
-            .thenComparing(it -> safe(it.serviceInterfaceSymbol()))
             .thenComparing(it -> safe(it.kind() == null ? null : it.kind().code()));
 
     JobMeta normalizeJob(JobMeta raw) {
@@ -61,9 +62,8 @@ final class FactsSectionFactory {
                 .tool(raw.tool())
                 .javaVersionUsed(raw.javaVersionUsed())
                 .classpathFingerprint(raw.classpathFingerprint())
-                .modules(normalizeStringList(raw.modules()))
-                .bytecodeRoots(normalizeStringList(raw.bytecodeRoots()))
-                .classpathEntries(normalizeStringList(raw.classpathEntries()))
+                .modules(raw.modules() == null ? List.of() : List.copyOf(raw.modules()))
+                .asmUnavailable(raw.asmUnavailable())
                 .build();
     }
 
@@ -93,14 +93,12 @@ final class FactsSectionFactory {
         return Collections.unmodifiableMap(new LinkedHashMap<>(sorted));
     }
 
-    SymbolTable composeSymbols(SymbolTable raw) {
+    SymbolTable composeSymbols(SymbolTable raw, Map<String, EvidenceFact> evidenceMap) {
         LinkedHashMap<String, SymbolFact> merged = new LinkedHashMap<>();
         for (SymbolFact symbol : flattenSymbols(raw)) {
             merged.merge(FactsDedupSupport.symbolKey(symbol), symbol, FactsDedupSupport::mergeSymbol);
         }
 
-        List<SymbolFact> modules = new ArrayList<>();
-        List<SymbolFact> packages = new ArrayList<>();
         List<SymbolFact> types = new ArrayList<>();
         List<SymbolFact> constructors = new ArrayList<>();
         List<SymbolFact> methods = new ArrayList<>();
@@ -110,26 +108,21 @@ final class FactsSectionFactory {
             if (symbol == null || symbol.kind() == null) {
                 continue;
             }
-            switch (symbol.kind()) {
-                case MODULE -> modules.add(symbol);
-                case PACKAGE -> packages.add(symbol);
-                case TYPE -> types.add(symbol);
-                case CONSTRUCTOR -> constructors.add(symbol);
-                case METHOD -> methods.add(symbol);
-                case FIELD -> fields.add(symbol);
+            SymbolFact enriched = applyTestCoverageHint(symbol, evidenceMap);
+            switch (enriched.kind()) {
+                case TYPE -> types.add(enriched);
+                case CONSTRUCTOR -> constructors.add(enriched);
+                case METHOD -> methods.add(enriched);
+                case FIELD -> fields.add(enriched);
             }
         }
 
-        modules.sort(SYMBOL_ORDER);
-        packages.sort(SYMBOL_ORDER);
         types.sort(SYMBOL_ORDER);
         constructors.sort(SYMBOL_ORDER);
         methods.sort(SYMBOL_ORDER);
         fields.sort(SYMBOL_ORDER);
 
         return SymbolTable.builder()
-                .modules(List.copyOf(modules))
-                .packages(List.copyOf(packages))
                 .types(List.copyOf(types))
                 .constructors(List.copyOf(constructors))
                 .methods(List.copyOf(methods))
@@ -143,61 +136,29 @@ final class FactsSectionFactory {
             merged.merge(FactsDedupSupport.relationKey(relation), relation, FactsDedupSupport::mergeRelation);
         }
 
-        List<RelationFact> contains = new ArrayList<>();
-        List<RelationFact> extendsRelations = new ArrayList<>();
-        List<RelationFact> implementsRelations = new ArrayList<>();
-        List<RelationFact> overrides = new ArrayList<>();
         List<RelationFact> calls = new ArrayList<>();
+        List<RelationFact> overrides = new ArrayList<>();
         List<RelationFact> accessesField = new ArrayList<>();
-        List<RelationFact> fieldType = new ArrayList<>();
-        List<RelationFact> paramType = new ArrayList<>();
-        List<RelationFact> returnType = new ArrayList<>();
-        List<RelationFact> throwsType = new ArrayList<>();
-        List<RelationFact> annotatedBy = new ArrayList<>();
 
         for (RelationFact relation : merged.values()) {
             if (relation == null || relation.kind() == null) {
                 continue;
             }
             switch (relation.kind()) {
-                case CONTAINS -> contains.add(relation);
-                case EXTENDS -> extendsRelations.add(relation);
-                case IMPLEMENTS -> implementsRelations.add(relation);
-                case OVERRIDES -> overrides.add(relation);
                 case CALLS -> calls.add(relation);
+                case OVERRIDES -> overrides.add(relation);
                 case ACCESSES_FIELD -> accessesField.add(relation);
-                case FIELD_TYPE -> fieldType.add(relation);
-                case PARAM_TYPE -> paramType.add(relation);
-                case RETURN_TYPE -> returnType.add(relation);
-                case THROWS_TYPE -> throwsType.add(relation);
-                case ANNOTATED_BY -> annotatedBy.add(relation);
             }
         }
 
-        contains.sort(RELATION_ORDER);
-        extendsRelations.sort(RELATION_ORDER);
-        implementsRelations.sort(RELATION_ORDER);
-        overrides.sort(RELATION_ORDER);
         calls.sort(RELATION_ORDER);
+        overrides.sort(RELATION_ORDER);
         accessesField.sort(RELATION_ORDER);
-        fieldType.sort(RELATION_ORDER);
-        paramType.sort(RELATION_ORDER);
-        returnType.sort(RELATION_ORDER);
-        throwsType.sort(RELATION_ORDER);
-        annotatedBy.sort(RELATION_ORDER);
 
         return RelationTable.builder()
-                .contains(List.copyOf(contains))
-                .extendsRelations(List.copyOf(extendsRelations))
-                .implementsRelations(List.copyOf(implementsRelations))
-                .overrides(List.copyOf(overrides))
                 .calls(List.copyOf(calls))
+                .overrides(List.copyOf(overrides))
                 .accessesField(List.copyOf(accessesField))
-                .fieldType(List.copyOf(fieldType))
-                .paramType(List.copyOf(paramType))
-                .returnType(List.copyOf(returnType))
-                .throwsType(List.copyOf(throwsType))
-                .annotatedBy(List.copyOf(annotatedBy))
                 .build();
     }
 
@@ -210,9 +171,12 @@ final class FactsSectionFactory {
         List<ObservationFact> diInjectionSites = new ArrayList<>();
         List<ObservationFact> diProviders = new ArrayList<>();
         List<ObservationFact> spiProviders = new ArrayList<>();
-        List<ObservationFact> eventPublish = new ArrayList<>();
-        List<ObservationFact> eventSubscribe = new ArrayList<>();
-        List<ObservationFact> reflectionUses = new ArrayList<>();
+        List<ObservationFact> eventPublications = new ArrayList<>();
+        List<ObservationFact> eventSubscriptions = new ArrayList<>();
+        List<ObservationFact> reflectionSites = new ArrayList<>();
+        List<ObservationFact> httpEndpoints = new ArrayList<>();
+        List<ObservationFact> scheduling = new ArrayList<>();
+        List<ObservationFact> asyncMethods = new ArrayList<>();
         List<ObservationFact> configWiring = new ArrayList<>();
 
         for (ObservationFact observation : merged.values()) {
@@ -223,9 +187,12 @@ final class FactsSectionFactory {
                 case DI_INJECTION_SITE -> diInjectionSites.add(observation);
                 case DI_PROVIDER -> diProviders.add(observation);
                 case SPI_PROVIDER -> spiProviders.add(observation);
-                case EVENT_PUBLISH -> eventPublish.add(observation);
-                case EVENT_SUBSCRIBE -> eventSubscribe.add(observation);
-                case REFLECTION_USE -> reflectionUses.add(observation);
+                case EVENT_PUBLICATION -> eventPublications.add(observation);
+                case EVENT_SUBSCRIPTION -> eventSubscriptions.add(observation);
+                case REFLECTION_SITE -> reflectionSites.add(observation);
+                case HTTP_ENDPOINT -> httpEndpoints.add(observation);
+                case SCHEDULED_TASK -> scheduling.add(observation);
+                case ASYNC_METHOD -> asyncMethods.add(observation);
                 case CONFIG_WIRING -> configWiring.add(observation);
             }
         }
@@ -233,18 +200,24 @@ final class FactsSectionFactory {
         diInjectionSites.sort(OBSERVATION_ORDER);
         diProviders.sort(OBSERVATION_ORDER);
         spiProviders.sort(OBSERVATION_ORDER);
-        eventPublish.sort(OBSERVATION_ORDER);
-        eventSubscribe.sort(OBSERVATION_ORDER);
-        reflectionUses.sort(OBSERVATION_ORDER);
+        eventPublications.sort(OBSERVATION_ORDER);
+        eventSubscriptions.sort(OBSERVATION_ORDER);
+        reflectionSites.sort(OBSERVATION_ORDER);
+        httpEndpoints.sort(OBSERVATION_ORDER);
+        scheduling.sort(OBSERVATION_ORDER);
+        asyncMethods.sort(OBSERVATION_ORDER);
         configWiring.sort(OBSERVATION_ORDER);
 
         return ObservationTable.builder()
                 .diInjectionSites(List.copyOf(diInjectionSites))
                 .diProviders(List.copyOf(diProviders))
                 .spiProviders(List.copyOf(spiProviders))
-                .eventPublish(List.copyOf(eventPublish))
-                .eventSubscribe(List.copyOf(eventSubscribe))
-                .reflectionUses(List.copyOf(reflectionUses))
+                .eventPublications(List.copyOf(eventPublications))
+                .eventSubscriptions(List.copyOf(eventSubscriptions))
+                .reflectionSites(List.copyOf(reflectionSites))
+                .httpEndpoints(List.copyOf(httpEndpoints))
+                .scheduling(List.copyOf(scheduling))
+                .asyncMethods(List.copyOf(asyncMethods))
                 .configWiring(List.copyOf(configWiring))
                 .build();
     }
@@ -254,18 +227,46 @@ final class FactsSectionFactory {
                 .diInjectionSites(List.of())
                 .diProviders(List.of())
                 .spiProviders(List.of())
-                .eventPublish(List.of())
-                .eventSubscribe(List.of())
-                .reflectionUses(List.of())
+                .eventPublications(List.of())
+                .eventSubscriptions(List.of())
+                .reflectionSites(List.of())
+                .httpEndpoints(List.of())
+                .scheduling(List.of())
+                .asyncMethods(List.of())
                 .configWiring(List.of())
+                .build();
+    }
+
+    private SymbolFact applyTestCoverageHint(SymbolFact s, Map<String, EvidenceFact> evidenceMap) {
+        if (s.evidenceIds() == null || s.evidenceIds().isEmpty()) return s;
+
+        boolean hasTest = s.evidenceIds().stream()
+                .map(evidenceMap::get)
+                .filter(Objects::nonNull)
+                .anyMatch(ev -> ev.type() == EvidenceType.TEST);
+        if (!hasTest) return s;
+
+        return SymbolFact.builder()
+                .symbol(s.symbol()).kind(s.kind()).typeKind(s.typeKind())
+                .name(s.name()).qualifiedName(s.qualifiedName())
+                .ownerSymbol(s.ownerSymbol()).packageSymbol(s.packageSymbol())
+                .module(s.module()).sourceRoot(s.sourceRoot()).bytecodeRoot(s.bytecodeRoot())
+                .nestedIn(s.nestedIn()).access(s.access()).modifiers(s.modifiers())
+                .origin(s.origin()).annotations(s.annotations())
+                .evidenceIds(s.evidenceIds()).attrs(s.attrs())
+                .signature(s.signature()).superTypeRef(s.superTypeRef())
+                .interfaceTypeRefs(s.interfaceTypeRefs()).sourceFile(s.sourceFile())
+                .docComment(s.docComment()).typeParams(s.typeParams())
+                .testCoverageHint(Boolean.TRUE)
+                .throwsUnchecked(s.throwsUnchecked())
+                .hasConditionalThrow(s.hasConditionalThrow())
+                .stateMutations(s.stateMutations())
                 .build();
     }
 
     private BuildMeta emptyBuild() {
         return BuildMeta.builder()
                 .modules(List.of())
-                .bytecodeRoots(List.of())
-                .classpathEntries(List.of())
                 .build();
     }
 
@@ -274,8 +275,6 @@ final class FactsSectionFactory {
             return List.of();
         }
         List<SymbolFact> all = new ArrayList<>();
-        addAll(all, table.modules());
-        addAll(all, table.packages());
         addAll(all, table.types());
         addAll(all, table.constructors());
         addAll(all, table.methods());
@@ -288,17 +287,9 @@ final class FactsSectionFactory {
             return List.of();
         }
         List<RelationFact> all = new ArrayList<>();
-        addAll(all, table.contains());
-        addAll(all, table.extendsRelations());
-        addAll(all, table.implementsRelations());
-        addAll(all, table.overrides());
         addAll(all, table.calls());
+        addAll(all, table.overrides());
         addAll(all, table.accessesField());
-        addAll(all, table.fieldType());
-        addAll(all, table.paramType());
-        addAll(all, table.returnType());
-        addAll(all, table.throwsType());
-        addAll(all, table.annotatedBy());
         return all;
     }
 
@@ -310,9 +301,12 @@ final class FactsSectionFactory {
         addAll(all, table.diInjectionSites());
         addAll(all, table.diProviders());
         addAll(all, table.spiProviders());
-        addAll(all, table.eventPublish());
-        addAll(all, table.eventSubscribe());
-        addAll(all, table.reflectionUses());
+        addAll(all, table.eventPublications());
+        addAll(all, table.eventSubscriptions());
+        addAll(all, table.reflectionSites());
+        addAll(all, table.httpEndpoints());
+        addAll(all, table.scheduling());
+        addAll(all, table.asyncMethods());
         addAll(all, table.configWiring());
         return all;
     }

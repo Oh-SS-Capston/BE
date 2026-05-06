@@ -1,9 +1,12 @@
 package com.example.ossdoc.domain.extraction.dto.model;
 
+import com.fasterxml.jackson.annotation.JsonGetter;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Builder;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -28,10 +31,10 @@ public record FactsDocument(
         StatsMeta stats,
 
         /**
-         * evidence_id -> EvidenceFact
+         * evidence_id -> EvidenceFact (내부 Map 유지)
          */
-        @JsonProperty("evidence")
-        Map<String, EvidenceFact> evidence,
+        @JsonIgnore
+        Map<String, EvidenceFact> evidenceMap,
 
         @JsonProperty("symbols")
         SymbolTable symbols,
@@ -42,4 +45,15 @@ public record FactsDocument(
         @JsonProperty("observations")
         ObservationTable observations
 ) {
+
+    /**
+     * JSON 직렬화 시 evidence를 List로 출력
+     */
+    @JsonGetter("evidence")
+    public List<EvidenceFact> evidence() {
+        if (evidenceMap == null || evidenceMap.isEmpty()) {
+            return List.of();
+        }
+        return evidenceMap.values().stream().toList();
+    }
 }
