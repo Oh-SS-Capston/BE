@@ -102,13 +102,15 @@ public class ClassMapBuildService {
         try {
             List<SymbolEntity> typeSymbols = symbolRepository.findAllByRun_RunIdAndSymbolKind(run.getRunId(), SymbolKind.TYPE);
             List<SymbolEntity> methodSymbols = symbolRepository.findAllByRun_RunIdAndSymbolKind(run.getRunId(), SymbolKind.METHOD);
+            List<SymbolEntity> constructorSymbols = symbolRepository.findAllByRun_RunIdAndSymbolKind(run.getRunId(), SymbolKind.CONSTRUCTOR);
             List<Edge> allEdges = edgeRepository.findAllByRun_RunId(run.getRunId());
             Set<String> publicApiTypeIds = publicApiEntrySyncService.ensureTypeEntries(run, typeSymbols);
 
             Map<String, SymbolEntity> typeById = typeSymbols.stream()
                     .collect(Collectors.toMap(SymbolEntity::getSymbolId, s -> s, (a, b) -> a, LinkedHashMap::new));
-            Map<String, SymbolEntity> methodById = methodSymbols.stream()
-                    .collect(Collectors.toMap(SymbolEntity::getSymbolId, s -> s, (a, b) -> a, LinkedHashMap::new));
+            Map<String, SymbolEntity> callableById = new LinkedHashMap<>();
+            methodSymbols.forEach(symbol -> callableById.put(symbol.getSymbolId(), symbol));
+            constructorSymbols.forEach(symbol -> callableById.put(symbol.getSymbolId(), symbol));
 
             FilterResult filterResult = filterCandidateTypes(typeSymbols, publicApiTypeIds);
             Set<String> candidateTypeIds = filterResult.candidateTypeIds();
@@ -116,7 +118,7 @@ public class ClassMapBuildService {
                 throw new ClassMapException(ClassMapErrorCode.CLASS_MAP_NO_VISIBLE_TYPES);
             }
 
-            AggregateResult aggregateResult = aggregateEdges(allEdges, candidateTypeIds, methodById);
+            AggregateResult aggregateResult = aggregateEdges(allEdges, candidateTypeIds, callableById);
 
             Set<String> configTypeIds = detectConfigTypes(candidateTypeIds, typeById, allEdges);
             Set<String> extensionPointTypeIds = detectExtensionPointTypes(candidateTypeIds, typeById, allEdges);
@@ -293,7 +295,7 @@ public class ClassMapBuildService {
     private AggregateResult aggregateEdges(
             List<Edge> allEdges,
             Set<String> candidateTypeIds,
-            Map<String, SymbolEntity> methodById
+            Map<String, SymbolEntity> callableById
     ) {
         Map<String, EdgeAggregate> aggregateMap = new LinkedHashMap<>();
         Map<String, Integer> degreeByTypeId = new HashMap<>();
@@ -326,11 +328,11 @@ public class ClassMapBuildService {
             if (edge.getFromSymbol() == null || edge.getToSymbol() == null) {
                 continue;
             }
-            SymbolEntity method = methodById.get(edge.getFromSymbol().getSymbolId());
-            if (method == null || !isPublicOrProtected(method.getAccess())) {
+            SymbolEntity callable = callableById.get(edge.getFromSymbol().getSymbolId());
+            if (callable == null || !isPublicOrProtected(callable.getAccess())) {
                 continue;
             }
-            SymbolEntity ownerType = method.getOwner();
+            SymbolEntity ownerType = callable.getOwner();
             if (ownerType == null) {
                 continue;
             }
@@ -706,7 +708,12 @@ public class ClassMapBuildService {
      * 노드 라벨을 simpleName 우선으로 계산한다.
      */
     private String resolveNodeLabel(SymbolEntity type) {
-        String simpleName = trimToNull(type.getSimpleName());
+        String nestedLabel = resolveNestedTypeLabel(type);
+        if (nestedLabel != null) {
+            return nestedLabel;
+        }
+
+        String simpleName = resolveDisplaySimpleName(type);
         if (simpleName != null) {
             return simpleName;
         }
@@ -718,6 +725,59 @@ public class ClassMapBuildService {
 
         int idx = normalized.lastIndexOf('.');
         return idx >= 0 ? normalized.substring(idx + 1) : normalized;
+    }
+
+    /**
+     * 중첩 타입인 경우 외부 타입명을 포함한 라벨(예: Option.Builder)을 구성한다.
+     */
+    private String resolveNestedTypeLabel(SymbolEntity type) {
+        if (type == null || type.getOwner() == null || type.getOwner().getSymbolKind() != SymbolKind.TYPE) {
+            return null;
+        }
+
+        List<String> parts = new ArrayList<>();
+        Set<String> visited = new HashSet<>();
+        SymbolEntity current = type;
+
+        while (current != null && current.getSymbolKind() == SymbolKind.TYPE) {
+            String currentId = trimToNull(current.getSymbolId());
+            if (currentId != null && !visited.add(currentId)) {
+                break;
+            }
+            String part = resolveDisplaySimpleName(current);
+            if (part == null) {
+                break;
+            }
+            parts.add(part);
+            SymbolEntity owner = current.getOwner();
+            if (owner == null || owner.getSymbolKind() != SymbolKind.TYPE) {
+                break;
+            }
+            current = owner;
+        }
+
+        if (parts.size() <= 1) {
+            return null;
+        }
+        Collections.reverse(parts);
+        return String.join(".", parts);
+    }
+
+    /**
+     * 심볼의 simpleName을 UI 출력용으로 정규화한다.
+     */
+    private String resolveDisplaySimpleName(SymbolEntity type) {
+        String simpleName = trimToNull(type == null ? null : type.getSimpleName());
+        if (simpleName == null) {
+            return null;
+        }
+
+        String normalized = simpleName.replace('$', '.');
+        int idx = normalized.lastIndexOf('.');
+        if (idx >= 0 && idx < normalized.length() - 1) {
+            return normalized.substring(idx + 1);
+        }
+        return normalized;
     }
 
     /**
