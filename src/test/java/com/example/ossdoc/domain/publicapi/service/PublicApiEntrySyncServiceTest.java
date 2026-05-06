@@ -58,7 +58,7 @@ class PublicApiEntrySyncServiceTest {
         when(methodSymbol.getSymbolKind()).thenReturn(SymbolKind.METHOD);
         when(methodSymbol.getAccess()).thenReturn(AccessLevel.PUBLIC);
 
-        when(symbolRepository.findAllByRunIdAndSymbolKind("run-1", SymbolKind.TYPE))
+        when(symbolRepository.findAllByRun_RunIdAndSymbolKind("run-1", SymbolKind.TYPE))
                 .thenReturn(List.of(publicType, protectedType, privateType, methodSymbol));
 
         Set<String> result = publicApiEntrySyncService.ensureTypeEntries(run);
@@ -78,7 +78,7 @@ class PublicApiEntrySyncServiceTest {
         when(privateType.getSymbolKind()).thenReturn(SymbolKind.TYPE);
         when(privateType.getAccess()).thenReturn(AccessLevel.PRIVATE);
 
-        when(symbolRepository.findAllByRunIdAndSymbolKind("run-2", SymbolKind.TYPE))
+        when(symbolRepository.findAllByRun_RunIdAndSymbolKind("run-2", SymbolKind.TYPE))
                 .thenReturn(List.of(privateType));
 
         Set<String> result = publicApiEntrySyncService.ensureTypeEntries(run);

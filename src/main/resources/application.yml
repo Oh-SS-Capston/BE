@@ -87,3 +87,11 @@ cloud:
       static: ${AWS_REGION:ap-northeast-2}
     s3:
       bucket: ${S3_BUCKET:ossdoc-artifact-storage}
+
+logging:
+  level:
+    com:
+      example:
+        ossdoc:
+          domain:
+            build: DEBUG

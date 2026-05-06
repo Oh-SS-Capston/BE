@@ -32,7 +32,7 @@ public class PublicApiEntrySyncService {
      * run의 TYPE 심볼을 읽어 공개 API 엔트리를 동기화하고, 공개 API symbol id 집합을 반환한다.
      */
     public Set<String> ensureTypeEntries(RepoRun run) {
-        List<SymbolEntity> typeSymbols = symbolRepository.findAllByRunIdAndSymbolKind(run.getRunId(), SymbolKind.TYPE);
+        List<SymbolEntity> typeSymbols = symbolRepository.findAllByRun_RunIdAndSymbolKind(run.getRunId(), SymbolKind.TYPE);
         return ensureTypeEntries(run, typeSymbols);
     }
 

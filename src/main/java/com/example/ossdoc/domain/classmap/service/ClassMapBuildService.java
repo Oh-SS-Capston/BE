@@ -73,8 +73,8 @@ public class ClassMapBuildService {
         }
 
         try {
-            List<SymbolEntity> typeSymbols = symbolRepository.findAllByRunIdAndSymbolKind(run.getRunId(), SymbolKind.TYPE);
-            List<SymbolEntity> methodSymbols = symbolRepository.findAllByRunIdAndSymbolKind(run.getRunId(), SymbolKind.METHOD);
+            List<SymbolEntity> typeSymbols = symbolRepository.findAllByRun_RunIdAndSymbolKind(run.getRunId(), SymbolKind.TYPE);
+            List<SymbolEntity> methodSymbols = symbolRepository.findAllByRun_RunIdAndSymbolKind(run.getRunId(), SymbolKind.METHOD);
             List<Edge> allEdges = edgeRepository.findAllByRun_RunId(run.getRunId());
             Set<String> publicApiTypeIds = publicApiEntrySyncService.ensureTypeEntries(run, typeSymbols);
 

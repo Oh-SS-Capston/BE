@@ -56,7 +56,7 @@ class GraphProjectionServiceTest {
         when(authService.getModule()).thenReturn(null);
 
         // TYPE 조회 결과에는 이 둘만 들어감
-        when(symbolRepository.findAllByRunIdAndSymbolKind("run-1", SymbolKind.TYPE))
+        when(symbolRepository.findAllByRun_RunIdAndSymbolKind("run-1", SymbolKind.TYPE))
                 .thenReturn(List.of(authController, authService));
 
         PublicApiEntry publicApiEntry = mock(PublicApiEntry.class);

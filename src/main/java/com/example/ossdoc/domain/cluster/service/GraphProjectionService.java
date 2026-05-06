@@ -36,7 +36,7 @@ public class GraphProjectionService {
     public ProjectedGraph loadProjectedGraph(String runId) {
         List<SymbolEntity> typeSymbols;
         try {
-            typeSymbols = symbolRepository.findAllByRunIdAndSymbolKind(runId, SymbolKind.TYPE);
+            typeSymbols = symbolRepository.findAllByRun_RunIdAndSymbolKind(runId, SymbolKind.TYPE);
         } catch (Exception e) {
             throw new ClusterException(ClusterErrorCode.CLUSTER_PROJECTION_FAILED);
         }
