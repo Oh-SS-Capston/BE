@@ -1,3 +1,4 @@
+// 역할: facts.json 기반 정규화 결과를 graphstore 엔티티로 적재한다.
 package com.example.ossdoc.domain.graphstore.service;
 
 import com.example.ossdoc.domain.artifact.entity.Artifact;
@@ -18,6 +19,7 @@ import com.example.ossdoc.domain.graphstore.entity.EdgeEvidence;
 import com.example.ossdoc.domain.graphstore.entity.EdgeEvidenceId;
 import com.example.ossdoc.domain.graphstore.entity.Evidence;
 import com.example.ossdoc.domain.graphstore.entity.SymbolEntity;
+import com.example.ossdoc.domain.graphstore.enums.SymbolKind;
 import com.example.ossdoc.domain.graphstore.exception.GraphStoreException;
 import com.example.ossdoc.domain.graphstore.exception.code.GraphStoreErrorCode;
 import com.example.ossdoc.domain.graphstore.repository.EdgeEvidenceRepository;
@@ -35,7 +37,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -246,7 +251,9 @@ public class GraphStoreIngestService {
             Map<String, Evidence> evidenceMap
     ) {
         Map<String, SymbolEntity> symbolMap = new LinkedHashMap<>();
+        Map<String, FileIndex> sourceFileCache = new HashMap<>();
         int savedCount = 0;
+        int sourceFileLinkedCount = 0;
 
         for (NormalizedSymbolFact dto : facts.symbols()) {
             if (dto.symbol() == null || dto.symbol().isBlank()) {
@@ -264,6 +271,12 @@ public class GraphStoreIngestService {
                 SymbolEntity entity = factsSymbolConverter.toEntity(symbolId, run, dto);
                 symbol = symbolRepository.save(entity);
                 savedCount++;
+            }
+
+            FileIndex sourceFile = resolveSymbolSourceFile(run, dto, sourceFileCache);
+            if (sourceFile != null) {
+                symbol.assignSourceFile(sourceFile);
+                sourceFileLinkedCount++;
             }
 
             symbolMap.put(dto.symbol(), symbol);
@@ -288,7 +301,39 @@ public class GraphStoreIngestService {
             }
         }
 
+        log.info(
+                "[GRAPHSTORE] symbol source file linking summary. runId={}, linkedCount={}",
+                run.getRunId(),
+                sourceFileLinkedCount
+        );
+
         return new SymbolSaveResult(symbolMap, savedCount);
+    }
+
+    /**
+     * symbol fact sourceFile 경로를 file_index 엔티티로 연결한다.
+     */
+    private FileIndex resolveSymbolSourceFile(
+            RepoRun run,
+            NormalizedSymbolFact symbolFact,
+            Map<String, FileIndex> sourceFileCache
+    ) {
+        if (symbolFact == null) {
+            return null;
+        }
+        String normalizedPath = normalizeEvidencePath(symbolFact.sourceFile());
+        if (normalizedPath == null) {
+            return null;
+        }
+        FileIndex cached = sourceFileCache.get(normalizedPath);
+        if (cached != null) {
+            return cached;
+        }
+        FileIndex resolved = resolveFileIndex(run, normalizedPath);
+        if (resolved != null) {
+            sourceFileCache.put(normalizedPath, resolved);
+        }
+        return resolved;
     }
 
     private EdgeSaveResult saveEdges(
@@ -300,6 +345,9 @@ public class GraphStoreIngestService {
         int edgesSaved = 0;
         int edgeEvidenceSaved = 0;
         int skippedRelations = 0;
+        int resolvedByRawRef = 0;
+
+        Map<String, SymbolEntity> typeLookupIndex = buildTypeLookupIndex(symbolMap);
 
         for (NormalizedRelationFact dto : facts.relations()) {
             if (dto.srcSymbol() == null || dto.srcSymbol().isBlank()) {
@@ -313,9 +361,12 @@ public class GraphStoreIngestService {
                 continue;
             }
 
-            SymbolEntity to = null;
-            if (dto.dstSymbol() != null && !dto.dstSymbol().isBlank()) {
-                to = symbolMap.get(dto.dstSymbol());
+            SymbolEntity to = resolveDestinationSymbol(dto, symbolMap, typeLookupIndex);
+            if (to != null
+                    && (dto.dstSymbol() == null || dto.dstSymbol().isBlank())
+                    && dto.dstRawRef() != null
+                    && !dto.dstRawRef().isBlank()) {
+                resolvedByRawRef++;
             }
 
             Edge candidate = factsEdgeConverter.toEntity(run, dto, from, to);
@@ -347,7 +398,177 @@ public class GraphStoreIngestService {
             }
         }
 
+        log.info(
+                "[GRAPHSTORE] relation linking summary. runId={}, totalRelations={}, resolvedByRawRef={}, skippedRelations={}",
+                run.getRunId(),
+                facts.relations().size(),
+                resolvedByRawRef,
+                skippedRelations
+        );
+
         return new EdgeSaveResult(edgesSaved, edgeEvidenceSaved, skippedRelations);
+    }
+
+    /**
+     * relation 목적지 심볼을 우선 dst_symbol로 찾고, 없으면 dst_raw_ref 타입명을 기준으로 보조 연결한다.
+     */
+    private SymbolEntity resolveDestinationSymbol(
+            NormalizedRelationFact relation,
+            Map<String, SymbolEntity> symbolMap,
+            Map<String, SymbolEntity> typeLookupIndex
+    ) {
+        if (relation.dstSymbol() != null && !relation.dstSymbol().isBlank()) {
+            SymbolEntity direct = symbolMap.get(relation.dstSymbol());
+            if (direct != null) {
+                return direct;
+            }
+            SymbolEntity fallbackFromDstSymbol = typeLookupIndex.get(normalizeTypeRefForLookup(relation.dstSymbol()));
+            if (fallbackFromDstSymbol != null) {
+                return fallbackFromDstSymbol;
+            }
+        }
+
+        if (relation.dstRawRef() == null || relation.dstRawRef().isBlank()) {
+            return null;
+        }
+
+        for (String candidate : buildTypeLookupCandidates(relation.dstRawRef())) {
+            SymbolEntity resolved = typeLookupIndex.get(candidate);
+            if (resolved != null) {
+                return resolved;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * TYPE 심볼을 여러 표기(접두어/중첩 클래스 표기)로 조회할 수 있도록 인덱스를 만든다.
+     */
+    private Map<String, SymbolEntity> buildTypeLookupIndex(Map<String, SymbolEntity> symbolMap) {
+        Map<String, SymbolEntity> index = new HashMap<>();
+
+        for (Map.Entry<String, SymbolEntity> entry : symbolMap.entrySet()) {
+            SymbolEntity symbol = entry.getValue();
+            if (symbol == null || symbol.getSymbolKind() != SymbolKind.TYPE) {
+                continue;
+            }
+
+            addTypeLookupKey(index, entry.getKey(), symbol);
+            addTypeLookupKey(index, symbol.getQualifiedName(), symbol);
+        }
+
+        return index;
+    }
+
+    /**
+     * 하나의 타입 문자열에서 조회 후보 키를 생성한다.
+     */
+    private List<String> buildTypeLookupCandidates(String raw) {
+        String normalized = normalizeTypeRefForLookup(raw);
+        if (normalized == null) {
+            return List.of();
+        }
+
+        LinkedHashSet<String> candidates = new LinkedHashSet<>();
+        candidates.add(normalized);
+        candidates.add(normalized.replace('$', '.'));
+        candidates.add("type:" + normalized);
+        candidates.add("type:" + normalized.replace('$', '.'));
+
+        return List.copyOf(candidates);
+    }
+
+    /**
+     * 타입 참조 문자열을 조회 가능한 공통 포맷으로 정규화한다.
+     */
+    private String normalizeTypeRefForLookup(String raw) {
+        if (raw == null) {
+            return null;
+        }
+
+        String value = raw.trim();
+        if (value.isEmpty()) {
+            return null;
+        }
+
+        value = value.replace('\\', '.').replace('/', '.');
+
+        if (value.startsWith("type:")) {
+            value = value.substring("type:".length());
+        }
+
+        if (value.startsWith("? extends ")) {
+            value = value.substring("? extends ".length());
+        } else if (value.startsWith("? super ")) {
+            value = value.substring("? super ".length());
+        } else if ("?".equals(value)) {
+            return null;
+        }
+
+        value = stripTypeDecorations(value);
+        value = stripGenericPart(value);
+
+        while (value.endsWith("[]")) {
+            value = value.substring(0, value.length() - 2);
+        }
+        if (value.endsWith("...")) {
+            value = value.substring(0, value.length() - 3);
+        }
+
+        value = value.trim();
+        return value.isEmpty() ? null : value;
+    }
+
+    /**
+     * class/interface/enum 같은 선언 키워드가 붙은 타입 문자열을 제거한다.
+     */
+    private String stripTypeDecorations(String value) {
+        String current = value.trim();
+        for (String prefix : List.of("class ", "interface ", "enum ", "record ")) {
+            if (current.startsWith(prefix)) {
+                return current.substring(prefix.length()).trim();
+            }
+        }
+        return current;
+    }
+
+    /**
+     * 중첩 제네릭까지 고려해 <> 블록을 제거한다.
+     */
+    private String stripGenericPart(String value) {
+        StringBuilder builder = new StringBuilder(value.length());
+        int depth = 0;
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c == '<') {
+                depth++;
+                continue;
+            }
+            if (c == '>') {
+                if (depth > 0) {
+                    depth--;
+                }
+                continue;
+            }
+            if (depth == 0) {
+                builder.append(c);
+            }
+        }
+        return builder.toString().trim();
+    }
+
+    /**
+     * lookup 인덱스에 안전하게 키를 추가한다.
+     */
+    private void addTypeLookupKey(Map<String, SymbolEntity> index, String rawKey, SymbolEntity symbol) {
+        String normalized = normalizeTypeRefForLookup(rawKey);
+        if (normalized == null) {
+            return;
+        }
+
+        for (String candidate : buildTypeLookupCandidates(normalized)) {
+            index.putIfAbsent(candidate, symbol);
+        }
     }
 
     private Edge findExistingEdge(RepoRun run, SymbolEntity from, SymbolEntity to, Edge candidate) {
