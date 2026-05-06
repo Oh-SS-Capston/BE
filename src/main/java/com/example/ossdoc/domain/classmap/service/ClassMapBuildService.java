@@ -21,8 +21,7 @@ import com.example.ossdoc.domain.graphstore.enums.SymbolKind;
 import com.example.ossdoc.domain.graphstore.repository.EdgeEvidenceRepository;
 import com.example.ossdoc.domain.graphstore.repository.EdgeRepository;
 import com.example.ossdoc.domain.graphstore.repository.SymbolRepository;
-import com.example.ossdoc.domain.publicapi.entity.PublicApiEntry;
-import com.example.ossdoc.domain.publicapi.repository.PublicApiEntryRepository;
+import com.example.ossdoc.domain.publicapi.service.PublicApiEntrySyncService;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -61,7 +60,7 @@ public class ClassMapBuildService {
     private final SymbolRepository symbolRepository;
     private final EdgeRepository edgeRepository;
     private final EdgeEvidenceRepository edgeEvidenceRepository;
-    private final PublicApiEntryRepository publicApiEntryRepository;
+    private final PublicApiEntrySyncService publicApiEntrySyncService;
     private final ClassMapArtifactPublisher classMapArtifactPublisher;
 
     /**
@@ -80,7 +79,7 @@ public class ClassMapBuildService {
             List<SymbolEntity> typeSymbols = symbolRepository.findAllByRunIdAndSymbolKind(run.getRunId(), SymbolKind.TYPE);
             List<SymbolEntity> methodSymbols = symbolRepository.findAllByRunIdAndSymbolKind(run.getRunId(), SymbolKind.METHOD);
             List<Edge> allEdges = edgeRepository.findAllByRun_RunId(run.getRunId());
-            Set<String> publicApiTypeIds = loadPublicApiTypeIds(run.getRunId());
+            Set<String> publicApiTypeIds = publicApiEntrySyncService.ensureTypeEntries(run, typeSymbols);
             Map<String, RankingSignal> rankingSignals = loadRankingSignals(run.getRunId());
 
             Map<String, SymbolEntity> typeById = typeSymbols.stream()
@@ -217,17 +216,6 @@ public class ClassMapBuildService {
         } catch (Exception e) {
             throw new ClassMapException(ClassMapErrorCode.CLASS_MAP_BUILD_FAILED);
         }
-    }
-
-    /**
-     * public_api_entry 테이블에서 공개 API 타입 symbol id 집합을 조회한다.
-     */
-    private Set<String> loadPublicApiTypeIds(String runId) {
-        return publicApiEntryRepository.findAllByRunId(runId).stream()
-                .map(PublicApiEntry::getSymbol)
-                .filter(Objects::nonNull)
-                .map(SymbolEntity::getSymbolId)
-                .collect(Collectors.toCollection(LinkedHashSet::new));
     }
 
     /**

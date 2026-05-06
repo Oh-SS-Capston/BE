@@ -13,5 +13,13 @@ import java.util.List;
 *  즉, 해당 run에서 어떤 symbol이 공개 API인지 조회해서, cluster/ranking 후처리에 활용하게 해주는 repository
 *  */
 public interface PublicApiEntryRepository extends JpaRepository<PublicApiEntry, PublicApiEntryId> {
-    List<PublicApiEntry> findAllByRunId(String runId);
+    /**
+     * 특정 run에 저장된 공개 API 엔트리 전체를 조회한다.
+     */
+    List<PublicApiEntry> findAllByRun_RunId(String runId);
+
+    /**
+     * 특정 run에 저장된 공개 API 엔트리를 전부 삭제한다.
+     */
+    void deleteByRun_RunId(String runId);
 }

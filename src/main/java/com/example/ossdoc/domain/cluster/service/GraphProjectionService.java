@@ -30,6 +30,9 @@ public class GraphProjectionService {
     private final PublicApiEntryRepository publicApiEntryRepository;
     private final EdgeWeightPolicy edgeWeightPolicy;
 
+    /**
+     * graphstore와 public_api_entry를 합쳐 군집화용 투영 그래프를 구성한다.
+     */
     public ProjectedGraph loadProjectedGraph(String runId) {
         List<SymbolEntity> typeSymbols;
         try {
@@ -44,7 +47,7 @@ public class GraphProjectionService {
 
         Set<String> publicApiSymbolIds;
         try {
-            publicApiSymbolIds = publicApiEntryRepository.findAllByRunId(runId).stream()
+            publicApiSymbolIds = publicApiEntryRepository.findAllByRun_RunId(runId).stream()
                     .map(PublicApiEntry::getSymbol)
                     .map(SymbolEntity::getSymbolId)
                     .collect(Collectors.toSet());

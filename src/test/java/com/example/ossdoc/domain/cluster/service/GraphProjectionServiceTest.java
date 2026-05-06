@@ -62,7 +62,7 @@ class GraphProjectionServiceTest {
         PublicApiEntry publicApiEntry = mock(PublicApiEntry.class);
         when(publicApiEntry.getSymbol()).thenReturn(authController);
 
-        when(publicApiEntryRepository.findAllByRunId("run-1"))
+        when(publicApiEntryRepository.findAllByRun_RunId("run-1"))
                 .thenReturn(List.of(publicApiEntry));
 
         Edge edge1 = mock(Edge.class);
