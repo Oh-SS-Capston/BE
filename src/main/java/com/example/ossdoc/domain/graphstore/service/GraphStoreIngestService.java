@@ -24,20 +24,25 @@ import com.example.ossdoc.domain.graphstore.repository.EdgeEvidenceRepository;
 import com.example.ossdoc.domain.graphstore.repository.EdgeRepository;
 import com.example.ossdoc.domain.graphstore.repository.EvidenceRepository;
 import com.example.ossdoc.domain.graphstore.repository.SymbolRepository;
+import com.example.ossdoc.domain.module.entity.FileIndex;
+import com.example.ossdoc.domain.module.repository.FileIndexRepository;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 
 @Service
+@Slf4j
 @RequiredArgsConstructor
 public class GraphStoreIngestService {
 
@@ -48,6 +53,7 @@ public class GraphStoreIngestService {
     private final EdgeRepository edgeRepository;
     private final EvidenceRepository evidenceRepository;
     private final EdgeEvidenceRepository edgeEvidenceRepository;
+    private final FileIndexRepository fileIndexRepository;
 
     private final FactsEvidenceConverter factsEvidenceConverter;
     private final FactsSymbolConverter factsSymbolConverter;
@@ -82,6 +88,10 @@ public class GraphStoreIngestService {
 
         NormalizedFactsDocument facts = graphStoreFactsNormalizer.normalize(rawFacts);
         validateFacts(facts);
+        if (facts.observationCount() > 0) {
+            log.warn("[GRAPHSTORE] observations {}건이 감지되었지만 현재 ingest 대상에는 포함되지 않습니다. runId={}",
+                    facts.observationCount(), run.getRunId());
+        }
 
         EvidenceSaveResult evidenceSaveResult = saveEvidence(run, facts);
         SymbolSaveResult symbolSaveResult = saveSymbols(run, facts, evidenceSaveResult.evidenceMap());
@@ -95,6 +105,8 @@ public class GraphStoreIngestService {
                 .edgesSaved(edgeSaveResult.edgesSaved())
                 .edgeEvidenceSaved(edgeSaveResult.edgeEvidenceSaved())
                 .skippedRelations(edgeSaveResult.skippedRelations())
+                .observationsDetected(facts.observationCount())
+                .observationsIgnored(facts.observationCount())
                 .build();
     }
 
@@ -118,6 +130,9 @@ public class GraphStoreIngestService {
         }
     }
 
+    /**
+     * evidence 섹션을 저장하고 facts evidence id와 DB 엔티티를 매핑한다.
+     */
     private EvidenceSaveResult saveEvidence(RepoRun run, NormalizedFactsDocument facts) {
         Map<String, Evidence> evidenceMap = new LinkedHashMap<>();
         int savedCount = 0;
@@ -130,7 +145,8 @@ public class GraphStoreIngestService {
             String factEvidenceId = entry.getKey();
             NormalizedEvidenceFact dto = entry.getValue();
 
-            Evidence candidate = factsEvidenceConverter.toEntity(run, dto);
+            FileIndex fileIndex = resolveFileIndex(run, dto.path());
+            Evidence candidate = factsEvidenceConverter.toEntity(run, dto, fileIndex);
             Evidence existing = findExistingEvidence(run, candidate);
 
             Evidence resolved;
@@ -147,20 +163,81 @@ public class GraphStoreIngestService {
         return new EvidenceSaveResult(evidenceMap, savedCount);
     }
 
+    /**
+     * 동일한 evidence가 이미 저장되어 있는지 해시/파일/라인 기준으로 확인한다.
+     */
     private Evidence findExistingEvidence(RepoRun run, Evidence candidate) {
         if (candidate.getHash() != null && !candidate.getHash().isBlank()) {
             return evidenceRepository.findFirstByRun_RunIdAndHash(run.getRunId(), candidate.getHash())
                     .orElse(null);
         }
 
-        List<Evidence> matches = evidenceRepository.findByRun_RunIdAndEvidenceTypeAndStartLineAndEndLineAndSnippet(
-                run.getRunId(),
-                candidate.getEvidenceType(),
-                candidate.getStartLine(),
-                candidate.getEndLine(),
-                candidate.getSnippet()
-        );
+        List<Evidence> matches;
+        if (candidate.getFile() != null && candidate.getFile().getFileId() != null) {
+            matches = evidenceRepository.findByRun_RunIdAndEvidenceTypeAndFile_FileIdAndStartLineAndEndLineAndSnippet(
+                    run.getRunId(),
+                    candidate.getEvidenceType(),
+                    candidate.getFile().getFileId(),
+                    candidate.getStartLine(),
+                    candidate.getEndLine(),
+                    candidate.getSnippet()
+            );
+        } else {
+            matches = evidenceRepository.findByRun_RunIdAndEvidenceTypeAndStartLineAndEndLineAndSnippet(
+                    run.getRunId(),
+                    candidate.getEvidenceType(),
+                    candidate.getStartLine(),
+                    candidate.getEndLine(),
+                    candidate.getSnippet()
+            );
+        }
         return matches.isEmpty() ? null : matches.get(0);
+    }
+
+    /**
+     * evidence 경로를 기준으로 file_index를 조회하거나 생성한다.
+     */
+    private FileIndex resolveFileIndex(RepoRun run, String rawPath) {
+        String normalizedPath = normalizeEvidencePath(rawPath);
+        if (normalizedPath == null) {
+            return null;
+        }
+
+        return fileIndexRepository.findFirstByRun_RunIdAndPath(run.getRunId(), normalizedPath)
+                .orElseGet(() -> fileIndexRepository.save(new FileIndex(
+                        null,
+                        run,
+                        null,
+                        normalizedPath,
+                        detectFileType(normalizedPath),
+                        null,
+                        null
+                )));
+    }
+
+    /**
+     * evidence path를 저장용 표준 경로로 정규화한다.
+     */
+    private String normalizeEvidencePath(String rawPath) {
+        if (rawPath == null) {
+            return null;
+        }
+        String trimmed = rawPath.trim();
+        if (trimmed.isEmpty()) {
+            return null;
+        }
+        return trimmed.replace('\\', '/');
+    }
+
+    /**
+     * 경로 확장자를 기반으로 file_index.file_type 값을 결정한다.
+     */
+    private String detectFileType(String path) {
+        int dotIndex = path.lastIndexOf('.');
+        if (dotIndex < 0 || dotIndex == path.length() - 1) {
+            return "unknown";
+        }
+        return path.substring(dotIndex + 1).toLowerCase(Locale.ROOT);
     }
 
     private SymbolSaveResult saveSymbols(
@@ -176,7 +253,7 @@ public class GraphStoreIngestService {
                 continue;
             }
 
-            SymbolEntity existing = symbolRepository.findByRunIdAndQualifiedName(run.getRunId(), dto.symbol())
+            SymbolEntity existing = symbolRepository.findByRun_RunIdAndQualifiedName(run.getRunId(), dto.symbol())
                     .orElse(null);
 
             SymbolEntity symbol;

@@ -13,4 +13,6 @@ public class GraphStoreIngestResponse {
     private int edgesSaved;
     private int edgeEvidenceSaved;
     private int skippedRelations;
+    private int observationsDetected;
+    private int observationsIgnored;
 }

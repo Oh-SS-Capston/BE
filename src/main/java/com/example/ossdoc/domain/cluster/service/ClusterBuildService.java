@@ -11,6 +11,7 @@ import com.example.ossdoc.domain.cluster.model.CommunityResult;
 import com.example.ossdoc.domain.cluster.model.ProjectedGraph;
 import com.example.ossdoc.domain.cluster.model.subsystem.Subsystem;
 import com.example.ossdoc.domain.cluster.support.SubsystemAssembler;
+import com.example.ossdoc.domain.publicapi.service.PublicApiEntrySyncService;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import lombok.RequiredArgsConstructor;
@@ -32,10 +33,18 @@ public class ClusterBuildService {
     private final SubsystemAssembler subsystemAssembler;
     private final RankingService rankingService;
     private final ClusterArtifactPublisher clusterArtifactPublisher;
+    private final PublicApiEntrySyncService publicApiEntrySyncService;
 
+    /**
+     * run 기준 public_api_entry를 보장한 뒤 군집화/랭킹 산출물을 생성한다.
+     */
     public ClusterBuildResponse build(ClusterBuildRequest request) {
         RepoRun run = repoRunRepository.findById(request.getRunId())
                 .orElseThrow(() -> new ClusterException(ClusterErrorCode.CLUSTER_RUN_NOT_FOUND));
+
+        if (publicApiEntrySyncService.ensureTypeEntries(run).isEmpty()) {
+            throw new ClusterException(ClusterErrorCode.CLUSTER_PUBLIC_API_EMPTY);
+        }
 
         ProjectedGraph projectedGraph;
         try {

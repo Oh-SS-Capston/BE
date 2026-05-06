@@ -56,13 +56,13 @@ class GraphProjectionServiceTest {
         when(authService.getModule()).thenReturn(null);
 
         // TYPE 조회 결과에는 이 둘만 들어감
-        when(symbolRepository.findAllByRunIdAndSymbolKind("run-1", SymbolKind.TYPE))
+        when(symbolRepository.findAllByRun_RunIdAndSymbolKind("run-1", SymbolKind.TYPE))
                 .thenReturn(List.of(authController, authService));
 
         PublicApiEntry publicApiEntry = mock(PublicApiEntry.class);
         when(publicApiEntry.getSymbol()).thenReturn(authController);
 
-        when(publicApiEntryRepository.findAllByRunId("run-1"))
+        when(publicApiEntryRepository.findAllByRun_RunId("run-1"))
                 .thenReturn(List.of(publicApiEntry));
 
         Edge edge1 = mock(Edge.class);
