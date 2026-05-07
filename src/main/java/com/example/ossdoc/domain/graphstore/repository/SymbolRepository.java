@@ -11,6 +11,10 @@ public interface SymbolRepository extends JpaRepository<SymbolEntity, String> {
 
     Optional<SymbolEntity> findByRun_RunIdAndQualifiedName(String runId, String qualifiedName);
 
-    //추가 : 특정 run에 속한 symbol들 중에서, 특정 종류(symbolKind)만 전부 조회
+    /**
+     * 성능 최적화를 위해 run 범위 symbol을 한 번에 로드한다.
+     */
+    List<SymbolEntity> findAllByRun_RunId(String runId);
+
     List<SymbolEntity> findAllByRun_RunIdAndSymbolKind(String runId, SymbolKind symbolkind);
 }

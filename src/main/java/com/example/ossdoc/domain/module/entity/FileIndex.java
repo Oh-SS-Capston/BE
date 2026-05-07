@@ -3,7 +3,7 @@ package com.example.ossdoc.domain.module.entity;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.global.apiPayload.code.BaseCreatedEntity;
 import jakarta.persistence.*;
-        import lombok.*;
+import lombok.*;
 
 @Entity
 @Table(
@@ -16,7 +16,12 @@ import jakarta.persistence.*;
 public class FileIndex extends BaseCreatedEntity {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @SequenceGenerator(
+            name = "file_index_id_seq_gen",
+            sequenceName = "file_index_file_id_seq",
+            allocationSize = 50
+    )
+    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "file_index_id_seq_gen")
     @Column(name = "file_id")
     private Long fileId;
 
