@@ -41,10 +41,10 @@ public class SymbolEntity extends BaseAuditedEntity {
     @Column(name = "symbol_kind", nullable = false)
     private SymbolKind symbolKind;
 
-    @Column(name = "qualified_name", nullable = false)
+    @Column(name = "qualified_name", nullable = false, columnDefinition = "text")
     private String qualifiedName;
 
-    @Column(name = "simple_name")
+    @Column(name = "simple_name", columnDefinition = "text")
     private String simpleName;
 
     @Convert(converter = AccessLevelConverter.class)

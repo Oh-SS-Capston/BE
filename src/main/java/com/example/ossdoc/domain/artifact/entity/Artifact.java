@@ -46,4 +46,14 @@ public class Artifact extends BaseCreatedEntity {
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "meta", nullable = false, columnDefinition = "jsonb")
     private JsonNode meta;
+
+    /**
+     * 동일 산출물의 재실행 결과를 덮어쓸 때 메타데이터를 갱신한다.
+     */
+    public void overwriteJsonContent(String schemaVersion, String contentType, String path, JsonNode meta) {
+        this.schemaVersion = schemaVersion;
+        this.contentType = contentType;
+        this.path = path;
+        this.meta = meta;
+    }
 }
