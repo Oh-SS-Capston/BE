@@ -17,7 +17,9 @@ public class SubsystemScoringService {
     * - subsystem ranking 생성
     * */
     public List<Subsystem> enrichSubsystems(List<Subsystem> subsystems, List<SymbolRankingItem> allSymbolItems) {
+        // 방어 로직: subsystemId가 비어 있는 항목은 groupBy 이전에 제외해 NPE를 방지한다.
         Map<String, List<SymbolRankingItem>> symbolsBySubsystem = allSymbolItems.stream()
+                .filter(item -> item.getSubsystemId() != null && !item.getSubsystemId().isBlank())
                 .collect(Collectors.groupingBy(SymbolRankingItem::getSubsystemId));
 
         List<Subsystem> enriched = new ArrayList<>();
