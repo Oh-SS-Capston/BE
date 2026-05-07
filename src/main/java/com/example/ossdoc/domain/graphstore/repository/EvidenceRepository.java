@@ -9,6 +9,11 @@ import java.util.Optional;
 
 public interface EvidenceRepository extends JpaRepository<Evidence, Long> {
 
+    /**
+     * 성능 최적화를 위해 run 범위 evidence를 한 번에 로드한다.
+     */
+    List<Evidence> findAllByRun_RunId(String runId);
+
     Optional<Evidence> findFirstByRun_RunIdAndHash(
             String runId,
             String hash

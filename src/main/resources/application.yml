@@ -1,0 +1,105 @@
+spring:
+  config:
+    import: optional:file:.env[.properties]
+
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:local}
+
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/ossdoc_db}
+    username: ${DB_USER:postgres}
+    password: ${DB_PW}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      data-source-properties:
+        reWriteBatchedInserts: true
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        show_sql: false
+        format_sql: false
+        use_sql_comments: false
+        default_batch_fetch_size: 50
+        jdbc:
+          batch_size: 50
+          batch_versioned_data: true
+        order_inserts: true
+        order_updates: true
+
+  sql:
+    init:
+      mode: never
+
+  security:
+    oauth2:
+      client:
+        registration:
+          google:
+            client-id: ${GOOGLE_CLIENT_ID}
+            client-secret: ${GOOGLE_CLIENT_SECRET}
+            scope:
+              - openid
+              - profile
+              - email
+            redirect-uri: "{baseUrl}/login/oauth2/code/{registrationId}"
+
+build:
+  maven-command: ${MAVEN_COMMAND:C:\\tools\\apache-maven-3.9.13\\bin\\mvn.cmd}
+  gradle-command: ${GRADLE_COMMAND:gradle}
+  java-homes:
+    - ${JAVA11_HOME}
+    - ${JAVA17_HOME}
+    - ${JAVA21_HOME}
+  isolated-execution: true
+  gradle-user-home-dir: ${GRADLE_USER_HOME_DIR:.gradle-home}
+  maven-local-repo-dir: ${MAVEN_LOCAL_REPO_DIR:.m2/repository}
+
+ossdoc:
+  workspace:
+    base-dir: ${OSSDOC_WORKSPACE_BASE_DIR:C:/data/ossdoc}
+
+app:
+  cors:
+    allowed-origins:
+      - ${FRONTEND_BASE_URL:http://localhost:5173}
+
+  auth:
+    frontend-success-redirect-uri: ${FRONTEND_SUCCESS_REDIRECT_URI:http://localhost:5173/login/success}
+    frontend-failure-redirect-uri: ${FRONTEND_FAILURE_REDIRECT_URI:http://localhost:5173/login/failure}
+    access-cookie-name: ${ACCESS_COOKIE_NAME:ossdoc_access_token}
+    refresh-cookie-name: ${REFRESH_COOKIE_NAME:ossdoc_refresh_token}
+    secure-cookie: ${AUTH_SECURE_COOKIE:false}
+    same-site: ${AUTH_COOKIE_SAME_SITE:Lax}
+
+jwt:
+  issuer: ${JWT_ISSUER:ossdoc}
+  secret: ${JWT_SECRET}
+  access-expiration-ms: ${JWT_ACCESS_EXPIRATION_MS:1800000}
+  refresh-expiration-ms: ${JWT_REFRESH_EXPIRATION_MS:1209600000}
+
+claude:
+  api-key: ${CLAUDE_API_KEY:}
+  model: ${CLAUDE_MODEL:claude-sonnet-4-5}
+  max-tokens: ${CLAUDE_MAX_TOKENS:100}
+
+cloud:
+  aws:
+    credentials:
+      access-key: ${AWS_ACCESS_KEY_ID}
+      secret-key: ${AWS_SECRET_ACCESS_KEY}
+    region:
+      static: ${AWS_REGION:ap-northeast-2}
+    s3:
+      bucket: ${S3_BUCKET:ossdoc-artifact-storage}
+
+logging:
+  level:
+    com:
+      example:
+        ossdoc:
+          domain:
+            build: DEBUG
