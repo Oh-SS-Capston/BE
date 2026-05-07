@@ -44,12 +44,12 @@ public class ClassMapBuildService {
             "/src/it/",
             "/src/integrationtest/",
             "/src/integration-test/",
-            "/example/",
-            "/examples/",
-            "/sample/",
-            "/samples/",
-            "/demo/",
-            "/demos/"
+            "/example/src",
+            "/examples/src",
+            "/sample/src",
+            "/samples/src",
+            "/demo/src",
+            "/demos/src"
     );
     private static final Set<String> NON_PRODUCTION_PACKAGE_TOKENS = Set.of(
             "test",
