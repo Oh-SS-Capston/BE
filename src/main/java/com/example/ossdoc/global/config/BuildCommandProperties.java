@@ -35,12 +35,20 @@ public class BuildCommandProperties {
     private boolean isolatedExecution = true;
 
     /**
-     * Relative directory (from workspace root) used as GRADLE_USER_HOME.
+     * GRADLE_USER_HOME으로 사용할 경로.
+     * 상대경로면 workspaceRoot 기준으로 해석하고, 절대경로면 그대로 사용한다.
      */
     private String gradleUserHomeDir = ".gradle-home";
 
     /**
-     * Relative directory (from workspace root) used as Maven local repository.
+     * Maven local repository로 사용할 경로.
+     * 상대경로면 workspaceRoot 기준으로 해석하고, 절대경로면 그대로 사용한다.
      */
     private String mavenLocalRepoDir = ".m2/repository";
+
+    /**
+     * true이면 Gradle 명령에 --no-daemon을 붙인다.
+     * 기본값은 false이며, 반복 실행 성능을 위해 데몬 재사용을 허용한다.
+     */
+    private boolean gradleNoDaemon = false;
 }

@@ -189,13 +189,14 @@ public class BuildResolveService {
 
         Path init = gradleInitScriptWriter.write(tmpDir);
 
-        List<String> dumpCmd = List.of(
-                gradleBuildSupport.selectGradleCmd(repoRoot),
-                "-I", init.toString(),
-                "ossdocDump",
-                "-q",
-                "--no-daemon"
-        );
+        // Gradle 명령을 가변 리스트로 구성해 데몬 옵션을 설정값으로 제어한다.
+        List<String> dumpCmd = new ArrayList<>();
+        dumpCmd.add(gradleBuildSupport.selectGradleCmd(repoRoot));
+        dumpCmd.add("-I");
+        dumpCmd.add(init.toString());
+        dumpCmd.add("ossdocDump");
+        dumpCmd.add("-q");
+        appendGradleDaemonOption(dumpCmd);
 
         ProcessRunner.Result dump = gradleBuildSupport.runWithJavaFallback(
                 repoRoot,
@@ -227,13 +228,15 @@ public class BuildResolveService {
             modules.addAll(sourceOnlyModuleScanner.scan(repoRoot));
         }
 
-        List<String> compileCmd = List.of(
-                gradleBuildSupport.selectGradleCmd(repoRoot),
-                "classes",
-                "-x", "test",
-                "-x", "check",
-                "--no-daemon"
-        );
+        // compile 단계도 동일하게 데몬 옵션을 설정 기반으로 붙인다.
+        List<String> compileCmd = new ArrayList<>();
+        compileCmd.add(gradleBuildSupport.selectGradleCmd(repoRoot));
+        compileCmd.add("classes");
+        compileCmd.add("-x");
+        compileCmd.add("test");
+        compileCmd.add("-x");
+        compileCmd.add("check");
+        appendGradleDaemonOption(compileCmd);
 
         ProcessRunner.Result compile = gradleBuildSupport.runWithJavaFallback(
                 repoRoot,
@@ -405,6 +408,17 @@ public class BuildResolveService {
                 ? r.getOutput()
                 : (r.getError() == null ? "" : r.getError());
         return base.substring(0, Math.min(600, base.length()));
+    }
+
+    /**
+     * Gradle 데몬 사용 정책을 명령에 반영한다.
+     * 기본값(false)은 데몬 재사용으로 반복 실행 속도를 높이고,
+     * 필요 시 gradle-no-daemon=true로 기존 동작을 강제할 수 있다.
+     */
+    private void appendGradleDaemonOption(List<String> command) {
+        if (buildCommandProperties.isGradleNoDaemon()) {
+            command.add("--no-daemon");
+        }
     }
 
     /**
