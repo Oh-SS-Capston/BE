@@ -17,4 +17,9 @@ public interface SymbolRepository extends JpaRepository<SymbolEntity, String> {
     List<SymbolEntity> findAllByRun_RunId(String runId);
 
     List<SymbolEntity> findAllByRun_RunIdAndSymbolKind(String runId, SymbolKind symbolkind);
+
+    /**
+     * 군집화 투영 단계에서 노드 인덱스를 재현 가능하게 만들기 위해 정렬된 순서로 조회한다.
+     */
+    List<SymbolEntity> findAllByRun_RunIdAndSymbolKindOrderBySymbolIdAsc(String runId, SymbolKind symbolKind);
 }

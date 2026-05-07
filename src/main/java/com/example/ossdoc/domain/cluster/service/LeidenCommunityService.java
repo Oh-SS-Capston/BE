@@ -13,10 +13,17 @@ import nl.cwts.util.LargeDoubleArray;
 import nl.cwts.util.LargeIntArray;
 import org.springframework.stereotype.Service;
 
+import java.util.Random;
+
 @Service
 @RequiredArgsConstructor
-public class LeidenCommunityService { //Leiden 실행 서비스
+public class LeidenCommunityService {
+    private static final long DEFAULT_LEIDEN_SEED = 31_415_926L;
 
+    /**
+     * Leiden community detection을 수행한다.
+     * 동일 run에서 결과 재현성을 높이기 위해 runId 기반 시드를 고정한다.
+     */
     public CommunityResult detect(ProjectedGraph graph, double resolution, int iterations) {
         try {
             int nNodes = graph.getNodes().size();
@@ -48,7 +55,7 @@ public class LeidenCommunityService { //Leiden 실행 서비스
                     true
             );
 
-            LeidenAlgorithm leiden = new LeidenAlgorithm();
+            LeidenAlgorithm leiden = new LeidenAlgorithm(new Random(resolveSeed(graph.getRunId())));
             leiden.setResolution(resolution);
             leiden.setNIterations(iterations);
 
@@ -61,5 +68,15 @@ public class LeidenCommunityService { //Leiden 실행 서비스
         } catch (Exception e) {
             throw new ClusterException(ClusterErrorCode.CLUSTER_LEIDEN_FAILED);
         }
+    }
+
+    /**
+     * runId가 같으면 항상 동일한 시드를 만들고, runId가 비어있으면 기본 시드를 사용한다.
+     */
+    private long resolveSeed(String runId) {
+        if (runId == null || runId.isBlank()) {
+            return DEFAULT_LEIDEN_SEED;
+        }
+        return DEFAULT_LEIDEN_SEED + (runId.hashCode() & 0xffffffffL);
     }
 }
