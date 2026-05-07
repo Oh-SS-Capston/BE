@@ -6,6 +6,7 @@ import com.example.ossdoc.domain.cluster.dto.request.ClusterBuildRequest;
 import com.example.ossdoc.domain.cluster.dto.response.ClusterBuildResponse;
 import com.example.ossdoc.domain.cluster.model.CommunityResult;
 import com.example.ossdoc.domain.cluster.model.ProjectedGraph;
+import com.example.ossdoc.domain.cluster.model.ProjectedNode;
 import com.example.ossdoc.domain.cluster.model.subsystem.Subsystem;
 import com.example.ossdoc.domain.cluster.support.SubsystemAssembler;
 import com.example.ossdoc.domain.publicapi.service.PublicApiEntrySyncService;
@@ -71,6 +72,7 @@ class ClusterBuildServiceTest {
         when(publicApiEntrySyncService.ensureTypeEntries(run)).thenReturn(Set.of("A1"));
 
         ProjectedGraph projectedGraph = mock(ProjectedGraph.class);
+        when(projectedGraph.getNodes()).thenReturn(List.of(mock(ProjectedNode.class)));
         when(graphProjectionService.loadProjectedGraph("run-1")).thenReturn(projectedGraph);
 
         CommunityResult communityResult = new CommunityResult(new int[]{0, 0, 1, 1});

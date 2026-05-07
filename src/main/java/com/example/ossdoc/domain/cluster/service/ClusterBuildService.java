@@ -15,6 +15,7 @@ import com.example.ossdoc.domain.publicapi.service.PublicApiEntrySyncService;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -25,6 +26,7 @@ import java.util.Map;
 @Service
 @RequiredArgsConstructor
 @Transactional
+@Slf4j
 public class ClusterBuildService {
 
     private final RepoRunRepository repoRunRepository;
@@ -91,6 +93,16 @@ public class ClusterBuildService {
                     request.getTopK()
             );
         } catch (Exception e) {
+            // 랭킹 실패의 실제 원인을 로그로 남겨 후속 장애 분석 속도를 높인다.
+            log.error(
+                    "[CLUSTER] ranking failed. runId={}, topK={}, subsystemCount={}, nodeCount={}, edgeCount={}",
+                    request.getRunId(),
+                    request.getTopK(),
+                    subsystems.size(),
+                    projectedGraph.getNodes() == null ? 0 : projectedGraph.getNodes().size(),
+                    projectedGraph.getEdges() == null ? 0 : projectedGraph.getEdges().size(),
+                    e
+            );
             throw new ClusterException(ClusterErrorCode.CLUSTER_RANKING_FAILED);
         }
 

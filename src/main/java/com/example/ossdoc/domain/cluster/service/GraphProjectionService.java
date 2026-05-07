@@ -36,7 +36,8 @@ public class GraphProjectionService {
     public ProjectedGraph loadProjectedGraph(String runId) {
         List<SymbolEntity> typeSymbols;
         try {
-            typeSymbols = symbolRepository.findAllByRun_RunIdAndSymbolKind(runId, SymbolKind.TYPE);
+            // 노드 인덱스를 매 실행 동일하게 만들기 위해 심볼 ID 기준 정렬 조회를 사용한다.
+            typeSymbols = symbolRepository.findAllByRun_RunIdAndSymbolKindOrderBySymbolIdAsc(runId, SymbolKind.TYPE);
         } catch (Exception e) {
             throw new ClusterException(ClusterErrorCode.CLUSTER_PROJECTION_FAILED);
         }
@@ -81,9 +82,19 @@ public class GraphProjectionService {
             throw new ClusterException(ClusterErrorCode.CLUSTER_PROJECTION_FAILED);
         }
 
-        Map<String, Double> undirectedWeightMap = new HashMap<>();
+        // 엣지 집계 순서를 고정해 부동소수 연산 누적 순서 차이로 인한 미세 흔들림을 줄인다.
+        // 원본 컬렉션을 직접 변경하지 않도록 복사본을 정렬한다.
+        List<Edge> sortedEdges = new ArrayList<>(allEdges);
+        sortedEdges.sort(Comparator
+                .comparing((Edge edge) -> safeSymbolId(edge.getFromSymbol()))
+                .thenComparing(edge -> safeSymbolId(edge.getToSymbol()))
+                .thenComparing(edge -> edge.getEdgeType() == null ? "" : edge.getEdgeType().name())
+                .thenComparing(edge -> edge.getEdgeId() == null ? Long.MAX_VALUE : edge.getEdgeId()));
 
-        for (Edge edge : allEdges) {
+        // key 정렬이 보장되는 맵을 사용해 projected edge 리스트 순서도 재현 가능하게 맞춘다.
+        Map<String, Double> undirectedWeightMap = new TreeMap<>();
+
+        for (Edge edge : sortedEdges) {
             if (edge.getFromSymbol() == null || edge.getToSymbol() == null) {
                 continue;
             }
@@ -126,5 +137,15 @@ public class GraphProjectionService {
         int idx = qualifiedName == null ? -1 : qualifiedName.lastIndexOf('.');
         if (idx < 0) return "";
         return qualifiedName.substring(0, idx);
+    }
+
+    /**
+     * 정렬 비교 시 null-safe 처리를 위해 심볼 ID를 문자열로 변환한다.
+     */
+    private String safeSymbolId(SymbolEntity symbol) {
+        if (symbol == null || symbol.getSymbolId() == null) {
+            return "";
+        }
+        return symbol.getSymbolId();
     }
 }
