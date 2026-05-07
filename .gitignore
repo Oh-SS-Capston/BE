@@ -51,3 +51,5 @@ workspace/
 /claude's generated markdown file
 *.md
 !**/README.md
+
+src/main/resources/application.yml

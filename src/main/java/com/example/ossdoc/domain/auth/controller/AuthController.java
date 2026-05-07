@@ -31,9 +31,10 @@ public class AuthController {
     }
 
     @PostMapping("/logout")
-    public ApiResponse<String> logout(HttpServletResponse response,
+    public ApiResponse<String> logout(HttpServletRequest request,
+                                      HttpServletResponse response,
                                       @AuthenticationPrincipal AuthenticatedUser authenticatedUser) {
-        authService.logout(response, authenticatedUser);
+        authService.logout(request, response, authenticatedUser);
         return ApiResponse.onSuccess("로그아웃 완료");
     }
 }
