@@ -55,12 +55,6 @@ public class ClassMapBuildService {
             "test",
             "tests",
             "it",
-            "example",
-            "examples",
-            "sample",
-            "samples",
-            "demo",
-            "demos",
             "benchmark",
             "benchmarks"
     );
