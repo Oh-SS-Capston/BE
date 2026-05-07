@@ -25,6 +25,7 @@ import com.example.ossdoc.domain.build.support.SourceOnlyModuleScanner;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.example.ossdoc.global.config.BuildCommandProperties;
+import com.example.ossdoc.global.properties.WorkspaceProperties;
 import com.example.ossdoc.domain.artifact.entity.Artifact;
 import com.fasterxml.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
@@ -75,6 +76,7 @@ public class BuildResolveService {
     private final GradleBuildSupport gradleBuildSupport;
     private final GradleInitScriptWriter gradleInitScriptWriter;
     private final GradleDumpParser gradleDumpParser;
+    private final WorkspaceProperties workspaceProperties;
 
     /**
      * 역할:
@@ -381,16 +383,61 @@ public class BuildResolveService {
         if (!buildCommandProperties.isIsolatedExecution()) {
             return null;
         }
-        Path mavenLocalRepo = workspaceRoot.resolve(buildCommandProperties.getMavenLocalRepoDir())
-                .toAbsolutePath()
-                .normalize();
+
+        // run 폴더 기준이 아니라 공용 base-dir 기준으로 해석해야 runId가 달라도 캐시를 재사용할 수 있다.
+        Path basePath = resolveCachePathBase(workspaceRoot);
+        Path mavenLocalRepo = resolveConfiguredCachePath(basePath, buildCommandProperties.getMavenLocalRepoDir(), ".m2/repository");
         try {
             Files.createDirectories(mavenLocalRepo);
+            log.info(
+                    "[BUILD] Maven local repository resolved. configured={}, basePath={}, resolved={}",
+                    buildCommandProperties.getMavenLocalRepoDir(),
+                    basePath,
+                    mavenLocalRepo
+            );
             return mavenLocalRepo;
         } catch (IOException e) {
             log.warn("[BUILD] Failed to create Maven local repository path. path={}", mavenLocalRepo, e);
             return null;
         }
+    }
+
+    /**
+     * 캐시 기준 경로를 결정한다.
+     * base-dir이 비어있거나 비정상이면 workspaceRoot 기준으로 안전하게 폴백한다.
+     */
+    private Path resolveCachePathBase(Path workspaceRoot) {
+        String configuredBaseDir = workspaceProperties.getBaseDir();
+        if (configuredBaseDir == null || configuredBaseDir.isBlank()) {
+            return workspaceRoot.toAbsolutePath().normalize();
+        }
+
+        try {
+            return Path.of(configuredBaseDir).toAbsolutePath().normalize();
+        } catch (RuntimeException e) {
+            log.warn(
+                    "[BUILD] Invalid workspace base directory configured. baseDir={}, fallback={}",
+                    configuredBaseDir,
+                    workspaceRoot,
+                    e
+            );
+            return workspaceRoot.toAbsolutePath().normalize();
+        }
+    }
+
+    /**
+     * 캐시 경로 설정값을 절대경로로 정규화한다.
+     * 상대경로는 basePath 하위로 붙여 runId와 무관한 공용 캐시로 사용한다.
+     */
+    private Path resolveConfiguredCachePath(Path basePath, String configuredPath, String defaultRelativePath) {
+        String pathValue = (configuredPath == null || configuredPath.isBlank())
+                ? defaultRelativePath
+                : configuredPath;
+        Path rawPath = Path.of(pathValue);
+        if (rawPath.isAbsolute()) {
+            return rawPath.toAbsolutePath().normalize();
+        }
+        return basePath.resolve(rawPath).toAbsolutePath().normalize();
     }
 
     private BuildMode decideBuildMode(List<BuildModuleManifest> modules, ProcessRunner.Result compile) {
