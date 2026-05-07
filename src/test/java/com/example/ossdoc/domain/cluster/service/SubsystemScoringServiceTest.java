@@ -48,11 +48,11 @@ class SubsystemScoringServiceTest {
         assertThat(enriched).hasSize(1);
         Subsystem ss = enriched.get(0);
 
-        assertThat(ss.getScore()).isEqualTo(1.9);
+        assertThat(ss.getScore()).isCloseTo(1.9 / Math.sqrt(3), org.assertj.core.data.Offset.offset(1e-9));
         assertThat(ss.getCoreSymbolIds()).containsExactly("a1", "a2");
 
         assertThat(rankings).hasSize(1);
         assertThat(rankings.get(0).getSubsystemId()).isEqualTo("ss_001");
-        assertThat(rankings.get(0).getScore()).isEqualTo(1.9);
+        assertThat(rankings.get(0).getScore()).isCloseTo(1.9 / Math.sqrt(3), org.assertj.core.data.Offset.offset(1e-9));
     }
 }
