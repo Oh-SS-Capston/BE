@@ -20,7 +20,12 @@ import java.math.BigDecimal;
 public class Edge extends BaseAuditedEntity {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @SequenceGenerator(
+            name = "edge_id_seq_gen",
+            sequenceName = "edge_edge_id_seq",
+            allocationSize = 50
+    )
+    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "edge_id_seq_gen")
     @Column(name = "edge_id")
     private Long edgeId;
 

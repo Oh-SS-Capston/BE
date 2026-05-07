@@ -13,9 +13,11 @@ import com.example.ossdoc.global.security.jwt.JwtTokenProvider;
 import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import jakarta.servlet.http.HttpSession;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseCookie;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -90,16 +92,31 @@ public class AuthService {
     }
 
     @Transactional
-    public void logout(HttpServletResponse response, AuthenticatedUser authenticatedUser) {
-        if (authenticatedUser != null) {
-            User user = userRepository.findById(authenticatedUser.getUserId())
-                    .orElseThrow(() -> new AuthException(AuthErrorCode.USER_NOT_FOUND));
+    public void logout(HttpServletRequest request,
+                       HttpServletResponse response,
+                       AuthenticatedUser authenticatedUser) {
 
-            refreshTokenRepository.deleteByUser(user);
+        if (authenticatedUser != null) {
+            userRepository.findById(authenticatedUser.getUserId())
+                    .ifPresent(refreshTokenRepository::deleteByUser);
+        }
+
+        String refreshToken = getCookieValue(request, authProperties.getRefreshCookieName());
+
+        if (refreshToken != null) {
+            refreshTokenRepository.deleteByToken(refreshToken);
         }
 
         deleteCookie(response, authProperties.getAccessCookieName());
         deleteCookie(response, authProperties.getRefreshCookieName());
+        deleteCookie(response, "JSESSIONID");
+
+        HttpSession session = request.getSession(false);
+        if (session != null) {
+            session.invalidate();
+        }
+
+        SecurityContextHolder.clearContext();
     }
 
     public CurrentUserResponse getCurrentUser(AuthenticatedUser authenticatedUser) {

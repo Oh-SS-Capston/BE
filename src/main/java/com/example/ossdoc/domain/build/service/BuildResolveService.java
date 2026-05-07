@@ -90,6 +90,7 @@ public class BuildResolveService {
                 .orElseThrow(() -> new BuildException(BuildErrorCode.RUN_NOT_FOUND));
 
         Path workspaceRoot = Path.of(run.getWorkspaceRoot());
+        log.info("[BUILD] Resolve start. runId={}, workspaceRoot={}", runId, workspaceRoot);
         if (!Files.exists(workspaceRoot)) {
             log.debug("workspeaceRoot={}", workspaceRoot);
             throw new BuildException(BuildErrorCode.WORKSPACE_NOT_FOUND);
@@ -107,6 +108,14 @@ public class BuildResolveService {
         Path tmpDir = workspaceRoot.resolve("tmp");
 
         BuildDetector.Detected detected = buildDetector.detect(actualRepoRoot);
+        log.info(
+                "[BUILD] Detection result. repoRoot={}, hasGradle={}, hasMaven={}, gradleWrapper={}, mavenWrapper={}",
+                actualRepoRoot,
+                detected.hasGradle(),
+                detected.hasMaven(),
+                detected.gradleWrapperExists(),
+                detected.mavenWrapperExists()
+        );
 
         BuildManifest manifest;
         if (!detected.hasAnyBuildTool()) {
@@ -148,8 +157,10 @@ public class BuildResolveService {
                     mavenManifest.getBuildMode()
             );
         } else if (detected.hasGradle()) {
+            log.info("[BUILD] Resolve path selected: GRADLE");
             manifest = resolveGradle(runId, actualRepoRoot, workspaceRoot, detected.gradleWrapperExists(), tmpDir.resolve("gradle"));
         } else {
+            log.info("[BUILD] Resolve path selected: MAVEN");
             manifest = resolveMaven(runId, actualRepoRoot, workspaceRoot, detected.mavenWrapperExists(), tmpDir.resolve("maven"));
         }
 
@@ -158,6 +169,7 @@ public class BuildResolveService {
         Artifact savedManifest = artifactService.saveJsonArtifact(run, ArtifactKind.BUILD_MANIFEST, "0.1",
                 "build_manifest.json", manifestJson);
 
+        log.info("[BUILD] Resolve end. runId={}, mode={}, manifestPath={}", runId, manifest.getBuildMode(), savedManifest.getPath());
         return new BuildResolveResponse(runId, manifest.getBuildMode(), savedManifest.getPath());
     }
 
@@ -173,6 +185,7 @@ public class BuildResolveService {
     private BuildManifest resolveGradle(String runId, Path repoRoot, Path workspaceRoot, boolean wrapperUsed, Path tmpDir) {
         List<BuildModuleManifest> modules = new ArrayList<>();
         List<BuildFailure> failures = new ArrayList<>();
+        log.info("[BUILD] Gradle resolve start. runId={}, repoRoot={}, wrapperUsed={}", runId, repoRoot, wrapperUsed);
 
         Path init = gradleInitScriptWriter.write(tmpDir);
 
@@ -191,6 +204,7 @@ public class BuildResolveService {
                 Duration.ofMinutes(10),
                 "dump"
         );
+        log.info("[BUILD] Gradle dump finished. exitCode={}", dump.getExitCode());
         if (dump.getExitCode() == 0) {
             modules.addAll(gradleDumpParser.parse(repoRoot, dump.getOutput(), failures));
 
@@ -228,6 +242,7 @@ public class BuildResolveService {
                 Duration.ofMinutes(20),
                 "compile"
         );
+        log.info("[BUILD] Gradle compile finished. exitCode={}", compile.getExitCode());
 
         BuildMode mode = decideBuildMode(modules, compile);
         if (compile.getExitCode() != 0 && mode != BuildMode.FAILED) {
@@ -258,6 +273,7 @@ public class BuildResolveService {
      * 2) 실패 원인을 BuildFailure로 명시
      */
     private BuildManifest resolveMavenSourceOnly(String runId, Path repoRoot, boolean wrapperUsed, String reason, String logHint) {
+        log.warn("[BUILD] Maven source-only fallback. runId={}, repoRoot={}, reason={}", runId, repoRoot, reason);
         List<BuildModuleManifest> modules = sourceOnlyModuleScanner.scan(repoRoot);
 
         List<BuildFailure> failures = new ArrayList<>();
@@ -403,6 +419,7 @@ public class BuildResolveService {
     private BuildManifest resolveMaven(String runId, Path repoRoot, Path workspaceRoot, boolean wrapperUsed, Path tmpDir) {
         List<BuildFailure> failures = new ArrayList<>();
         List<BuildModuleManifest> modules = new ArrayList<>();
+        log.info("[BUILD] Maven resolve start. runId={}, repoRoot={}, wrapperUsed={}", runId, repoRoot, wrapperUsed);
 
         try {
             Files.createDirectories(tmpDir);
@@ -422,12 +439,18 @@ public class BuildResolveService {
             Path classpathFile = tmpDir.resolve("maven-classpath.txt");
             Path mavenLocalRepoPath = resolveMavenLocalRepoPath(workspaceRoot);
             MavenJavaSelection mavenJavaSelection = resolveMavenJavaSelection(repoRoot);
+            log.info(
+                    "[BUILD] Maven Java selection. requiredMajor={}, candidates={}",
+                    mavenJavaSelection.requiredJavaMajor().orElse(null),
+                    mavenJavaSelection.javaHomes()
+            );
             ProcessRunner.Result cpResult = runMavenWithJavaFallback(
                     mavenLocalRepoPath,
                     mavenJavaSelection,
                     "classpath",
                     env -> mavenBuildSupport.buildClasspath(repoRoot, classpathFile, mavenLocalRepoPath, env)
             );
+            log.info("[BUILD] Maven classpath finished. exitCode={}", cpResult.getExitCode());
 
             List<String> classpath = List.of();
             if (cpResult.getExitCode() == 0) {
@@ -446,6 +469,7 @@ public class BuildResolveService {
                     "compile",
                     env -> mavenBuildSupport.compile(repoRoot, mavenLocalRepoPath, env)
             );
+            log.info("[BUILD] Maven compile finished. exitCode={}", compileResult.getExitCode());
 
             for (Path moduleRoot : moduleRoots) {
                 modules.add(mavenBuildSupport.toModuleManifest(repoRoot, moduleRoot, classpath));
@@ -492,6 +516,7 @@ public class BuildResolveService {
                     .build();
 
         } catch (Exception e) {
+            log.warn("[BUILD] Maven resolve exception. runId={}, repoRoot={}", runId, repoRoot, e);
             return resolveMavenSourceOnly(
                     runId,
                     repoRoot,

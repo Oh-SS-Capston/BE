@@ -1,6 +1,6 @@
 package com.example.ossdoc.domain.cluster.service;
 
-import com.example.ossdoc.domain.cluster.artifact.output.SubsystemsJsonDto;
+import com.example.ossdoc.domain.cluster.artifact.output.SubsystemsJson;
 import com.example.ossdoc.domain.artifact.entity.Artifact;
 import com.example.ossdoc.domain.cluster.dto.request.ClusterBuildRequest;
 import com.example.ossdoc.domain.cluster.dto.response.ClusterBuildResponse;
@@ -8,6 +8,7 @@ import com.example.ossdoc.domain.cluster.model.CommunityResult;
 import com.example.ossdoc.domain.cluster.model.ProjectedGraph;
 import com.example.ossdoc.domain.cluster.model.subsystem.Subsystem;
 import com.example.ossdoc.domain.cluster.support.SubsystemAssembler;
+import com.example.ossdoc.domain.publicapi.service.PublicApiEntrySyncService;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import org.junit.jupiter.api.DisplayName;
@@ -20,6 +21,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.*;
@@ -46,6 +48,9 @@ class ClusterBuildServiceTest {
     @Mock
     private ClusterArtifactPublisher clusterArtifactPublisher;
 
+    @Mock
+    private PublicApiEntrySyncService publicApiEntrySyncService;
+
     @InjectMocks
     private ClusterBuildService clusterBuildService;
 
@@ -63,6 +68,7 @@ class ClusterBuildServiceTest {
         RepoRun run = mock(RepoRun.class);
         when(run.getRunId()).thenReturn("run-1");
         when(repoRunRepository.findById("run-1")).thenReturn(Optional.of(run));
+        when(publicApiEntrySyncService.ensureTypeEntries(run)).thenReturn(Set.of("A1"));
 
         ProjectedGraph projectedGraph = mock(ProjectedGraph.class);
         when(graphProjectionService.loadProjectedGraph("run-1")).thenReturn(projectedGraph);
@@ -125,6 +131,7 @@ class ClusterBuildServiceTest {
         assertThat(response.getSubsystemsArtifactId()).isEqualTo(202L);
 
         verify(repoRunRepository).findById("run-1");
+        verify(publicApiEntrySyncService).ensureTypeEntries(run);
         verify(graphProjectionService).loadProjectedGraph("run-1");
         verify(leidenCommunityService).detect(projectedGraph, 0.012, 10);
         verify(subsystemAssembler).assemble(projectedGraph, communityResult.getClusters(), 3);
@@ -132,12 +139,12 @@ class ClusterBuildServiceTest {
         verify(clusterArtifactPublisher).publishSubsystems(eq(run), any());
         verify(clusterArtifactPublisher).publishRankings(eq(run), any());
 
-        ArgumentCaptor<SubsystemsJsonDto> subsystemsDtoCaptor =
-                ArgumentCaptor.forClass(SubsystemsJsonDto.class);
+        ArgumentCaptor<SubsystemsJson> subsystemsDtoCaptor =
+                ArgumentCaptor.forClass(SubsystemsJson.class);
 
         verify(clusterArtifactPublisher).publishSubsystems(eq(run), subsystemsDtoCaptor.capture());
 
-        SubsystemsJsonDto captured = subsystemsDtoCaptor.getValue();
+        SubsystemsJson captured = subsystemsDtoCaptor.getValue();
         assertThat(captured).isNotNull();
         assertThat(captured.getSubsystems()).hasSize(2);
         assertThat(captured.getSubsystems().get(0).getSubsystemId()).isEqualTo("ss_001");

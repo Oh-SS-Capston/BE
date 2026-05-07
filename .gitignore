@@ -1,6 +1,5 @@
-### Gradle ###
+HELP.md
 .gradle
-.gradle-home/
 build/
 !gradle/wrapper/gradle-wrapper.jar
 !**/src/main/**/build/
@@ -33,20 +32,23 @@ out/
 /dist/
 /nbdist/
 /.nb-gradle/
-
+s
 ### VS Code ###
 .vscode/
 
-### QueryDSL generated sources ###
+# QueryDSL generated sources
 src/main/generated/
 
-### Env ###
+#env
 .env
 
-### Workspace ###
+#workspace
 workspace/
 
-### Markdown (Claude generated) ###
+/AGENTS.md
+.gradle-home/
+
+/claude's generated markdown file
 *.md
 !**/README.md
 

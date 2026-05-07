@@ -12,6 +12,7 @@ import com.example.ossdoc.domain.graphstore.dto.facts.raw.RawRelationTableDto;
 import com.example.ossdoc.domain.graphstore.dto.facts.raw.RawSourceSpanDto;
 import com.example.ossdoc.domain.graphstore.dto.facts.raw.RawSymbolFactDto;
 import com.example.ossdoc.domain.graphstore.dto.facts.raw.RawSymbolTableDto;
+import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -24,14 +25,15 @@ public class GraphStoreFactsNormalizer {
 
     public NormalizedFactsDocument normalize(RawFactsDocumentDto raw) {
         if (raw == null) {
-            return new NormalizedFactsDocument(null, Map.of(), List.of(), List.of());
+            return new NormalizedFactsDocument(null, Map.of(), List.of(), List.of(), 0);
         }
 
         return new NormalizedFactsDocument(
                 raw.getSchemaVersion(),
                 normalizeEvidence(raw.getEvidence()),
                 normalizeSymbols(raw.getSymbols()),
-                normalizeRelations(raw.getRelations())
+                normalizeRelations(raw.getRelations()),
+                countObservations(raw.getObservations())
         );
     }
 
@@ -163,5 +165,30 @@ public class GraphStoreFactsNormalizer {
             return left;
         }
         return right;
+    }
+
+    /**
+     * observations 섹션 내 버킷별 항목 개수를 합산한다.
+     */
+    private int countObservations(JsonNode observations) {
+        if (observations == null || observations.isNull()) {
+            return 0;
+        }
+        if (observations.isArray()) {
+            return observations.size();
+        }
+        if (!observations.isObject()) {
+            return 0;
+        }
+
+        int count = 0;
+        for (var fields = observations.fields(); fields.hasNext(); ) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            JsonNode bucket = entry.getValue();
+            if (bucket != null && bucket.isArray()) {
+                count += bucket.size();
+            }
+        }
+        return count;
     }
 }
