@@ -6,8 +6,10 @@ import com.example.ossdoc.global.properties.AuthProperties;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import jakarta.servlet.http.HttpSession;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.web.authentication.SimpleUrlAuthenticationSuccessHandler;
 import org.springframework.stereotype.Component;
 
@@ -31,6 +33,16 @@ public class OAuth2LoginSuccessHandler extends SimpleUrlAuthenticationSuccessHan
         authService.issueLoginTokens(user, response);
         clearAuthenticationAttributes(request);
 
-        getRedirectStrategy().sendRedirect(request, response, authProperties.getFrontendSuccessRedirectUri());
+        HttpSession session = request.getSession(false);
+        if (session != null) {
+            session.invalidate();
+        }
+
+        SecurityContextHolder.clearContext();
+
+        getRedirectStrategy().sendRedirect(
+                request,
+                response,
+                authProperties.getFrontendSuccessRedirectUri());
     }
 }
