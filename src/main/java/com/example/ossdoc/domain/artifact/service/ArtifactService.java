@@ -78,17 +78,20 @@ public class ArtifactService {
         log.info("[ArtifactService] S3 업로드 완료 — kind: {}, url: {}", kind, s3Url);
 
         // 3. DB 저장 (path = S3 URL)
-        Artifact artifact = new Artifact(
-                null,
-                run,
-                kind,
-                schemaVersion,
-                "application/json",
-                s3Url,
-                content
-        );
-
-        return artifactRepository.save(artifact);
+        return artifactRepository.findByRun_RunIdAndKindAndPath(run.getRunId(), kind, s3Url)
+                .map(existing -> {
+                    existing.overwriteJsonContent(schemaVersion, "application/json", s3Url, content);
+                    return existing;
+                })
+                .orElseGet(() -> artifactRepository.save(new Artifact(
+                        null,
+                        run,
+                        kind,
+                        schemaVersion,
+                        "application/json",
+                        s3Url,
+                        content
+                )));
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

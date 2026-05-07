@@ -14,6 +14,8 @@ import java.util.stream.Collectors;
 @Service
 @RequiredArgsConstructor
 public class SymbolScoringService {
+    private static final String UNASSIGNED_SUBSYSTEM_ID = "ss_unassigned";
+
     /* 역할
     * - degree map 계산
     * - bridge map 계산
@@ -54,7 +56,7 @@ public class SymbolScoringService {
             items.add(SymbolRankingItem.builder()
                     .symbolId(node.getSymbolId())
                     .qualifiedName(node.getQualifiedName())
-                    .subsystemId(subsystemBySymbolId.get(node.getSymbolId()))
+                    .subsystemId(resolveSubsystemId(node.getSymbolId(), subsystemBySymbolId))
                     .score(total)
                     .structuralScore(structural)
                     .bridgeScore(bridge)
@@ -90,6 +92,18 @@ public class SymbolScoringService {
                     .build());
         }
         return ranked;
+    }
+
+    /**
+     * 심볼이 subsystem 조립 결과에서 누락된 경우에도 null 대신 안전한 기본값을 부여한다.
+     * - 이유: null subsystemId는 이후 groupingBy 단계에서 예외를 유발할 수 있다.
+     */
+    private String resolveSubsystemId(String symbolId, Map<String, String> subsystemBySymbolId) {
+        String subsystemId = subsystemBySymbolId.get(symbolId);
+        if (subsystemId == null || subsystemId.isBlank()) {
+            return UNASSIGNED_SUBSYSTEM_ID;
+        }
+        return subsystemId;
     }
 
     private Map<String, Double> buildDegreeMap(ProjectedGraph graph) {

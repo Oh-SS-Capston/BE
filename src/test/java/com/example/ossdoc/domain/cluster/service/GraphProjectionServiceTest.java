@@ -22,7 +22,8 @@ import java.math.BigDecimal;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class GraphProjectionServiceTest {
@@ -55,8 +56,8 @@ class GraphProjectionServiceTest {
         when(authService.getSimpleName()).thenReturn("AuthService");
         when(authService.getModule()).thenReturn(null);
 
-        // TYPE 조회 결과에는 이 둘만 들어감
-        when(symbolRepository.findAllByRun_RunIdAndSymbolKind("run-1", SymbolKind.TYPE))
+        // TYPE 조회 결과에는 타입 심볼만 포함된다.
+        when(symbolRepository.findAllByRun_RunIdAndSymbolKindOrderBySymbolIdAsc("run-1", SymbolKind.TYPE))
                 .thenReturn(List.of(authController, authService));
 
         PublicApiEntry publicApiEntry = mock(PublicApiEntry.class);
@@ -99,7 +100,7 @@ class GraphProjectionServiceTest {
         assertThat(second.getQualifiedName()).isEqualTo("com.example.auth.AuthService");
         assertThat(second.isPublicApi()).isFalse();
 
-        // directed 2개가 하나의 undirected edge로 합쳐져야 함
+        // directed 2개가 하나의 undirected edge로 합쳐져야 한다.
         assertThat(projectedGraph.getEdges()).hasSize(1);
 
         ProjectedEdge mergedEdge = projectedGraph.getEdges().get(0);
