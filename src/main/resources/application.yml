@@ -10,6 +10,9 @@ spring:
     username: ${DB_USER:postgres}
     password: ${DB_PW}
     driver-class-name: org.postgresql.Driver
+    hikari:
+      data-source-properties:
+        reWriteBatchedInserts: true
 
   jpa:
     hibernate:
@@ -17,10 +20,15 @@ spring:
     properties:
       hibernate:
         dialect: org.hibernate.dialect.PostgreSQLDialect
-        show_sql: true
-        format_sql: true
-        use_sql_comments: true
+        show_sql: false
+        format_sql: false
+        use_sql_comments: false
         default_batch_fetch_size: 50
+        jdbc:
+          batch_size: 50
+          batch_versioned_data: true
+        order_inserts: true
+        order_updates: true
 
   sql:
     init:

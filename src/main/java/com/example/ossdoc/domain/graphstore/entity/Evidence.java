@@ -15,7 +15,12 @@ import lombok.*;
 public class Evidence extends BaseCreatedEntity {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @SequenceGenerator(
+            name = "evidence_id_seq_gen",
+            sequenceName = "evidence_evidence_id_seq",
+            allocationSize = 50
+    )
+    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "evidence_id_seq_gen")
     @Column(name = "evidence_id")
     private Long evidenceId;
 
