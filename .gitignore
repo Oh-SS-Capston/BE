@@ -57,3 +57,6 @@ MarkDownFile/
 
 ### Application config ###
 src/main/resources/application.yml
+
+### claude file
+.claude/
