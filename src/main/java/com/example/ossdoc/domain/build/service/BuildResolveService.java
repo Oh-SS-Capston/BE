@@ -25,6 +25,7 @@ import com.example.ossdoc.domain.build.support.SourceOnlyModuleScanner;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.example.ossdoc.global.config.BuildCommandProperties;
+import com.example.ossdoc.global.properties.WorkspaceProperties;
 import com.example.ossdoc.domain.artifact.entity.Artifact;
 import com.fasterxml.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
@@ -75,6 +76,7 @@ public class BuildResolveService {
     private final GradleBuildSupport gradleBuildSupport;
     private final GradleInitScriptWriter gradleInitScriptWriter;
     private final GradleDumpParser gradleDumpParser;
+    private final WorkspaceProperties workspaceProperties;
 
     /**
      * 역할:
@@ -189,13 +191,14 @@ public class BuildResolveService {
 
         Path init = gradleInitScriptWriter.write(tmpDir);
 
-        List<String> dumpCmd = List.of(
-                gradleBuildSupport.selectGradleCmd(repoRoot),
-                "-I", init.toString(),
-                "ossdocDump",
-                "-q",
-                "--no-daemon"
-        );
+        // Gradle 명령을 가변 리스트로 구성해 데몬 옵션을 설정값으로 제어한다.
+        List<String> dumpCmd = new ArrayList<>();
+        dumpCmd.add(gradleBuildSupport.selectGradleCmd(repoRoot));
+        dumpCmd.add("-I");
+        dumpCmd.add(init.toString());
+        dumpCmd.add("ossdocDump");
+        dumpCmd.add("-q");
+        appendGradleDaemonOption(dumpCmd);
 
         ProcessRunner.Result dump = gradleBuildSupport.runWithJavaFallback(
                 repoRoot,
@@ -227,13 +230,15 @@ public class BuildResolveService {
             modules.addAll(sourceOnlyModuleScanner.scan(repoRoot));
         }
 
-        List<String> compileCmd = List.of(
-                gradleBuildSupport.selectGradleCmd(repoRoot),
-                "classes",
-                "-x", "test",
-                "-x", "check",
-                "--no-daemon"
-        );
+        // compile 단계도 동일하게 데몬 옵션을 설정 기반으로 붙인다.
+        List<String> compileCmd = new ArrayList<>();
+        compileCmd.add(gradleBuildSupport.selectGradleCmd(repoRoot));
+        compileCmd.add("classes");
+        compileCmd.add("-x");
+        compileCmd.add("test");
+        compileCmd.add("-x");
+        compileCmd.add("check");
+        appendGradleDaemonOption(compileCmd);
 
         ProcessRunner.Result compile = gradleBuildSupport.runWithJavaFallback(
                 repoRoot,
@@ -378,16 +383,61 @@ public class BuildResolveService {
         if (!buildCommandProperties.isIsolatedExecution()) {
             return null;
         }
-        Path mavenLocalRepo = workspaceRoot.resolve(buildCommandProperties.getMavenLocalRepoDir())
-                .toAbsolutePath()
-                .normalize();
+
+        // run 폴더 기준이 아니라 공용 base-dir 기준으로 해석해야 runId가 달라도 캐시를 재사용할 수 있다.
+        Path basePath = resolveCachePathBase(workspaceRoot);
+        Path mavenLocalRepo = resolveConfiguredCachePath(basePath, buildCommandProperties.getMavenLocalRepoDir(), ".m2/repository");
         try {
             Files.createDirectories(mavenLocalRepo);
+            log.info(
+                    "[BUILD] Maven local repository resolved. configured={}, basePath={}, resolved={}",
+                    buildCommandProperties.getMavenLocalRepoDir(),
+                    basePath,
+                    mavenLocalRepo
+            );
             return mavenLocalRepo;
         } catch (IOException e) {
             log.warn("[BUILD] Failed to create Maven local repository path. path={}", mavenLocalRepo, e);
             return null;
         }
+    }
+
+    /**
+     * 캐시 기준 경로를 결정한다.
+     * base-dir이 비어있거나 비정상이면 workspaceRoot 기준으로 안전하게 폴백한다.
+     */
+    private Path resolveCachePathBase(Path workspaceRoot) {
+        String configuredBaseDir = workspaceProperties.getBaseDir();
+        if (configuredBaseDir == null || configuredBaseDir.isBlank()) {
+            return workspaceRoot.toAbsolutePath().normalize();
+        }
+
+        try {
+            return Path.of(configuredBaseDir).toAbsolutePath().normalize();
+        } catch (RuntimeException e) {
+            log.warn(
+                    "[BUILD] Invalid workspace base directory configured. baseDir={}, fallback={}",
+                    configuredBaseDir,
+                    workspaceRoot,
+                    e
+            );
+            return workspaceRoot.toAbsolutePath().normalize();
+        }
+    }
+
+    /**
+     * 캐시 경로 설정값을 절대경로로 정규화한다.
+     * 상대경로는 basePath 하위로 붙여 runId와 무관한 공용 캐시로 사용한다.
+     */
+    private Path resolveConfiguredCachePath(Path basePath, String configuredPath, String defaultRelativePath) {
+        String pathValue = (configuredPath == null || configuredPath.isBlank())
+                ? defaultRelativePath
+                : configuredPath;
+        Path rawPath = Path.of(pathValue);
+        if (rawPath.isAbsolute()) {
+            return rawPath.toAbsolutePath().normalize();
+        }
+        return basePath.resolve(rawPath).toAbsolutePath().normalize();
     }
 
     private BuildMode decideBuildMode(List<BuildModuleManifest> modules, ProcessRunner.Result compile) {
@@ -405,6 +455,17 @@ public class BuildResolveService {
                 ? r.getOutput()
                 : (r.getError() == null ? "" : r.getError());
         return base.substring(0, Math.min(600, base.length()));
+    }
+
+    /**
+     * Gradle 데몬 사용 정책을 명령에 반영한다.
+     * 기본값(false)은 데몬 재사용으로 반복 실행 속도를 높이고,
+     * 필요 시 gradle-no-daemon=true로 기존 동작을 강제할 수 있다.
+     */
+    private void appendGradleDaemonOption(List<String> command) {
+        if (buildCommandProperties.isGradleNoDaemon()) {
+            command.add("--no-daemon");
+        }
     }
 
     /**

@@ -23,4 +23,10 @@ public interface EdgeRepository extends JpaRepository<Edge, Long> {
     );
 
     List<Edge> findAllByRun_RunId(String runId);
+
+    /**
+     * run 범위의 edge 총량을 집계한다.
+     * - 그래프 밀도(대략) 계산에 사용해 추천 파라미터를 보정한다.
+     */
+    long countByRun_RunId(String runId);
 }
