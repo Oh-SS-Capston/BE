@@ -23,6 +23,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -36,8 +37,20 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class RuleCandidateArtifactPublisher {
 
-    private static final String SCHEMA_VERSION = "1.1";
+    private static final String SCHEMA_VERSION = "1.2";
     private static final String RELATIVE_PATH = "rule/rule_candidates.json";
+    private static final BigDecimal LOW_SCORE_THRESHOLD = new BigDecimal("0.6000");
+    private static final Set<String> PRIMARY_EVIDENCE_ROLES = Set.of(
+            "IF_CONDITION",
+            "THROW_STATEMENT",
+            "RETURN_STATEMENT",
+            "ERROR_RESPONSE",
+            "REPOSITORY_SAVE",
+            "REPOSITORY_UPDATE",
+            "REPOSITORY_DELETE",
+            "ASSERTION_CALL",
+            "REQUIRE_CALL"
+    );
 
     private final RuleCandidateRepository ruleCandidateRepository;
     private final RuleCandidateEvidenceRepository ruleCandidateEvidenceRepository;
@@ -64,7 +77,8 @@ public class RuleCandidateArtifactPublisher {
             List<RuleCandidateEvidence> evidences =
                     evidencesByCandidateId.getOrDefault(candidate.getCandidateId(), List.of());
 
-            items.add(toItem(candidate, evidences));
+            CandidateQuality quality = evaluateQuality(candidate, evidences);
+            items.add(toItem(candidate, evidences, quality));
         }
 
         long edgeCount = edgeRepository.countByRun_RunId(run.getRunId());
@@ -136,9 +150,11 @@ public class RuleCandidateArtifactPublisher {
 
     private RuleCandidateItem toItem(
             RuleCandidate candidate,
-            List<RuleCandidateEvidence> evidences
+            List<RuleCandidateEvidence> evidences,
+            CandidateQuality quality
     ) {
         SymbolEntity subject = candidate.getSubjectSymbol();
+        List<RuleCandidateEvidenceJson> evidenceJson = toEvidenceJsonList(evidences);
 
         return RuleCandidateItem.builder()
                 .candidateId(candidate.getCandidateId())
@@ -159,8 +175,48 @@ public class RuleCandidateArtifactPublisher {
                 .summary(candidate.getSummary())
                 .impact(candidate.getImpact())
                 .meta(candidate.getMeta())
-                .evidences(toEvidenceJsonList(evidences))
+                .estimated(quality.estimated())
+                .qualityLabel(quality.estimated() ? "ESTIMATED" : "CONFIRMED")
+                .qualityReason(quality.reason())
+                .evidenceCount(evidenceJson.size())
+                .evidences(evidenceJson)
                 .build();
+    }
+
+    /**
+     * 근거가 약한 후보를 추정(ESTIMATED)으로 분리해,
+     * UI에서 사용자에게 신뢰도 상태를 명확히 보여주기 위한 판단 로직.
+     */
+    private CandidateQuality evaluateQuality(RuleCandidate candidate, List<RuleCandidateEvidence> evidences) {
+        int evidenceCount = evidences == null ? 0 : evidences.size();
+        int primaryEvidenceCount = countPrimaryEvidence(evidences);
+
+        boolean lowConfidence = candidate.getConfidence() == RuleCandidateConfidence.LOW;
+        boolean sparseEvidence = evidenceCount == 0 || (evidenceCount == 1 && primaryEvidenceCount == 0);
+        boolean lowScore = candidate.getScore() != null
+                && candidate.getScore().compareTo(LOW_SCORE_THRESHOLD) < 0;
+        boolean weakSupport = candidate.getSupportCount() == null || candidate.getSupportCount() <= 1;
+
+        if (lowConfidence) {
+            return new CandidateQuality(true, "LOW confidence");
+        }
+        if (sparseEvidence) {
+            return new CandidateQuality(true, "insufficient evidence links");
+        }
+        if (lowScore && weakSupport) {
+            return new CandidateQuality(true, "low score and weak support");
+        }
+        return new CandidateQuality(false, "sufficient evidence");
+    }
+
+    private int countPrimaryEvidence(List<RuleCandidateEvidence> evidences) {
+        if (evidences == null || evidences.isEmpty()) {
+            return 0;
+        }
+        return (int) evidences.stream()
+                .map(RuleCandidateEvidence::getRole)
+                .filter(role -> role != null && PRIMARY_EVIDENCE_ROLES.contains(role))
+                .count();
     }
 
     /**
@@ -267,5 +323,8 @@ public class RuleCandidateArtifactPublisher {
             int bounded = Math.max(0, Math.min(values.length - 1, index));
             return values[bounded];
         }
+    }
+
+    private record CandidateQuality(boolean estimated, String reason) {
     }
 }
