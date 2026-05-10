@@ -7,6 +7,9 @@ public enum ArtifactKind {
     FACTS_JSON,
     GRAPH_STATS,
 
+    // Rule Candidate Mining 결과물
+    RULE_CANDIDATES_JSON,
+
     // LLM 의미 정제 결과물
     LLM_REFINED_RULES,
     LLM_SCENARIO_SPECS,
