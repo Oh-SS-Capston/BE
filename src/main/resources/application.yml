@@ -65,6 +65,10 @@ build:
 ossdoc:
   workspace:
     base-dir: ${OSSDOC_WORKSPACE_BASE_DIR:C:/data/ossdoc}
+  pipeline:
+    worker:
+      fixed-delay-ms: ${PIPELINE_WORKER_FIXED_DELAY_MS:2000}
+      max-jobs-per-tick: ${PIPELINE_WORKER_MAX_JOBS_PER_TICK:1}
 
 app:
   cors:

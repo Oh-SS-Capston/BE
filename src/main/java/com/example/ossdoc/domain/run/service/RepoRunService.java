@@ -1,24 +1,17 @@
 package com.example.ossdoc.domain.run.service;
 
-import com.example.ossdoc.domain.artifact.enums.ArtifactKind;
-import com.example.ossdoc.domain.artifact.service.ArtifactService;
 import com.example.ossdoc.domain.auth.exception.AuthException;
 import com.example.ossdoc.domain.auth.exception.code.AuthErrorCode;
-import com.example.ossdoc.domain.run.dto.RepoRunCreateRequest;
-import com.example.ossdoc.domain.run.dto.RepoRunCreateResponse;
+import com.example.ossdoc.domain.run.dto.request.RepoRunCreateRequest;
+import com.example.ossdoc.domain.run.dto.response.RepoRunCreateResponse;
 import com.example.ossdoc.domain.run.entity.RepoRun;
-import com.example.ossdoc.domain.run.enums.RunStatus;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.example.ossdoc.domain.run.support.GithubClient;
 import com.example.ossdoc.domain.run.support.GithubRepoRef;
 import com.example.ossdoc.domain.run.support.GithubUrlParser;
-import com.example.ossdoc.domain.run.support.JobManifestWriter;
 import com.example.ossdoc.domain.run.support.WorkspaceManager;
-import com.example.ossdoc.domain.run.support.ZipUtils;
 import com.example.ossdoc.domain.user.entity.User;
 import com.example.ossdoc.domain.user.repository.UserRepository;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -35,11 +28,9 @@ public class RepoRunService {
 
     private final RepoRunRepository repoRunRepository;
     private final UserRepository userRepository;
-    private final ArtifactService artifactService;
     private final GithubClient githubClient;
     private final WorkspaceManager workspaceManager;
-    private final JobManifestWriter jobManifestWriter;
-    private final ObjectMapper objectMapper;
+    private final RunPipelineQueueService pipelineQueueService;
 
     @Transactional
     public RepoRunCreateResponse createRun(RepoRunCreateRequest req, Long userId) {
@@ -47,6 +38,7 @@ public class RepoRunService {
                 .orElseThrow(() -> new AuthException(AuthErrorCode.USER_NOT_FOUND));
 
         GithubRepoRef parsed = GithubUrlParser.parse(req.getRepoUrl(), req.getRef());
+
         log.info(
                 "Create run requested userId={}, owner={}, repo={}, requestedRef={}",
                 userId,
@@ -56,12 +48,24 @@ public class RepoRunService {
         );
 
         String ref = parsed.getRef();
+
         if (ref == null || ref.isBlank()) {
             ref = githubClient.resolveDefaultBranch(parsed.getOwner(), parsed.getRepo());
-            log.info("Resolved default branch owner={}, repo={}, ref={}", parsed.getOwner(), parsed.getRepo(), ref);
+
+            log.info(
+                    "Resolved default branch owner={}, repo={}, ref={}",
+                    parsed.getOwner(),
+                    parsed.getRepo(),
+                    ref
+            );
         }
 
-        String commitSha = githubClient.resolveCommitSha(parsed.getOwner(), parsed.getRepo(), ref);
+        String commitSha = githubClient.resolveCommitSha(
+                parsed.getOwner(),
+                parsed.getRepo(),
+                ref
+        );
+
         log.info(
                 "Resolved commit SHA owner={}, repo={}, ref={}, sha={}",
                 parsed.getOwner(),
@@ -70,43 +74,40 @@ public class RepoRunService {
                 abbreviateSha(commitSha)
         );
 
-        String runId = "run_" + OffsetDateTime.now().toLocalDate().toString().replace("-", "")
-                + "_" + UUID.randomUUID().toString().substring(0, 8);
+        String runId = "run_"
+                + OffsetDateTime.now().toLocalDate().toString().replace("-", "")
+                + "_"
+                + UUID.randomUUID().toString().substring(0, 8);
+
         Path wsRoot = workspaceManager.workspaceRoot(runId);
+
         log.info("Workspace prepared runId={}, workspaceRoot={}", runId, wsRoot);
-
-        Path zipPath = wsRoot.resolve("repo.zip");
-        githubClient.downloadZip(parsed.getOwner(), parsed.getRepo(), commitSha, zipPath);
-
-        Path unzipRoot = wsRoot.resolve("repo");
-        ZipUtils.unzip(zipPath, unzipRoot);
-        log.info("Repository snapshot ready runId={}, zipPath={}, unzipRoot={}", runId, zipPath, unzipRoot);
 
         RepoRun run = new RepoRun(
                 runId,
                 owner,
                 req.getRepoUrl(),
+                parsed.getOwner(),
+                parsed.getRepo(),
+                ref,
                 commitSha,
-                RunStatus.QUEUED,
-                null,
-                null,
-                null,
-                null,
                 wsRoot.toString()
         );
+
         repoRunRepository.save(run);
 
-        ObjectNode meta = objectMapper.createObjectNode();
-        meta.put("ref", ref);
-        meta.put("commitSha", commitSha);
-        meta.put("generatedAt", OffsetDateTime.now().toString());
+        /*
+         * 프론트가 build/extraction/graphstore/cluster/classMap API를 직접 호출하지 않도록,
+         * run 생성과 동시에 pipeline job을 큐에 넣습니다.
+         */
+        pipelineQueueService.enqueue(run, userId);
 
-        Path artifactsDir = workspaceManager.artifactsDir(wsRoot);
-        jobManifestWriter.write(artifactsDir, meta);
-
-        artifactService.saveJsonArtifact(run, ArtifactKind.JOB_MANIFEST, "0.1",
-                "job_manifest.json", meta);
-        log.info("Run queued runId={}, status={}, sha={}", runId, run.getStatus(), abbreviateSha(commitSha));
+        log.info(
+                "Run queued runId={}, status={}, sha={}",
+                runId,
+                run.getStatus(),
+                abbreviateSha(commitSha)
+        );
 
         return RepoRunCreateResponse.builder()
                 .runId(runId)
@@ -120,6 +121,7 @@ public class RepoRunService {
         if (sha == null || sha.isBlank()) {
             return "<empty>";
         }
+
         return sha.length() <= 8 ? sha : sha.substring(0, 8);
     }
 }

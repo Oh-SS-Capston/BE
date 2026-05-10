@@ -1,4 +1,4 @@
-package com.example.ossdoc.domain.run.dto;
+package com.example.ossdoc.domain.run.dto.response;
 
 import com.example.ossdoc.domain.run.enums.RunStatus;
 import lombok.Builder;

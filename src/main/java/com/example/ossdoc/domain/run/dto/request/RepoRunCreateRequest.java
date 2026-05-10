@@ -1,5 +1,5 @@
 // domain/run/dto/RepoRunCreateRequest.java
-package com.example.ossdoc.domain.run.dto;
+package com.example.ossdoc.domain.run.dto.request;
 
 import jakarta.validation.constraints.NotBlank;
 import lombok.Getter;
