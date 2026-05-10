@@ -3,21 +3,20 @@ package com.example.ossdoc.domain.run.entity;
 import com.example.ossdoc.domain.run.enums.RunStatus;
 import com.example.ossdoc.domain.user.entity.User;
 import com.example.ossdoc.global.apiPayload.code.BaseAuditedEntity;
-import com.example.ossdoc.global.apiPayload.code.BaseCreatedEntity;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.persistence.*;
-import lombok.*;
+import lombok.AccessLevel;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
-
-import java.time.OffsetDateTime;
 
 @Entity
 @Table(name = "repo_run")
 @Getter
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 @AllArgsConstructor
-
 public class RepoRun extends BaseAuditedEntity {
 
     @Id
@@ -31,9 +30,22 @@ public class RepoRun extends BaseAuditedEntity {
     @Column(name = "repo_url", nullable = false)
     private String repoUrl;
 
+    @Column(name = "repo_owner")
+    private String repoOwner;
+
+    @Column(name = "repo_name")
+    private String repoName;
+
+    @Column(name = "resolved_ref")
+    private String resolvedRef;
+
     @Column(name = "commit_sha", nullable = false)
     private String commitSha;
 
+    /*
+     * run의 대표 최종 상태만 저장합니다.
+     * 세부 진행률은 RunPipelineJob이 담당합니다.
+     */
     @Enumerated(EnumType.STRING)
     @Column(name = "status", nullable = false)
     private RunStatus status = RunStatus.QUEUED;
@@ -54,7 +66,44 @@ public class RepoRun extends BaseAuditedEntity {
     @Column(name = "workspace_root")
     private String workspaceRoot;
 
+    public RepoRun(
+            String runId,
+            User owner,
+            String repoUrl,
+            String repoOwner,
+            String repoName,
+            String resolvedRef,
+            String commitSha,
+            String workspaceRoot
+    ) {
+        this.runId = runId;
+        this.owner = owner;
+        this.repoUrl = repoUrl;
+        this.repoOwner = repoOwner;
+        this.repoName = repoName;
+        this.resolvedRef = resolvedRef;
+        this.commitSha = commitSha;
+        this.workspaceRoot = workspaceRoot;
+        this.status = RunStatus.QUEUED;
+    }
+
     public void assignOwner(User owner) {
         this.owner = owner;
+    }
+
+    public void markRunning() {
+        this.status = RunStatus.RUNNING;
+    }
+
+    public void markSuccess() {
+        this.status = RunStatus.SUCCESS;
+    }
+
+    public void markPartialSuccess() {
+        this.status = RunStatus.PARTIAL_SUCCESS;
+    }
+
+    public void markFailed() {
+        this.status = RunStatus.FAILED;
     }
 }
