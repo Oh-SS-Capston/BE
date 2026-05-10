@@ -9,6 +9,7 @@ public record RuleCandidateMineResponse(
         int totalCandidates,
         int highConfidenceCount,
         int mediumConfidenceCount,
-        int lowConfidenceCount
+        int lowConfidenceCount,
+        boolean forceRebuildApplied
 ) {
 }

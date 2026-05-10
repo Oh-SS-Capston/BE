@@ -29,4 +29,9 @@ public interface EdgeRepository extends JpaRepository<Edge, Long> {
      * - 그래프 밀도(대략) 계산에 사용해 추천 파라미터를 보정한다.
      */
     long countByRun_RunId(String runId);
+
+    /**
+     * run 범위에서 마지막으로 갱신된 edge 1건을 조회한다.
+     */
+    Optional<Edge> findTopByRun_RunIdOrderByUpdatedAtDesc(String runId);
 }
