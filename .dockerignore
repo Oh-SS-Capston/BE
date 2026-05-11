@@ -1,0 +1,15 @@
+.git
+.gradle
+build
+out
+.idea
+*.iml
+
+logs
+runs
+workspace
+data
+tmp
+artifacts
+
+*.log

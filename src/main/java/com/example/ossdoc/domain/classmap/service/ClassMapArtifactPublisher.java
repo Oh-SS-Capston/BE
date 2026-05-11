@@ -1,0 +1,41 @@
+// 역할: 생성된 class_diagram.json을 artifact 저장소에 기록한다.
+package com.example.ossdoc.domain.classmap.service;
+
+import com.example.ossdoc.domain.artifact.entity.Artifact;
+import com.example.ossdoc.domain.artifact.enums.ArtifactKind;
+import com.example.ossdoc.domain.artifact.service.ArtifactService;
+import com.example.ossdoc.domain.classmap.artifact.output.ClassDiagramJson;
+import com.example.ossdoc.domain.classmap.exception.ClassMapException;
+import com.example.ossdoc.domain.classmap.exception.code.ClassMapErrorCode;
+import com.example.ossdoc.domain.run.entity.RepoRun;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Service;
+
+@Service
+@RequiredArgsConstructor
+public class ClassMapArtifactPublisher {
+    private final ArtifactService artifactService;
+    private final ObjectMapper objectMapper;
+
+    /**
+     * class diagram 산출물을 JSON artifact로 저장한다.
+     */
+    public Artifact publishClassDiagram(RepoRun run, ClassDiagramJson dto) {
+        try {
+            JsonNode content = objectMapper.valueToTree(dto);
+            return artifactService.saveJsonArtifact(
+                    run,
+                    ArtifactKind.CLASS_DIAGRAM_JSON,
+                    "1.0",
+                    "analysis/class_diagram.json",
+                    content
+            );
+        } catch (ClassMapException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new ClassMapException(ClassMapErrorCode.CLASS_MAP_ARTIFACT_SAVE_FAILED);
+        }
+    }
+}

@@ -1,3 +1,4 @@
+// 역할: 그래프 저장소의 심볼 메타데이터와 코드 위치 정보를 보관한다.
 package com.example.ossdoc.domain.graphstore.entity;
 
 import com.example.ossdoc.domain.graphstore.converter.AccessLevelConverter;
@@ -40,10 +41,10 @@ public class SymbolEntity extends BaseAuditedEntity {
     @Column(name = "symbol_kind", nullable = false)
     private SymbolKind symbolKind;
 
-    @Column(name = "qualified_name", nullable = false)
+    @Column(name = "qualified_name", nullable = false, columnDefinition = "text")
     private String qualifiedName;
 
-    @Column(name = "simple_name")
+    @Column(name = "simple_name", columnDefinition = "text")
     private String simpleName;
 
     @Convert(converter = AccessLevelConverter.class)
@@ -75,4 +76,20 @@ public class SymbolEntity extends BaseAuditedEntity {
     @Enumerated(EnumType.STRING)
     @Column(name = "origin", nullable = false)
     private OriginKind origin = OriginKind.AST;
+
+    public void assignOwner(SymbolEntity owner) {
+        this.owner = owner;
+    }
+
+    /**
+     * 역할: 심볼이 선언된 소스 파일(FileIndex)을 연결한다.
+     */
+    public void assignSourceFile(FileIndex sourceFile) {
+        this.sourceFile = sourceFile;
+    }
+
+    public void assignSourceSpan(Integer startLine, Integer endLine) {
+        this.sourceStartLine = startLine;
+        this.sourceEndLine = endLine;
+    }
 }

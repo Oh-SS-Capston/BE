@@ -35,7 +35,7 @@ public class MavenBuildSupport {
 
     /**
      * 역할:
-     * 테스트를 제외한 Maven 컴파일(test-compile)을 수행한다.
+     * 테스트를 제외한 Maven 메인 컴파일(compile)을 수행한다.
      *
      * 책임:
      * mavenLocalRepoPath와 환경변수를 반영해 실행 결과를 반환한다.
@@ -57,7 +57,9 @@ public class MavenBuildSupport {
         args.add("-DskipTests");
         // 격리 실행 모드에서는 Run 전용 로컬 저장소를 사용해 의존성 충돌을 줄인다.
         appendMavenLocalRepoOption(args, mavenLocalRepoPath);
-        args.add("test-compile");
+        // build_manifest의 classesDirs(target/classes) 기준에 맞춰 메인 소스만 컴파일한다.
+        // test-compile 대신 compile을 사용해 테스트 소스 컴파일 비용을 줄인다.
+        args.add("compile");
 
         log.info("[BUILD] Maven compile start. repoRoot={}", repoRoot);
         return runMavenCommand(repoRoot, args, Duration.ofMinutes(20), environmentOverrides);
