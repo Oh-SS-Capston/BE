@@ -27,6 +27,13 @@ public class LlmConfig {
     private String model = "claude-sonnet-4-5";
 
     /**
+     * Step2~5(시나리오/요약/API/파일트리) 기본 모델.
+     * 비용과 속도를 위해 Haiku를 기본으로 사용하고,
+     * 필요 시 서비스 레이어에서 Sonnet으로 폴백한다.
+     */
+    private String haikuModel = "claude-haiku-4-5";
+
+    /**
      * 응답 최대 토큰 수
      */
     private int maxTokens = 8192;
