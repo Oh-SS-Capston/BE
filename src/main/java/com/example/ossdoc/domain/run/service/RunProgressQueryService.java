@@ -60,9 +60,30 @@ public class RunProgressQueryService {
                 .buildManifestArtifactId(latestArtifactId(runId, ArtifactKind.BUILD_MANIFEST))
                 .factsArtifactId(latestArtifactId(runId, ArtifactKind.FACTS_JSON))
                 .graphStatsArtifactId(latestArtifactId(runId, ArtifactKind.GRAPH_STATS))
+
                 .rankingsArtifactId(latestArtifactId(runId, ArtifactKind.RANKINGS_JSON))
                 .subsystemsArtifactId(latestArtifactId(runId, ArtifactKind.SUBSYSTEMS_JSON))
                 .classDiagramArtifactId(latestArtifactId(runId, ArtifactKind.CLASS_DIAGRAM_JSON))
+
+                .ruleCandidatesArtifactId(
+                        latestArtifactId(runId, ArtifactKind.RULE_CANDIDATES_JSON)
+                )
+
+                .llmRefinedRulesArtifactId(
+                        latestArtifactId(runId, ArtifactKind.LLM_REFINED_RULES)
+                )
+                .llmScenarioSpecsArtifactId(
+                        latestArtifactId(runId, ArtifactKind.LLM_SCENARIO_SPECS)
+                )
+                .llmSubsystemSummariesArtifactId(
+                        latestArtifactId(runId, ArtifactKind.LLM_SUBSYSTEM_SUMMARIES)
+                )
+                .llmApiDocsArtifactId(
+                        latestArtifactId(runId, ArtifactKind.LLM_API_DOCS)
+                )
+                .llmFileTreeDocsArtifactId(
+                        latestArtifactId(runId, ArtifactKind.LLM_FILE_TREE_DOCS)
+                )
                 .build();
 
         return RepoRunProgressResponse.of(
