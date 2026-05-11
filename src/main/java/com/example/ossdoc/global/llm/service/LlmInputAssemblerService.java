@@ -30,9 +30,9 @@ import java.util.*;
 public class LlmInputAssemblerService {
 
     // 토큰 과다 사용을 줄이기 위한 상한값들
-    private static final int MAX_AUTO_EVIDENCE = 48;
+    private static final int MAX_AUTO_EVIDENCE = 36;
     private static final int MAX_SNIPPET_LENGTH = 160;
-    private static final int MAX_RULE_CANDIDATES_FOR_LLM = 42;
+    private static final int MAX_RULE_CANDIDATES_FOR_LLM = 28;
     private static final int MAX_EVIDENCE_PER_CANDIDATE = 2;
     private static final int MAX_CLASS_DIAGRAM_NODES = 40;
     private static final int MAX_CLASS_DIAGRAM_EDGES = 80;
@@ -110,7 +110,6 @@ public class LlmInputAssemblerService {
         ObjectNode pipeline = root.putObject("pipeline");
         pipeline.set("jobManifest", nullSafe(compactJobManifest(jobManifest)));
         pipeline.set("buildManifest", nullSafe(compactBuildManifest(buildManifest)));
-        pipeline.set("facts", nullSafe(compactFacts(facts)));
         pipeline.set("ruleCandidates", nullSafe(compactRuleCandidates(ruleCandidates)));
         pipeline.set("subsystems", nullSafe(compactSubsystems(subsystems)));
         pipeline.set("rankings", nullSafe(compactRankings(rankings)));
@@ -194,9 +193,16 @@ public class LlmInputAssemblerService {
 
         ArrayNode selected = compact.putArray("candidates");
         int remain = MAX_RULE_CANDIDATES_FOR_LLM;
-        remain -= appendCompactRuleCandidates(candidates, primaryIds, true, remain, selected);
+        // public API 연관 후보를 우선 선별해 출력 품질을 높이고 토큰을 절감한다.
+        remain -= appendCompactRuleCandidates(candidates, primaryIds, true, true, remain, selected);
         if (remain > 0) {
-            appendCompactRuleCandidates(candidates, primaryIds, false, remain, selected);
+            remain -= appendCompactRuleCandidates(candidates, primaryIds, false, true, remain, selected);
+        }
+        if (remain > 0) {
+            remain -= appendCompactRuleCandidates(candidates, primaryIds, true, false, remain, selected);
+        }
+        if (remain > 0) {
+            appendCompactRuleCandidates(candidates, primaryIds, false, false, remain, selected);
         }
 
         compact.put("selectedCandidateCount", selected.size());
@@ -221,6 +227,7 @@ public class LlmInputAssemblerService {
             JsonNode candidates,
             Set<Long> primaryIds,
             boolean primaryPhase,
+            boolean publicOnly,
             int remain,
             ArrayNode out
     ) {
@@ -239,6 +246,10 @@ public class LlmInputAssemblerService {
             if (primaryPhase != isPrimary) {
                 continue;
             }
+            boolean publicApiRelated = candidate.path("publicApiRelated").asBoolean(false);
+            if (publicOnly && !publicApiRelated) {
+                continue;
+            }
             if (!primaryPhase && !"CONFIRMED".equalsIgnoreCase(candidate.path("qualityLabel").asText(""))) {
                 continue;
             }
@@ -252,19 +263,28 @@ public class LlmInputAssemblerService {
     private ObjectNode compactRuleCandidate(JsonNode candidate, boolean primary) {
         ObjectNode compact = objectMapper.createObjectNode();
         copyLongField(compact, candidate, "candidateId");
-        copyTextField(compact, candidate, "ruleKey", "candidateKind", "confidence", "status", "source");
-        copyTextField(compact, candidate, "subjectQualifiedName", "groupId", "title", "description", "fingerprint");
+        copyTextField(compact, candidate, "ruleKey", "candidateKind", "status");
+        copyTextField(compact, candidate, "subjectQualifiedName", "groupId");
         copyDecimalOrNumberField(compact, candidate, "score");
         copyIntField(compact, candidate, "supportCount", "evidenceCount");
         copyBooleanField(compact, candidate, "publicApiRelated", "estimated");
         copyTextField(compact, candidate, "qualityLabel", "qualityReason");
         compact.put("primary", primary);
 
-        if (!candidate.path("summary").isMissingNode() && !candidate.path("summary").isNull()) {
-            compact.set("summary", candidate.path("summary"));
+        String title = shortenText(candidate.path("title").asText(""), 120);
+        if (!title.isBlank()) {
+            compact.put("title", title);
         }
-        if (!candidate.path("impact").isMissingNode() && !candidate.path("impact").isNull()) {
-            compact.set("impact", candidate.path("impact"));
+        String description = shortenText(candidate.path("description").asText(""), 220);
+        if (!description.isBlank()) {
+            compact.put("description", description);
+        }
+
+        if (!candidate.path("summary").isMissingNode() && !candidate.path("summary").isNull()) {
+            String summary = shortenText(candidate.path("summary").asText(""), 180);
+            if (!summary.isBlank()) {
+                compact.put("summary", summary);
+            }
         }
 
         ArrayNode evidences = compact.putArray("evidences");
@@ -277,8 +297,7 @@ public class LlmInputAssemblerService {
                 }
                 ObjectNode evidenceNode = objectMapper.createObjectNode();
                 copyLongField(evidenceNode, evidence, "evidenceId", "signalId", "edgeId");
-                copyTextField(evidenceNode, evidence, "role", "filePath", "note");
-                copyDecimalOrNumberField(evidenceNode, evidence, "weight");
+                copyTextField(evidenceNode, evidence, "role", "filePath");
                 copyIntField(evidenceNode, evidence, "startLine", "endLine");
                 String snippet = trimSnippet(evidence.path("snippet").asText(null));
                 if (snippet != null) {
@@ -1055,6 +1074,20 @@ public class LlmInputAssemblerService {
             return value;
         }
         return value.substring(0, MAX_SNIPPET_LENGTH);
+    }
+
+    private String shortenText(String raw, int maxLength) {
+        if (raw == null) {
+            return "";
+        }
+        String value = raw.trim();
+        if (value.isBlank()) {
+            return "";
+        }
+        if (value.length() <= maxLength) {
+            return value;
+        }
+        return value.substring(0, maxLength);
     }
 
     private double round3(double value) {
