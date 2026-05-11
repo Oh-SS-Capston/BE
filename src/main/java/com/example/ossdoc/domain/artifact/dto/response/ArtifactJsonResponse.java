@@ -1,7 +1,6 @@
 package com.example.ossdoc.domain.artifact.dto.response;
 
 import com.example.ossdoc.domain.artifact.entity.Artifact;
-import com.fasterxml.jackson.databind.JsonNode;
 import lombok.Builder;
 import lombok.Getter;
 
@@ -17,12 +16,12 @@ public class ArtifactJsonResponse {
     private String path;
 
     /*
-     * content : 실제 class_diagram.json 본문입니다.
-     * 프론트는 이 content.nodes, content.edges를 사용해서 렌더링합니다.
+     * JsonNode를 그대로 노출하지 않습니다.
+     * Map/List/String/Number 등 일반 Java 값으로 변환된 JSON 본문을 담습니다.
      */
-    private JsonNode content;
+    private Object content;
 
-    public static ArtifactJsonResponse from(Artifact artifact) {
+    public static ArtifactJsonResponse from(Artifact artifact, Object content) {
         return ArtifactJsonResponse.builder()
                 .artifactId(artifact.getArtifactId())
                 .runId(artifact.getRun().getRunId())
@@ -30,7 +29,7 @@ public class ArtifactJsonResponse {
                 .schemaVersion(artifact.getSchemaVersion())
                 .contentType(artifact.getContentType())
                 .path(artifact.getPath())
-                .content(artifact.getMeta())
+                .content(content)
                 .build();
     }
 }

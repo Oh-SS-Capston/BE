@@ -6,6 +6,7 @@ import com.example.ossdoc.domain.artifact.exception.ArtifactException;
 import com.example.ossdoc.domain.artifact.exception.code.ArtifactErrorCode;
 import com.example.ossdoc.domain.artifact.repository.ArtifactRepository;
 import com.example.ossdoc.domain.run.entity.RepoRun;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -18,6 +19,7 @@ import java.util.Objects;
 public class ArtifactQueryService {
 
     private final ArtifactRepository artifactRepository;
+    private final ObjectMapper objectMapper;
 
     public ArtifactJsonResponse getJsonArtifact(Long artifactId, Long userId) {
         Artifact artifact = artifactRepository.findById(artifactId)
@@ -26,7 +28,17 @@ public class ArtifactQueryService {
         validateOwner(artifact, userId);
         validateJsonArtifact(artifact);
 
-        return ArtifactJsonResponse.from(artifact);
+        /*
+         * 중요:
+         * JsonNode 자체를 응답으로 넘기지 않고,
+         * 일반 Java 구조(Map/List 등)로 변환해서 넘깁니다.
+         */
+        Object plainJsonContent = objectMapper.convertValue(
+                artifact.getMeta(),
+                Object.class
+        );
+
+        return ArtifactJsonResponse.from(artifact, plainJsonContent);
     }
 
     private void validateOwner(Artifact artifact, Long userId) {
