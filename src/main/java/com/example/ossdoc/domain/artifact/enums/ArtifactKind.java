@@ -19,5 +19,9 @@ public enum ArtifactKind {
     // 그래프 분석/맵 시각화 결과물
     RANKINGS_JSON,
     SUBSYSTEMS_JSON,
-    CLASS_DIAGRAM_JSON
+    CLASS_DIAGRAM_JSON,
+
+    // Public API Surface 결과물
+    API_SURFACE_JSON,
+    API_MAP_JSON
 }

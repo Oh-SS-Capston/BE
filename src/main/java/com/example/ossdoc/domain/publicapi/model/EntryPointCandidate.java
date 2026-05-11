@@ -7,16 +7,15 @@ import java.util.List;
 
 @Getter
 @Builder
-public class ExtensionPointCandidate {
+public class EntryPointCandidate {
     private String symbolId;
     private String qualifiedName;
     private String simpleName;
-    private String typeKind;               // "interface" | "abstract"
+    private String typeKind;           // "class" | "interface" | "enum" | "record"
     private String subsystemId;
     private String subsystemLabel;
-    private int linkedImplementorCount;
-    private int linkedExtenderCount;
-    private String confidence;             // "HIGH" | "MED" | "LOW"
-    private List<String> signals;          // fired signal names
+    private String role;               // "PRIMARY" | "SECONDARY"
+    private String confidence;         // "HIGH" | "MED" | "LOW"
+    private List<String> signals;      // fired signal names
     private int score;
 }
