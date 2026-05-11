@@ -31,6 +31,11 @@ public record RuleCandidateItem(
         JsonNode impact,
         JsonNode meta,
 
+        Boolean estimated,
+        String qualityLabel,
+        String qualityReason,
+        Integer evidenceCount,
+
         List<RuleCandidateEvidenceJson> evidences
 ) {
 }

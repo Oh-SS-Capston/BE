@@ -92,7 +92,9 @@ jwt:
 claude:
   api-key: ${CLAUDE_API_KEY:}
   model: ${CLAUDE_MODEL:claude-sonnet-4-5}
-  max-tokens: ${CLAUDE_MAX_TOKENS:100}
+  # Step2~5는 기본적으로 Haiku를 사용하고, 실패 시 서비스에서 Sonnet 폴백을 수행한다.
+  haiku-model: ${CLAUDE_HAIKU_MODEL:claude-haiku-4-5}
+  max-tokens: ${CLAUDE_MAX_TOKENS:4096}
 
 cloud:
   aws:
