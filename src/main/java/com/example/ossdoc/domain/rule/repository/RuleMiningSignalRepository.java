@@ -6,6 +6,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.util.Collection;
 import java.util.List;
+import java.util.Optional;
 
 public interface RuleMiningSignalRepository extends JpaRepository<RuleMiningSignal, Long> {
 
@@ -39,6 +40,11 @@ public interface RuleMiningSignalRepository extends JpaRepository<RuleMiningSign
             String runId,
             Long evidenceId
     );
+
+    /**
+     * run 범위에서 가장 최근에 생성된 룰 신호 1건을 조회한다.
+     */
+    Optional<RuleMiningSignal> findTopByRun_RunIdOrderByCreatedAtDesc(String runId);
 
     void deleteAllByRun_RunId(String runId);
 }

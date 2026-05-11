@@ -10,6 +10,7 @@ public record RuleCandidatesJson(
         String runId,
         String generatedAt,
         RuleCandidateSummaryJson summary,
+        RuleCandidateDisplayPolicyJson displayPolicy,
         List<RuleCandidateItem> candidates
 ) {
 }

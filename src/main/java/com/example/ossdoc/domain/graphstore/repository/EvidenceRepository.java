@@ -38,4 +38,9 @@ public interface EvidenceRepository extends JpaRepository<Evidence, Long> {
             Integer endLine,
             String snippet
     );
+
+    /**
+     * run 범위에서 가장 최근에 적재된 evidence 1건을 조회한다.
+     */
+    Optional<Evidence> findTopByRun_RunIdOrderByCreatedAtDesc(String runId);
 }

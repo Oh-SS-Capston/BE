@@ -28,4 +28,9 @@ public interface SymbolRepository extends JpaRepository<SymbolEntity, String> {
      * - 군집화/클래스맵 파라미터 추천 시 그래프 크기 판단의 기준값으로 사용한다.
      */
     long countByRun_RunIdAndSymbolKind(String runId, SymbolKind symbolKind);
+
+    /**
+     * run 범위에서 마지막으로 갱신된 symbol 1건을 조회한다.
+     */
+    Optional<SymbolEntity> findTopByRun_RunIdOrderByUpdatedAtDesc(String runId);
 }
