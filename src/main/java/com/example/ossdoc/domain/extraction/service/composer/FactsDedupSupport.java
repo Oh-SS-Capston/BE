@@ -165,6 +165,8 @@ final class FactsDedupSupport {
                 .returns(mergeTypeRef(left.returns(), right.returns()))
                 .throwsTypes(mergeDistinct(left.throwsTypes(), right.throwsTypes(), FactsDedupSupport::typeRefKey))
                 .fieldType(mergeTypeRef(left.fieldType(), right.fieldType()))
+                .javadoc(firstNonBlank(left.javadoc(), right.javadoc()))
+                .sealed(firstNonNull(left.sealed(), right.sealed()))
                 .build();
     }
 

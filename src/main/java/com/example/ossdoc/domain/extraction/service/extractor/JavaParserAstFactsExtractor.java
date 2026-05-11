@@ -51,6 +51,7 @@ import com.github.javaparser.ast.body.Parameter;
 import com.github.javaparser.ast.body.RecordDeclaration;
 import com.github.javaparser.ast.body.TypeDeclaration;
 import com.github.javaparser.ast.nodeTypes.NodeWithJavadoc;
+import com.github.javaparser.javadoc.JavadocBlockTag;
 import com.github.javaparser.ast.type.TypeParameter;
 import com.example.ossdoc.domain.extraction.dto.model.TypeParam;
 import com.github.javaparser.ast.NodeList;
@@ -263,6 +264,10 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         sink.addEvidence(evidence);
 
         TypeKind typeKind = typeKind(typeDeclaration);
+        String javadocText = extractDocComment(typeDeclaration);
+        boolean isSealed = typeDeclaration instanceof ClassOrInterfaceDeclaration coid &&
+                coid.getModifiers().stream()
+                        .anyMatch(m -> "SEALED".equals(m.getKeyword().name()));
         SymbolFact typeFact = SymbolFact.builder()
                 .symbol(typeSymbol)
                 .kind(SymbolKind.TYPE)
@@ -282,7 +287,11 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                 .superTypeRef(superTypeRef(typeDeclaration, sink))
                 .interfaceTypeRefs(interfaceTypeRefs(typeDeclaration, sink))
                 .sourceFile(relativePath)
-                .docComment(extractDocComment(typeDeclaration))
+                .signature(SignatureFact.builder()
+                        .javadoc(javadocText)
+                        .sealed(isSealed ? Boolean.TRUE : null)
+                        .build())
+                .docComment(javadocText)
                 .typeParams(extractTypeParams(typeDeclaration, sink))
                 .build();
         sink.addSymbol(typeFact);
@@ -362,7 +371,8 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             ConstructorDeclaration declaration,
             ExtractionSink sink
     ) {
-        SignatureFact signature = callableSignature(declaration, sink);
+        String javadocText = extractDocComment(declaration);
+        SignatureFact signature = callableSignature(declaration, javadocText, sink);
         String ownerQualifiedName = ownerTypeSymbol.substring("type:".length());
         String constructorSymbol = SymbolIdFactory.constructor(ownerQualifiedName, signature);
         EvidenceFact evidence = buildAstEvidence(relativePath, javaFile, declaration, constructorSymbol, EvidenceType.AST);
@@ -382,7 +392,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                 .evidenceIds(List.of(evidence.id()))
                 .signature(signature)
                 .sourceFile(relativePath)
-                .docComment(extractDocComment(declaration))
+                .docComment(javadocText)
                 .build();
         sink.addSymbol(fact);
 
@@ -398,7 +408,8 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             MethodDeclaration declaration,
             ExtractionSink sink
     ) {
-        SignatureFact signature = callableSignature(declaration, sink);
+        String javadocText = extractDocComment(declaration);
+        SignatureFact signature = callableSignature(declaration, javadocText, sink);
         String ownerQualifiedName = ownerTypeSymbol.substring("type:".length());
         String methodSymbol = SymbolIdFactory.method(ownerQualifiedName, declaration.getNameAsString(), signature);
         EvidenceFact evidence = buildAstEvidence(relativePath, javaFile, declaration, methodSymbol, EvidenceType.AST);
@@ -421,7 +432,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                 .evidenceIds(List.of(evidence.id()))
                 .signature(signature)
                 .sourceFile(relativePath)
-                .docComment(extractDocComment(declaration))
+                .docComment(javadocText)
                 .throwsUnchecked(throwAnalysis.uncheckedTypes())
                 .hasConditionalThrow(throwAnalysis.hasConditional() ? Boolean.TRUE : null)
                 .stateMutations(mutations)
@@ -791,7 +802,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         return SymbolIdFactory.packageSymbol(packageName);
     }
 
-    private SignatureFact callableSignature(CallableDeclaration<?> declaration, ExtractionSink sink) {
+    private SignatureFact callableSignature(CallableDeclaration<?> declaration, String javadoc, ExtractionSink sink) {
         List<ParamFact> params = declaration.getParameters().stream()
                 .map(p -> ParamFact.builder()
                         .name(p.getNameAsString())
@@ -811,6 +822,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                 .params(params)
                 .returns(returns)
                 .throwsTypes(throwsTypes)
+                .javadoc(javadoc)
                 .build();
     }
 
@@ -1026,22 +1038,23 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
 
     private String extractDocComment(NodeWithJavadoc<?> node) {
         return node.getJavadoc().map(javadoc -> {
+            // 설명 본문 (블록 태그 이전)
             String desc = javadoc.getDescription().toText();
-
             int blankLine = desc.indexOf("\n\n");
             if (blankLine > 0) desc = desc.substring(0, blankLine);
-
-            String[] lines = desc.split("\n");
-            StringBuilder sb = new StringBuilder();
-            for (String line : lines) {
-                if (line.trim().startsWith("@")) break;
-                sb.append(line).append("\n");
-            }
-            desc = sb.toString();
-
             desc = desc.replaceAll("<[^>]+>", "").trim();
 
-            return desc.isEmpty() ? null : desc;
+            // 블록 태그 전체 포함 — @implSpec, @apiNote 등이 publicapi 탐지에 필요
+            String tags = javadoc.getBlockTags().stream()
+                    .map(tag -> "@" + tag.getTagName() + " " + tag.getContent().toText().trim())
+                    .filter(s -> !s.isBlank())
+                    .collect(Collectors.joining(" "));
+            tags = tags.replaceAll("<[^>]+>", "").trim();
+
+            String result = desc.isBlank() ? tags
+                    : tags.isBlank() ? desc
+                    : desc + " " + tags;
+            return result.isBlank() ? null : result;
         }).orElse(null);
     }
 
