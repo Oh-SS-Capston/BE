@@ -2,6 +2,8 @@ package com.example.ossdoc.domain.cluster.dto.request;
 
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 /* 군집화 알고리즘 : Leiden알고리즘
@@ -11,7 +13,9 @@ import lombok.NoArgsConstructor;
 * topK : symbol을 상위 몇개까지 ranking 결과를 뽑을지 정하는 값 / 랭킹(symbol) 필터
  * */
 @Getter
+@Builder
 @NoArgsConstructor
+@AllArgsConstructor
 public class ClusterBuildRequest {
     @NotBlank
     private String runId;

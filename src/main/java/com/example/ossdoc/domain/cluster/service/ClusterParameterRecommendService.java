@@ -20,7 +20,7 @@ import java.math.RoundingMode;
  *
  * 목적:
  * - 레포 크기마다 적정 파라미터가 달라 사용자가 매번 수동 튜닝해야 하는 문제를 줄인다.
- * - 동일 run에서 재현 가능한 기본값을 제공해 프런트 UX를 단순화한다.
+ * - 동일 run에서 재현 가능한 기본값을 제공해 프런트 UX와 자동 파이프라인을 단순화한다.
  */
 @Service
 @RequiredArgsConstructor
@@ -32,20 +32,38 @@ public class ClusterParameterRecommendService {
     private final EdgeRepository edgeRepository;
 
     /**
-     * run의 그래프 규모를 바탕으로 cluster/class-map 추천값을 계산한다.
+     * 컨트롤러용 메서드.
+     * 외부 API 요청은 기존 DTO를 그대로 받되,
+     * 내부 계산은 runId 기반 공통 메서드로 위임한다.
      */
-    public ClusterParameterRecommendResponse recommend(ClusterParameterRecommendRequest request) {
-        String runId = request.getRunId();
+    public ClusterParameterRecommendResponse recommend(
+            ClusterParameterRecommendRequest request
+    ) {
+        return recommend(request.getRunId());
+    }
+
+    /**
+     * 파이프라인 내부 호출용 메서드.
+     * runId만으로 군집화/클래스맵 추천 파라미터를 계산한다.
+     */
+    public ClusterParameterRecommendResponse recommend(String runId) {
         repoRunRepository.findById(runId)
                 .orElseThrow(() -> new ClusterException(ClusterErrorCode.CLUSTER_RUN_NOT_FOUND));
 
-        long typeSymbolCount = symbolRepository.countByRun_RunIdAndSymbolKind(runId, SymbolKind.TYPE);
-        long edgeCount = edgeRepository.countByRun_RunId(runId);
-        double edgePerType = calculateEdgePerType(typeSymbolCount, edgeCount);
+        long typeSymbolCount =
+                symbolRepository.countByRun_RunIdAndSymbolKind(
+                        runId,
+                        SymbolKind.TYPE
+                );
 
+        long edgeCount = edgeRepository.countByRun_RunId(runId);
+
+        double edgePerType = calculateEdgePerType(typeSymbolCount, edgeCount);
         SizeTier sizeTier = decideSizeTier(typeSymbolCount, edgeCount);
+
         ClusterParameterRecommendResponse.ClusterRecommended clusterRecommended =
                 recommendCluster(sizeTier, edgePerType);
+
         ClusterParameterRecommendResponse.ClassMapRecommended classMapRecommended =
                 recommendClassMap(sizeTier, edgePerType);
 
@@ -68,12 +86,15 @@ public class ClusterParameterRecommendService {
         if (typeSymbolCount == 0L) {
             return SizeTier.SMALL;
         }
+
         if (typeSymbolCount <= 180L && edgeCount <= 30_000L) {
             return SizeTier.SMALL;
         }
+
         if (typeSymbolCount <= 750L && edgeCount <= 150_000L) {
             return SizeTier.MEDIUM;
         }
+
         return SizeTier.LARGE;
     }
 
@@ -81,8 +102,10 @@ public class ClusterParameterRecommendService {
      * 밀도 보정을 적용해 cluster 파라미터를 추천한다.
      * - edgePerType이 높은 그래프는 과분할/노이즈를 줄이기 위해 minClusterSize/topK를 소폭 상향한다.
      */
-    private ClusterParameterRecommendResponse.ClusterRecommended recommendCluster(SizeTier sizeTier, double edgePerType) {
-        // 기본값을 먼저 두고 tier별로 덮어써 컴파일러가 초기화를 확실히 인지하도록 한다.
+    private ClusterParameterRecommendResponse.ClusterRecommended recommendCluster(
+            SizeTier sizeTier,
+            double edgePerType
+    ) {
         double resolution = 0.22;
         int iterations = 8;
         int minClusterSize = 2;
@@ -129,8 +152,10 @@ public class ClusterParameterRecommendService {
      * class-map 노출 밀도를 제어하는 추천값을 계산한다.
      * - 군집화와 동일한 tier를 사용해 노드/엣지 상한을 함께 조정한다.
      */
-    private ClusterParameterRecommendResponse.ClassMapRecommended recommendClassMap(SizeTier sizeTier, double edgePerType) {
-        // 기본값을 먼저 두고 tier별로 덮어써 컴파일러가 초기화를 확실히 인지하도록 한다.
+    private ClusterParameterRecommendResponse.ClassMapRecommended recommendClassMap(
+            SizeTier sizeTier,
+            double edgePerType
+    ) {
         int maxNodes = 24;
         int maxEdges = 42;
         int startHereTopN = 3;
@@ -175,6 +200,7 @@ public class ClusterParameterRecommendService {
         if (typeSymbolCount <= 0L) {
             return 0.0;
         }
+
         return round((double) edgeCount / (double) typeSymbolCount, 3);
     }
 

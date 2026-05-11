@@ -30,9 +30,7 @@ public interface EdgeRepository extends JpaRepository<Edge, Long> {
      */
     long countByRun_RunId(String runId);
 
-    /**
-     * run 내 특정 edge 타입 중 toSymbol이 해석된(linked) edge 전체를 조회한다.
-     * - extension point 판별 시 IMPLEMENTS / EXTENDS 인바운드 집계에 사용한다.
-     */
     List<Edge> findAllByRun_RunIdAndEdgeTypeAndToSymbolIsNotNull(String runId, EdgeType edgeType);
+
+    Optional<Edge> findTopByRun_RunIdOrderByUpdatedAtDesc(String runId);
 }
