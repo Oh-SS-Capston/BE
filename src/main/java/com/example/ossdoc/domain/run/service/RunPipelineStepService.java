@@ -16,7 +16,7 @@ import org.springframework.transaction.annotation.Transactional;
 /*
  * 단계별 상태 저장 서비스입니다.
  *
- * 각 단계 시작/성공/실패는 REQUIRES_NEW로 저장합니다.
+ * 각 단계 시작/성공/실패/건너뜀은 REQUIRES_NEW로 저장합니다.
  * 그래서 긴 작업 중에도 프론트 polling이 진행률을 볼 수 있습니다.
  */
 @Service
@@ -54,6 +54,14 @@ public class RunPipelineStepService {
 
         RunPipelineStepExecution step = findOrCreateStep(job, job.getRun(), stage);
         step.fail(message);
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void skipStep(Long jobId, RunStage stage, String message) {
+        RunPipelineJob job = findJob(jobId);
+
+        RunPipelineStepExecution step = findOrCreateStep(job, job.getRun(), stage);
+        step.skip(message);
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
