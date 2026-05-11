@@ -178,7 +178,12 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
 
         for (Path sourceRoot : context.astLookupRoots()) {
             if (sourceRoot != null && Files.isDirectory(sourceRoot)) {
-                solver.add(new JavaParserTypeSolver(sourceRoot));
+                try {
+                    solver.add(new JavaParserTypeSolver(sourceRoot));
+                } catch (Exception e) {
+                    sink.addWarning("failed to add source root to symbol solver: "
+                            + sourceRoot + " (" + e.getMessage() + ")");
+                }
             }
         }
 
@@ -229,7 +234,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             String relativePath,
             CompilationUnit cu,
             ExtractionSink sink
-    ) throws IOException {
+    ) {
         String packageName = cu.getPackageDeclaration()
                 .map(pd -> pd.getNameAsString())
                 .filter(name -> !name.isBlank())
@@ -251,7 +256,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             String nestedOwnerSymbol,
             TypeDeclaration<?> typeDeclaration,
             ExtractionSink sink
-    ) throws IOException {
+    ) {
         String qualifiedName = resolveQualifiedTypeName(typeDeclaration);
         String typeSymbol = SymbolIdFactory.type(qualifiedName);
         EvidenceFact evidence = buildAstEvidence(relativePath, javaFile, typeDeclaration, typeSymbol, EvidenceType.AST);
@@ -316,7 +321,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             String ownerTypeSymbol,
             FieldDeclaration fieldDeclaration,
             ExtractionSink sink
-    ) throws IOException {
+    ) {
         for (com.github.javaparser.ast.body.VariableDeclarator variable : fieldDeclaration.getVariables()) {
             String fieldSymbol = SymbolIdFactory.field(ownerTypeSymbol.substring("type:".length()), variable.getNameAsString());
             EvidenceFact evidence = buildAstEvidence(relativePath, javaFile, variable, fieldSymbol, EvidenceType.AST);
@@ -356,7 +361,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             String ownerTypeSymbol,
             ConstructorDeclaration declaration,
             ExtractionSink sink
-    ) throws IOException {
+    ) {
         SignatureFact signature = callableSignature(declaration, sink);
         String ownerQualifiedName = ownerTypeSymbol.substring("type:".length());
         String constructorSymbol = SymbolIdFactory.constructor(ownerQualifiedName, signature);
@@ -392,7 +397,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             String ownerTypeSymbol,
             MethodDeclaration declaration,
             ExtractionSink sink
-    ) throws IOException {
+    ) {
         SignatureFact signature = callableSignature(declaration, sink);
         String ownerQualifiedName = ownerTypeSymbol.substring("type:".length());
         String methodSymbol = SymbolIdFactory.method(ownerQualifiedName, declaration.getNameAsString(), signature);
@@ -434,7 +439,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             String ownerTypeSymbol,
             EnumConstantDeclaration constant,
             ExtractionSink sink
-    ) throws IOException {
+    ) {
         String fieldSymbol = SymbolIdFactory.field(ownerTypeSymbol.substring("type:".length()), constant.getNameAsString());
         EvidenceFact evidence = buildAstEvidence(relativePath, javaFile, constant, fieldSymbol, EvidenceType.AST);
         sink.addEvidence(evidence);
@@ -465,7 +470,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             String ownerTypeSymbol,
             Parameter parameter,
             ExtractionSink sink
-    ) throws IOException {
+    ) {
         String fieldSymbol = SymbolIdFactory.field(ownerTypeSymbol.substring("type:".length()), parameter.getNameAsString());
         EvidenceFact evidence = buildAstEvidence(relativePath, javaFile, parameter, fieldSymbol, EvidenceType.AST);
         sink.addEvidence(evidence);
@@ -782,7 +787,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             String moduleSymbol,
             ExtractionSink sink,
             Path javaFile
-    ) throws IOException {
+    ) {
         return SymbolIdFactory.packageSymbol(packageName);
     }
 
@@ -868,7 +873,11 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         sink.recordTotalTypeRef();
         try {
             ResolvedType resolvedType = type.resolve();
-            return toTypeRef(resolvedType, type.asString(), sink);
+            TypeRef result = toTypeRef(resolvedType, type.asString(), sink);
+            if (Boolean.TRUE.equals(result.unresolved())) {
+                sink.recordUnresolvedTypeRef();
+            }
+            return result;
         } catch (Exception e) {
             sink.recordUnresolvedTypeRef();
             return fallbackTypeRefFromAst(type);
@@ -877,7 +886,6 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
 
     private TypeRef toTypeRef(ResolvedType resolvedType, String sourceText, ExtractionSink sink) {
         if (resolvedType == null) {
-            sink.recordUnresolvedTypeRef();
             return TypeRefFactory.unresolved(sourceText, sourceText);
         }
 
@@ -937,7 +945,6 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                     .build();
         }
 
-        sink.recordUnresolvedTypeRef();
         return TypeRefFactory.unresolved(resolvedType.describe(), sourceText);
     }
 
@@ -1215,7 +1222,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         return set;
     }
 
-    private EvidenceFact buildAstEvidence(String relativePath, Path javaFile, Node node, String symbol, EvidenceType kind) throws IOException {
+    private EvidenceFact buildAstEvidence(String relativePath, Path javaFile, Node node, String symbol, EvidenceType kind) {
         Integer startLine = null, startCol = null, endLine = null, endCol = null;
         if (node.getRange().isPresent()) {
             Range range = node.getRange().get();
@@ -1243,18 +1250,21 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                 .build();
     }
 
-    private String readSnippet(Path javaFile, Integer startLine, Integer endLine) throws IOException {
+    private String readSnippet(Path javaFile, Integer startLine, Integer endLine) {
         if (startLine == null || endLine == null) {
             return null;
         }
-
-        List<String> lines = Files.readAllLines(javaFile);
-        int start = Math.max(1, startLine);
-        int end = Math.min(lines.size(), endLine);
-        if (start > end) {
+        try {
+            List<String> lines = Files.readAllLines(javaFile, java.nio.charset.StandardCharsets.UTF_8);
+            int start = Math.max(1, startLine);
+            int end = Math.min(lines.size(), endLine);
+            if (start > end) {
+                return null;
+            }
+            return String.join("\n", lines.subList(start - 1, end));
+        } catch (IOException e) {
             return null;
         }
-        return String.join("\n", lines.subList(start - 1, end));
     }
 
     private String methodSymbol(ResolvedMethodDeclaration resolved, ExtractionSink sink) {
@@ -1334,7 +1344,11 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
 
         sink.recordTotalTypeRef();
         try {
-            return toTypeRef(call.getArgument(0).calculateResolvedType(), call.getArgument(0).toString(), sink);
+            TypeRef result = toTypeRef(call.getArgument(0).calculateResolvedType(), call.getArgument(0).toString(), sink);
+            if (Boolean.TRUE.equals(result.unresolved())) {
+                sink.recordUnresolvedTypeRef();
+            }
+            return result;
         } catch (Exception e) {
             sink.recordUnresolvedTypeRef();
             return TypeRefFactory.unresolved(call.getArgument(0).toString(), call.getArgument(0).toString());

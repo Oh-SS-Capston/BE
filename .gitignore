@@ -36,9 +36,6 @@ s
 ### VS Code ###
 .vscode/
 
-## application ###
-/src/main/resources/application.yml
-
 # QueryDSL generated sources
 src/main/generated/
 
@@ -54,3 +51,12 @@ workspace/
 /claude's generated markdown file
 *.md
 !**/README.md
+
+### Markdown output directory ###
+MarkDownFile/
+
+### Application config ###
+src/main/resources/application.yml
+
+### claude file
+.claude/
