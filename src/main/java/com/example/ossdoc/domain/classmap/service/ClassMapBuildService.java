@@ -5,6 +5,7 @@ import com.example.ossdoc.domain.artifact.entity.Artifact;
 import com.example.ossdoc.domain.classmap.artifact.output.*;
 import com.example.ossdoc.domain.classmap.dto.request.ClassMapBuildRequest;
 import com.example.ossdoc.domain.classmap.dto.response.ClassMapBuildResponse;
+import com.example.ossdoc.domain.classmap.enums.ClassMapScope;
 import com.example.ossdoc.domain.classmap.exception.ClassMapException;
 import com.example.ossdoc.domain.classmap.exception.code.ClassMapErrorCode;
 import com.example.ossdoc.domain.graphstore.entity.Edge;
@@ -20,6 +21,7 @@ import com.example.ossdoc.domain.graphstore.repository.EdgeEvidenceRepository;
 import com.example.ossdoc.domain.graphstore.repository.EdgeRepository;
 import com.example.ossdoc.domain.graphstore.repository.SymbolRepository;
 import com.example.ossdoc.domain.publicapi.service.PublicApiEntrySyncService;
+import com.example.ossdoc.domain.cluster.model.subsystem.Subsystem;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -39,6 +41,7 @@ import java.util.stream.Collectors;
 @Transactional(readOnly = true)
 public class ClassMapBuildService {
     private static final Set<String> HIDDEN_PACKAGE_TOKENS = Set.of("internal", "impl", "support", "generated", "test");
+    private static final double BUILDER_SCORE_PENALTY = 20.0;
     private static final List<String> NON_PRODUCTION_PATH_MARKERS = List.of(
             "/src/test/",
             "/src/it/",
@@ -79,6 +82,7 @@ public class ClassMapBuildService {
     private final EdgeRepository edgeRepository;
     private final EdgeEvidenceRepository edgeEvidenceRepository;
     private final PublicApiEntrySyncService publicApiEntrySyncService;
+    private final SubsystemClassMapSourceService subsystemClassMapSourceService;
     private final ClassMapArtifactPublisher classMapArtifactPublisher;
 
     /**
@@ -99,6 +103,7 @@ public class ClassMapBuildService {
             List<SymbolEntity> constructorSymbols = symbolRepository.findAllByRun_RunIdAndSymbolKind(run.getRunId(), SymbolKind.CONSTRUCTOR);
             List<Edge> allEdges = edgeRepository.findAllByRun_RunId(run.getRunId());
             Set<String> publicApiTypeIds = publicApiEntrySyncService.ensureTypeEntries(run, typeSymbols);
+            ScopeSelection scopeSelection = resolveScopeSelection(request, run.getRunId());
 
             Map<String, SymbolEntity> typeById = typeSymbols.stream()
                     .collect(Collectors.toMap(SymbolEntity::getSymbolId, s -> s, (a, b) -> a, LinkedHashMap::new));
@@ -106,7 +111,7 @@ public class ClassMapBuildService {
             methodSymbols.forEach(symbol -> callableById.put(symbol.getSymbolId(), symbol));
             constructorSymbols.forEach(symbol -> callableById.put(symbol.getSymbolId(), symbol));
 
-            FilterResult filterResult = filterCandidateTypes(typeSymbols, publicApiTypeIds);
+            FilterResult filterResult = filterCandidateTypes(typeSymbols, publicApiTypeIds, scopeSelection);
             Set<String> candidateTypeIds = filterResult.candidateTypeIds();
             if (candidateTypeIds.isEmpty()) {
                 throw new ClassMapException(ClassMapErrorCode.CLASS_MAP_NO_VISIBLE_TYPES);
@@ -122,11 +127,13 @@ public class ClassMapBuildService {
                     aggregateResult.degreeByTypeId(),
                     publicApiTypeIds,
                     configTypeIds,
-                    extensionPointTypeIds
+                    extensionPointTypeIds,
+                    typeById
             );
             Set<String> startHereTypeIds = pickStartHereTypes(
                     candidateTypeIds,
                     scoreByTypeId,
+                    typeById,
                     request.safeStartHereTopN()
             );
 
@@ -140,14 +147,21 @@ public class ClassMapBuildService {
                     .collect(Collectors.toSet());
 
             Comparator<String> nodePriority = nodePriorityComparator(scoreByTypeId, typeById);
+            List<EdgeAggregate> structuralAggregates = aggregateResult.aggregates().values().stream()
+                    .filter(this::isStructuralAggregate)
+                    .sorted(structuralEdgePriorityComparator(scoreByTypeId))
+                    .toList();
+
             LinkedHashSet<String> selectedTypeIds = selectTypeIds(
                     candidateTypeIds,
-                    publicApiTypeIds,
                     startHereTypeIds,
                     configTypeIds,
                     extensionPointTypeIds,
                     inputModelTypeIds,
                     outputModelTypeIds,
+                    scopeSelection.prioritySeedIds(),
+                    structuralAggregates,
+                    typeById,
                     nodePriority,
                     request.safeMaxNodes()
             );
@@ -158,6 +172,17 @@ public class ClassMapBuildService {
                     .sorted(edgePriorityComparator())
                     .limit(request.safeMaxEdges())
                     .toList();
+
+            long selectedStructuralEdgeCount = selectedAggregates.stream()
+                    .filter(this::isStructuralAggregate)
+                    .count();
+            log.info(
+                    "[CLASSMAP] selection summary. selectedTypes={}, selectedEdges={}, selectedStructuralEdges={}, availableStructuralAggregates={}",
+                    selectedTypeIds.size(),
+                    selectedAggregates.size(),
+                    selectedStructuralEdgeCount,
+                    structuralAggregates.size()
+            );
 
             Map<Long, List<Evidence>> evidenceByEdgeId = loadEvidenceByEdgeId(selectedAggregates);
             Set<String> exampleUsedTypeIds = new HashSet<>();
@@ -217,6 +242,9 @@ public class ClassMapBuildService {
                     .runId(run.getRunId())
                     .generatedAt(OffsetDateTime.now())
                     .summary(ClassDiagramSummary.builder()
+                            .scope(scopeSelection.scope().name())
+                            .subsystemId(scopeSelection.subsystemId())
+                            .subsystemName(scopeSelection.subsystemName())
                             .totalTypeCount(typeSymbols.size())
                             .candidateTypeCount(candidateTypeIds.size())
                             .selectedNodeCount(nodeItems.size())
@@ -233,8 +261,21 @@ public class ClassMapBuildService {
                     .edges(edgeItems)
                     .build();
 
-            Artifact artifact = classMapArtifactPublisher.publishClassDiagram(run, classDiagramJson);
-            return new ClassMapBuildResponse(run.getRunId(), nodeItems.size(), edgeItems.size(), artifact.getArtifactId());
+            Artifact artifact = classMapArtifactPublisher.publishClassDiagram(
+                    run,
+                    classDiagramJson,
+                    scopeSelection.scope(),
+                    scopeSelection.subsystemId()
+            );
+            return new ClassMapBuildResponse(
+                    run.getRunId(),
+                    scopeSelection.scope(),
+                    scopeSelection.subsystemId(),
+                    scopeSelection.subsystemName(),
+                    nodeItems.size(),
+                    edgeItems.size(),
+                    artifact.getArtifactId()
+            );
         } catch (ClassMapException e) {
             throw e;
         } catch (Exception e) {
@@ -243,21 +284,72 @@ public class ClassMapBuildService {
     }
 
     /**
+     * overview / subsystem별 후보 범위와 우선 시드 타입을 결정한다.
+     */
+    private ScopeSelection resolveScopeSelection(ClassMapBuildRequest request, String runId) {
+        ClassMapScope scope = request.safeScope();
+
+        if (scope == ClassMapScope.OVERVIEW) {
+            return ScopeSelection.overview();
+        }
+
+        Subsystem subsystem = subsystemClassMapSourceService.findRequiredSubsystem(
+                runId,
+                request.getSubsystemId()
+        );
+
+        LinkedHashSet<String> allowedTypeIds = new LinkedHashSet<>();
+        if (subsystem.getMemberSymbolIds() != null) {
+            allowedTypeIds.addAll(subsystem.getMemberSymbolIds());
+        }
+
+        LinkedHashSet<String> prioritySeedIds = new LinkedHashSet<>();
+        if (subsystem.getEntrySymbolIds() != null) {
+            prioritySeedIds.addAll(subsystem.getEntrySymbolIds());
+        }
+        if (subsystem.getCoreSymbolIds() != null) {
+            prioritySeedIds.addAll(subsystem.getCoreSymbolIds());
+        }
+
+        return ScopeSelection.subsystem(
+                subsystem.getSubsystemId(),
+                subsystem.getName(),
+                allowedTypeIds,
+                prioritySeedIds
+        );
+    }
+
+    /**
      * 접근제어자/패키지 정책으로 화면 후보 타입을 필터링한다.
      */
-    private FilterResult filterCandidateTypes(List<SymbolEntity> typeSymbols, Set<String> publicApiTypeIds) {
+    private FilterResult filterCandidateTypes(
+            List<SymbolEntity> typeSymbols,
+            Set<String> publicApiTypeIds,
+            ScopeSelection scopeSelection
+    ) {
         int hiddenByAccess = 0;
         int hiddenByPackage = 0;
         int hiddenByNonProduction = 0;
         LinkedHashSet<String> candidateTypeIds = new LinkedHashSet<>();
 
         for (SymbolEntity type : typeSymbols) {
+            String symbolId = type.getSymbolId();
+
+            if (!scopeSelection.allows(symbolId)) {
+                continue;
+            }
+
             if (isNonProductionType(type)) {
                 hiddenByNonProduction++;
                 continue;
             }
 
-            boolean forceInclude = publicApiTypeIds.contains(type.getSymbolId());
+            if (scopeSelection.scope() == ClassMapScope.SUBSYSTEM) {
+                candidateTypeIds.add(symbolId);
+                continue;
+            }
+
+            boolean forceInclude = publicApiTypeIds.contains(symbolId);
             boolean visibleApi = isPublicOrProtected(type.getAccess());
             if (!forceInclude && !visibleApi) {
                 hiddenByAccess++;
@@ -270,11 +362,12 @@ public class ClassMapBuildService {
                 continue;
             }
 
-            candidateTypeIds.add(type.getSymbolId());
+            candidateTypeIds.add(symbolId);
         }
 
         log.info(
-                "[CLASSMAP] candidate filter summary. hiddenByAccess={}, hiddenByPackage={}, hiddenByNonProduction={}",
+                "[CLASSMAP] candidate filter summary. scope={}, hiddenByAccess={}, hiddenByPackage={}, hiddenByNonProduction={}",
+                scopeSelection.scope(),
                 hiddenByAccess,
                 hiddenByPackage,
                 hiddenByNonProduction
@@ -307,6 +400,9 @@ public class ClassMapBuildService {
                 }
                 String src = edge.getFromSymbol().getSymbolId();
                 String dst = edge.getToSymbol().getSymbolId();
+                if (Objects.equals(src, dst)) {
+                    continue;
+                }
                 if (!candidateTypeIds.contains(src) || !candidateTypeIds.contains(dst)) {
                     continue;
                 }
@@ -332,6 +428,9 @@ public class ClassMapBuildService {
             }
             String src = ownerType.getSymbolId();
             String dst = edge.getToSymbol().getSymbolId();
+            if (Objects.equals(src, dst)) {
+                continue;
+            }
             if (!candidateTypeIds.contains(src) || !candidateTypeIds.contains(dst)) {
                 continue;
             }
@@ -433,7 +532,8 @@ public class ClassMapBuildService {
             Map<String, Integer> degreeByTypeId,
             Set<String> publicApiTypeIds,
             Set<String> configTypeIds,
-            Set<String> extensionPointTypeIds
+            Set<String> extensionPointTypeIds,
+            Map<String, SymbolEntity> typeById
     ) {
         Map<String, Double> scoreByTypeId = new HashMap<>();
         for (String typeId : candidateTypeIds) {
@@ -448,6 +548,9 @@ public class ClassMapBuildService {
             if (extensionPointTypeIds.contains(typeId)) {
                 score += 1.5;
             }
+            if (isBuilderLikeType(typeById.get(typeId))) {
+                score -= BUILDER_SCORE_PENALTY;
+            }
             scoreByTypeId.put(typeId, score);
         }
         return scoreByTypeId;
@@ -459,15 +562,31 @@ public class ClassMapBuildService {
     private Set<String> pickStartHereTypes(
             Set<String> candidateTypeIds,
             Map<String, Double> scoreByTypeId,
+            Map<String, SymbolEntity> typeById,
             int topN
     ) {
-        return candidateTypeIds.stream()
-                .sorted((left, right) -> Double.compare(
-                        scoreByTypeId.getOrDefault(right, 0.0),
-                        scoreByTypeId.getOrDefault(left, 0.0)
-                ))
+        Comparator<String> byScore = (left, right) -> Double.compare(
+                scoreByTypeId.getOrDefault(right, 0.0),
+                scoreByTypeId.getOrDefault(left, 0.0)
+        );
+
+        LinkedHashSet<String> result = candidateTypeIds.stream()
+                .filter(id -> !isBuilderLikeType(typeById.get(id)))
+                .sorted(byScore)
                 .limit(topN)
                 .collect(Collectors.toCollection(LinkedHashSet::new));
+
+        if (result.size() >= topN) {
+            return result;
+        }
+
+        candidateTypeIds.stream()
+                .filter(id -> !result.contains(id))
+                .sorted(byScore)
+                .limit(topN - result.size())
+                .forEach(result::add);
+
+        return result;
     }
 
     /**
@@ -497,54 +616,120 @@ public class ClassMapBuildService {
      */
     private LinkedHashSet<String> selectTypeIds(
             Set<String> candidateTypeIds,
-            Set<String> publicApiTypeIds,
             Set<String> startHereTypeIds,
             Set<String> configTypeIds,
             Set<String> extensionPointTypeIds,
             Set<String> inputModelTypeIds,
             Set<String> outputModelTypeIds,
+            Set<String> prioritySeedIds,
+            List<EdgeAggregate> structuralAggregates,
+            Map<String, SymbolEntity> typeById,
             Comparator<String> nodePriority,
             int maxNodes
     ) {
         LinkedHashSet<String> selected = new LinkedHashSet<>();
 
-        List<String> mandatory = candidateTypeIds.stream()
-                .filter(id -> publicApiTypeIds.contains(id)
-                        || startHereTypeIds.contains(id)
-                        || configTypeIds.contains(id)
-                        || extensionPointTypeIds.contains(id))
-                .sorted(nodePriority)
-                .toList();
-        for (String id : mandatory) {
-            if (selected.size() >= maxNodes) {
-                return selected;
-            }
-            selected.add(id);
-        }
+        /*
+         * publicApiTypeIds는 거의 모든 visible public/protected TYPE을 포함할 수 있으므로
+         * mandatory 조건으로 쓰면 maxNodes가 사실상 상위 점수 public type으로만 소진된다.
+         * 실제 다이어그램에서는 의미가 명확한 시작점/설정/확장점만 먼저 고정한다.
+         */
+        LinkedHashSet<String> mandatory = new LinkedHashSet<>();
+        mandatory.addAll(prioritySeedIds);
+        mandatory.addAll(startHereTypeIds);
+        mandatory.addAll(configTypeIds);
+        mandatory.addAll(extensionPointTypeIds);
+        addByPriority(selected, mandatory, nodePriority, maxNodes);
 
-        List<String> models = candidateTypeIds.stream()
+        /*
+         * 상속/구현 관계는 클래스 다이어그램의 골격이므로,
+         * 구조 edge의 양 끝 노드를 우선 확보해 관계선이 실제 출력에 남도록 한다.
+         */
+        addStructuralPairs(selected, structuralAggregates, nodePriority, maxNodes);
+
+        /*
+         * 입력/출력 모델은 사용 흐름 설명에 도움이 되지만,
+         * Builder 계열은 기본 구조 이해를 흐릴 수 있어 non-builder를 먼저 채운다.
+         */
+        LinkedHashSet<String> models = candidateTypeIds.stream()
                 .filter(id -> inputModelTypeIds.contains(id) || outputModelTypeIds.contains(id))
-                .filter(id -> !selected.contains(id))
-                .sorted(nodePriority)
-                .toList();
-        for (String id : models) {
-            if (selected.size() >= maxNodes) {
-                return selected;
-            }
-            selected.add(id);
-        }
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+        addByPriorityExcludingBuilders(selected, models, typeById, nodePriority, maxNodes);
 
-        List<String> rest = candidateTypeIds.stream()
+        /*
+         * 남은 일반 타입도 non-builder를 먼저 채운 뒤,
+         * 정말 슬롯이 남을 때만 builder를 보조적으로 포함한다.
+         */
+        addByPriorityExcludingBuilders(selected, candidateTypeIds, typeById, nodePriority, maxNodes);
+        addByPriority(selected, candidateTypeIds, nodePriority, maxNodes);
+
+        return selected;
+    }
+
+    private void addStructuralPairs(
+            LinkedHashSet<String> selected,
+            List<EdgeAggregate> structuralAggregates,
+            Comparator<String> nodePriority,
+            int maxNodes
+    ) {
+        for (EdgeAggregate aggregate : structuralAggregates) {
+            if (selected.size() >= maxNodes) {
+                return;
+            }
+
+            List<String> pair = List.of(aggregate.sourceTypeId, aggregate.targetTypeId).stream()
+                    .distinct()
+                    .sorted(nodePriority)
+                    .toList();
+
+            for (String id : pair) {
+                if (selected.size() >= maxNodes) {
+                    return;
+                }
+                selected.add(id);
+            }
+        }
+    }
+
+    private void addByPriorityExcludingBuilders(
+            LinkedHashSet<String> selected,
+            Collection<String> ids,
+            Map<String, SymbolEntity> typeById,
+            Comparator<String> nodePriority,
+            int maxNodes
+    ) {
+        List<String> ordered = ids.stream()
+                .filter(id -> !selected.contains(id))
+                .filter(id -> !isBuilderLikeType(typeById.get(id)))
+                .sorted(nodePriority)
+                .toList();
+        addOrdered(selected, ordered, maxNodes);
+    }
+
+    private void addByPriority(
+            LinkedHashSet<String> selected,
+            Collection<String> ids,
+            Comparator<String> nodePriority,
+            int maxNodes
+    ) {
+        List<String> ordered = ids.stream()
                 .filter(id -> !selected.contains(id))
                 .sorted(nodePriority)
                 .toList();
-        for (String id : rest) {
+        addOrdered(selected, ordered, maxNodes);
+    }
+
+    private void addOrdered(
+            LinkedHashSet<String> selected,
+            Collection<String> orderedIds,
+            int maxNodes
+    ) {
+        for (String id : orderedIds) {
             if (selected.size() >= maxNodes) {
-                break;
+                return;
             }
             selected.add(id);
         }
-        return selected;
     }
 
     /**
@@ -565,6 +750,38 @@ public class ClassMapBuildService {
                 return bySource;
             }
             return left.targetTypeId.compareTo(right.targetTypeId);
+        };
+    }
+
+    /**
+     * 구조 edge는 연결된 노드의 중요도를 우선으로 정렬한다.
+     * 그래야 maxNodes가 작아도 의미 있는 계층 관계가 먼저 살아남는다.
+     */
+    private Comparator<EdgeAggregate> structuralEdgePriorityComparator(Map<String, Double> scoreByTypeId) {
+        return (left, right) -> {
+            double leftMaxScore = Math.max(
+                    scoreByTypeId.getOrDefault(left.sourceTypeId, 0.0),
+                    scoreByTypeId.getOrDefault(left.targetTypeId, 0.0)
+            );
+            double rightMaxScore = Math.max(
+                    scoreByTypeId.getOrDefault(right.sourceTypeId, 0.0),
+                    scoreByTypeId.getOrDefault(right.targetTypeId, 0.0)
+            );
+            int byMaxScore = Double.compare(rightMaxScore, leftMaxScore);
+            if (byMaxScore != 0) {
+                return byMaxScore;
+            }
+
+            double leftSumScore = scoreByTypeId.getOrDefault(left.sourceTypeId, 0.0)
+                    + scoreByTypeId.getOrDefault(left.targetTypeId, 0.0);
+            double rightSumScore = scoreByTypeId.getOrDefault(right.sourceTypeId, 0.0)
+                    + scoreByTypeId.getOrDefault(right.targetTypeId, 0.0);
+            int bySumScore = Double.compare(rightSumScore, leftSumScore);
+            if (bySumScore != 0) {
+                return bySumScore;
+            }
+
+            return edgePriorityComparator().compare(left, right);
         };
     }
 
@@ -923,6 +1140,32 @@ public class ClassMapBuildService {
     }
 
     /**
+     * Lombok/중첩 builder 계열 타입은 공개 메서드 반환 타입으로 점수가 과대평가되기 쉬워
+     * 기본 클래스 다이어그램에서는 후순위로 밀어낸다.
+     */
+    private boolean isBuilderLikeType(SymbolEntity type) {
+        if (type == null) {
+            return false;
+        }
+
+        String simpleName = trimToNull(type.getSimpleName());
+        if (simpleName != null && simpleName.replace('$', '.').endsWith("Builder")) {
+            return true;
+        }
+
+        String qualifiedName = normalizeQualifiedName(type.getQualifiedName());
+        return qualifiedName != null && qualifiedName.replace('$', '.').endsWith("Builder");
+    }
+
+    /**
+     * 클래스 계층을 표현하는 구조 edge인지 판별한다.
+     */
+    private boolean isStructuralAggregate(EdgeAggregate aggregate) {
+        return aggregate != null
+                && (aggregate.edgeType == EdgeType.EXTENDS || aggregate.edgeType == EdgeType.IMPLEMENTS);
+    }
+
+    /**
      * edge 타입별 정렬 우선순위 숫자를 반환한다.
      */
     private int edgeTypeOrder(EdgeType edgeType) {
@@ -982,6 +1225,43 @@ public class ClassMapBuildService {
      */
     private String edgeKey(String sourceId, String targetId, EdgeType edgeType) {
         return sourceId + "|" + edgeType.name() + "|" + targetId;
+    }
+
+    private record ScopeSelection(
+            ClassMapScope scope,
+            String subsystemId,
+            String subsystemName,
+            Set<String> allowedTypeIds,
+            Set<String> prioritySeedIds
+    ) {
+        private static ScopeSelection overview() {
+            return new ScopeSelection(
+                    ClassMapScope.OVERVIEW,
+                    null,
+                    null,
+                    Set.of(),
+                    Set.of()
+            );
+        }
+
+        private static ScopeSelection subsystem(
+                String subsystemId,
+                String subsystemName,
+                Set<String> allowedTypeIds,
+                Set<String> prioritySeedIds
+        ) {
+            return new ScopeSelection(
+                    ClassMapScope.SUBSYSTEM,
+                    subsystemId,
+                    subsystemName,
+                    Set.copyOf(allowedTypeIds),
+                    Set.copyOf(prioritySeedIds)
+            );
+        }
+
+        private boolean allows(String symbolId) {
+            return scope == ClassMapScope.OVERVIEW || allowedTypeIds.contains(symbolId);
+        }
     }
 
     private record FilterResult(Set<String> candidateTypeIds, int hiddenByAccessCount, int hiddenByPackageCount) {
