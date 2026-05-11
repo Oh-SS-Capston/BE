@@ -26,10 +26,10 @@ import java.util.Set;
 @Transactional
 public class PublicApiEntrySyncService {
     private static final List<String> NON_PRODUCTION_PATH_MARKERS = List.of(
-            "/src/test/",
-            "/src/it/",
-            "/src/integrationtest/",
-            "/src/integration-test/",
+            "src/test/",
+            "src/it/",
+            "src/integrationtest/",
+            "src/integration-test/",
             "/example/",
             "/examples/",
             "/sample/",
@@ -141,11 +141,13 @@ public class PublicApiEntrySyncService {
             }
         }
 
-        String simpleName = trimToNull(type.getSimpleName());
-        if (simpleName != null) {
-            String lower = simpleName.toLowerCase(Locale.ROOT);
-            if (lower.endsWith("test") || lower.endsWith("tests") || lower.endsWith("testcase")) {
-                return true;
+        String qualifiedName = trimToNull(type.getQualifiedName());
+        if (qualifiedName != null) {
+            for (String segment : qualifiedName.split("\\.")) {
+                String lower = segment.toLowerCase(Locale.ROOT);
+                if (lower.endsWith("test") || lower.endsWith("tests") || lower.endsWith("testcase")) {
+                    return true;
+                }
             }
         }
 
