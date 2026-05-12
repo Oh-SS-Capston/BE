@@ -11,6 +11,7 @@ import com.example.ossdoc.domain.extraction.dto.model.RelationFact;
 import com.example.ossdoc.domain.extraction.dto.model.RelationTable;
 import com.example.ossdoc.domain.extraction.dto.model.RootMergeResult;
 import com.example.ossdoc.domain.extraction.dto.model.StatsMeta;
+import com.example.ossdoc.domain.extraction.dto.model.SignatureFact;
 import com.example.ossdoc.domain.extraction.dto.model.SymbolFact;
 import com.example.ossdoc.domain.extraction.dto.model.SymbolTable;
 import com.example.ossdoc.domain.extraction.enums.MergeStage;
@@ -21,10 +22,13 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 @Component
@@ -181,11 +185,91 @@ public class ExtractionMergeSupport {
             if (symbol == null || symbol.symbol() == null || symbol.symbol().isBlank()) {
                 continue;
             }
-            SymbolFact previous = target.putIfAbsent(symbol.symbol(), symbol);
-            if (previous == null && stats != null) {
+            boolean isNew = !target.containsKey(symbol.symbol());
+            // Field-level merge: AST의 docComment/sourceFile/signature.javadoc가
+            // bytecode symbol에 덮여 사라지지 않도록 firstNonBlank 정책으로 합산.
+            target.merge(symbol.symbol(), symbol, ExtractionMergeSupport::mergeSymbol);
+            if (isNew && stats != null) {
                 stats.recordSymbol(symbol);
             }
         }
+    }
+
+    private static SymbolFact mergeSymbol(SymbolFact existing, SymbolFact incoming) {
+        return SymbolFact.builder()
+                .symbol(firstNonBlank(existing.symbol(), incoming.symbol()))
+                .kind(firstNonNull(existing.kind(), incoming.kind()))
+                .typeKind(firstNonNull(existing.typeKind(), incoming.typeKind()))
+                .name(firstNonBlank(existing.name(), incoming.name()))
+                .qualifiedName(firstNonBlank(existing.qualifiedName(), incoming.qualifiedName()))
+                .ownerSymbol(firstNonBlank(existing.ownerSymbol(), incoming.ownerSymbol()))
+                .packageSymbol(firstNonBlank(existing.packageSymbol(), incoming.packageSymbol()))
+                .module(firstNonBlank(existing.module(), incoming.module()))
+                .sourceRoot(firstNonBlank(existing.sourceRoot(), incoming.sourceRoot()))
+                .bytecodeRoot(firstNonBlank(existing.bytecodeRoot(), incoming.bytecodeRoot()))
+                .nestedIn(firstNonBlank(existing.nestedIn(), incoming.nestedIn()))
+                .access(firstNonNull(existing.access(), incoming.access()))
+                .modifiers(mergeSets(existing.modifiers(), incoming.modifiers()))
+                .origin(firstNonNull(existing.origin(), incoming.origin()))
+                .annotations(firstNonNull(existing.annotations(), incoming.annotations()))
+                .evidenceIds(mergeEvidenceIds(existing.evidenceIds(), incoming.evidenceIds()))
+                .attrs(mergeMaps(existing.attrs(), incoming.attrs()))
+                .signature(mergeSignature(existing.signature(), incoming.signature()))
+                .superTypeRef(firstNonNull(existing.superTypeRef(), incoming.superTypeRef()))
+                .interfaceTypeRefs(firstNonNull(existing.interfaceTypeRefs(), incoming.interfaceTypeRefs()))
+                .sourceFile(firstNonBlank(existing.sourceFile(), incoming.sourceFile()))
+                .docComment(firstNonBlank(existing.docComment(), incoming.docComment()))
+                .typeParams(firstNonNull(existing.typeParams(), incoming.typeParams()))
+                .testCoverageHint(firstNonNull(existing.testCoverageHint(), incoming.testCoverageHint()))
+                .throwsUnchecked(firstNonNull(existing.throwsUnchecked(), incoming.throwsUnchecked()))
+                .hasConditionalThrow(firstNonNull(existing.hasConditionalThrow(), incoming.hasConditionalThrow()))
+                .stateMutations(firstNonNull(existing.stateMutations(), incoming.stateMutations()))
+                .build();
+    }
+
+    private static SignatureFact mergeSignature(SignatureFact existing, SignatureFact incoming) {
+        if (existing == null) return incoming;
+        if (incoming == null) return existing;
+        return SignatureFact.builder()
+                .params(firstNonNull(existing.params(), incoming.params()))
+                .returns(firstNonNull(existing.returns(), incoming.returns()))
+                .throwsTypes(firstNonNull(existing.throwsTypes(), incoming.throwsTypes()))
+                .fieldType(firstNonNull(existing.fieldType(), incoming.fieldType()))
+                .javadoc(firstNonBlank(existing.javadoc(), incoming.javadoc()))
+                .sealed(firstNonNull(existing.sealed(), incoming.sealed()))
+                .build();
+    }
+
+    private static List<String> mergeEvidenceIds(List<String> existing, List<String> incoming) {
+        if (existing == null || existing.isEmpty()) return incoming;
+        if (incoming == null || incoming.isEmpty()) return existing;
+        LinkedHashSet<String> merged = new LinkedHashSet<>(existing);
+        merged.addAll(incoming);
+        return List.copyOf(merged);
+    }
+
+    private static <T> Set<T> mergeSets(Set<T> left, Set<T> right) {
+        if (left == null || left.isEmpty()) return right;
+        if (right == null || right.isEmpty()) return left;
+        LinkedHashSet<T> merged = new LinkedHashSet<>(left);
+        merged.addAll(right);
+        return Collections.unmodifiableSet(merged);
+    }
+
+    private static <K, V> Map<K, V> mergeMaps(Map<K, V> left, Map<K, V> right) {
+        if (left == null || left.isEmpty()) return right;
+        if (right == null || right.isEmpty()) return left;
+        LinkedHashMap<K, V> merged = new LinkedHashMap<>(left);
+        merged.putAll(right);
+        return Collections.unmodifiableMap(merged);
+    }
+
+    private static <T> T firstNonNull(T left, T right) {
+        return left != null ? left : right;
+    }
+
+    private static String firstNonBlank(String left, String right) {
+        return (left != null && !left.isBlank()) ? left : right;
     }
 
     private void mergeRelations(Map<String, RelationFact> target, List<RelationFact> source, StatsAccumulator stats) {

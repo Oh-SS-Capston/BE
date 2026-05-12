@@ -82,15 +82,7 @@ final class FactsSectionFactory {
             }
         }
 
-        Map<String, EvidenceFact> sorted = new TreeMap<>();
-        for (Map.Entry<String, EvidenceFact> entry : merged.entrySet()) {
-            EvidenceFact normalized = FactsDedupSupport.mergeEvidence(
-                    EvidenceFact.builder().id(entry.getKey()).build(),
-                    entry.getValue()
-            );
-            sorted.put(entry.getKey(), normalized);
-        }
-        return Collections.unmodifiableMap(new LinkedHashMap<>(sorted));
+        return Collections.unmodifiableMap(new LinkedHashMap<>(new TreeMap<>(merged)));
     }
 
     SymbolTable composeSymbols(SymbolTable raw, Map<String, EvidenceFact> evidenceMap) {

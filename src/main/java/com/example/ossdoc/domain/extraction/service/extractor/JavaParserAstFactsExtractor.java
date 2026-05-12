@@ -55,8 +55,9 @@ import com.github.javaparser.ast.body.MethodDeclaration;
 import com.github.javaparser.ast.body.Parameter;
 import com.github.javaparser.ast.body.RecordDeclaration;
 import com.github.javaparser.ast.body.TypeDeclaration;
-import com.github.javaparser.ast.nodeTypes.NodeWithJavadoc;
-import com.github.javaparser.javadoc.JavadocBlockTag;
+import java.nio.ByteBuffer;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
 import com.github.javaparser.ast.type.TypeParameter;
 import com.example.ossdoc.domain.extraction.dto.model.TypeParam;
 import com.github.javaparser.ast.NodeList;
@@ -167,7 +168,6 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
     private ParserConfiguration parserConfiguration(ExtractionContext context, ExtractionSink sink) {
         ParserConfiguration configuration = new ParserConfiguration()
                 .setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
-                .setStoreTokens(false)
                 .setAttributeComments(false);
 
         try {
@@ -205,7 +205,8 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                         && classpathEntry.getFileName().toString().endsWith(".jar")) {
                     solver.add(new JarTypeSolver(classpathEntry.toString()));
                 }
-            } catch (IOException e) {
+            } catch (Exception e) {
+                // JarTypeSolver throws NPE on modular JARs (module-info.class) in javaparser 3.x
                 sink.addWarning("failed to attach classpath entry to symbol solver: "
                         + classpathEntry + " (" + e.getMessage() + ")");
             }
@@ -229,7 +230,8 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             }
 
             sink.recordFileParsed();
-            processCompilationUnit(context, javaFile, relativePath, parseResult.getResult().orElseThrow(), sink);
+            List<String> sourceLines = readSourceLines(javaFile, sink);
+            processCompilationUnit(context, relativePath, parseResult.getResult().orElseThrow(), sourceLines, sink);
         } catch (ParseProblemException | IOException e) {
             sink.addError("failed to parse source file: " + relativePath + " (" + e.getMessage() + ")");
         }
@@ -237,9 +239,9 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
 
     private void processCompilationUnit(
             ExtractionContext context,
-            Path javaFile,
             String relativePath,
             CompilationUnit cu,
+            List<String> sourceLines,
             ExtractionSink sink
     ) {
         String packageName = cu.getPackageDeclaration()
@@ -248,25 +250,25 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                 .orElse("(default)");
 
         String moduleSymbol = ensureModuleSymbol(context, sink);
-        String packageSymbol = ensurePackageSymbol(context, packageName, relativePath, cu, moduleSymbol, sink, javaFile);
+        String packageSymbol = ensurePackageSymbol(context, packageName, relativePath, cu, moduleSymbol, sink);
 
         cu.getModule().ifPresent(moduleDecl ->
-                collectModuleDirectives(moduleDecl, relativePath, javaFile, sink));
+                collectModuleDirectives(moduleDecl, relativePath, sourceLines, sink));
 
         for (TypeDeclaration<?> typeDeclaration : cu.getTypes()) {
-            collectTypeRecursive(context, javaFile, relativePath, packageSymbol, null, typeDeclaration, sink);
+            collectTypeRecursive(context, relativePath, packageSymbol, null, typeDeclaration, sourceLines, sink);
         }
     }
 
     private void collectModuleDirectives(
             ModuleDeclaration moduleDecl,
             String relativePath,
-            Path javaFile,
+            List<String> sourceLines,
             ExtractionSink sink
     ) {
         String moduleName = moduleDecl.getNameAsString();
         String moduleSymbol = SymbolIdFactory.module(moduleName);
-        EvidenceFact evidence = buildAstEvidence(relativePath, javaFile, moduleDecl, moduleSymbol, EvidenceType.AST);
+        EvidenceFact evidence = buildAstEvidence(relativePath, sourceLines, moduleDecl, moduleSymbol, EvidenceType.AST);
         sink.addEvidence(evidence);
         List<String> evidenceIds = List.of(evidence.id());
 
@@ -308,20 +310,20 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
 
     private void collectTypeRecursive(
             ExtractionContext context,
-            Path javaFile,
             String relativePath,
             String packageSymbol,
             String nestedOwnerSymbol,
             TypeDeclaration<?> typeDeclaration,
+            List<String> sourceLines,
             ExtractionSink sink
     ) {
         String qualifiedName = resolveQualifiedTypeName(typeDeclaration);
         String typeSymbol = SymbolIdFactory.type(qualifiedName);
-        EvidenceFact evidence = buildAstEvidence(relativePath, javaFile, typeDeclaration, typeSymbol, EvidenceType.AST);
+        EvidenceFact evidence = buildAstEvidence(relativePath, sourceLines, typeDeclaration, typeSymbol, EvidenceType.AST);
         sink.addEvidence(evidence);
 
         TypeKind typeKind = typeKind(typeDeclaration);
-        String javadocText = extractDocComment(typeDeclaration);
+        String javadocText = extractDocCommentFromSource(sourceLines, typeDeclaration);
         boolean isSealed = typeDeclaration instanceof ClassOrInterfaceDeclaration coid &&
                 coid.getModifiers().stream()
                         .anyMatch(m -> "SEALED".equals(m.getKeyword().name()));
@@ -357,40 +359,40 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
 
         for (BodyDeclaration<?> member : typeDeclaration.getMembers()) {
             if (member instanceof FieldDeclaration fieldDeclaration) {
-                collectFieldDeclarations(context, javaFile, relativePath, typeSymbol, fieldDeclaration, sink);
+                collectFieldDeclarations(context, relativePath, typeSymbol, fieldDeclaration, sourceLines, sink);
             } else if (member instanceof ConstructorDeclaration constructorDeclaration) {
-                collectConstructor(context, javaFile, relativePath, typeSymbol, constructorDeclaration, sink);
+                collectConstructor(context, relativePath, typeSymbol, constructorDeclaration, sourceLines, sink);
             } else if (member instanceof MethodDeclaration methodDeclaration) {
-                collectMethod(context, javaFile, relativePath, typeSymbol, methodDeclaration, sink);
+                collectMethod(context, relativePath, typeSymbol, methodDeclaration, sourceLines, sink);
             } else if (member instanceof TypeDeclaration<?> nestedType) {
-                collectTypeRecursive(context, javaFile, relativePath, packageSymbol, typeSymbol, nestedType, sink);
+                collectTypeRecursive(context, relativePath, packageSymbol, typeSymbol, nestedType, sourceLines, sink);
             }
         }
 
         if (typeDeclaration instanceof EnumDeclaration enumDeclaration) {
             for (EnumConstantDeclaration constant : enumDeclaration.getEntries()) {
-                collectEnumConstant(context, javaFile, relativePath, typeSymbol, constant, sink);
+                collectEnumConstant(context, relativePath, typeSymbol, constant, sourceLines, sink);
             }
         }
 
         if (typeDeclaration instanceof RecordDeclaration recordDeclaration) {
             for (Parameter parameter : recordDeclaration.getParameters()) {
-                collectRecordComponent(context, javaFile, relativePath, typeSymbol, parameter, sink);
+                collectRecordComponent(context, relativePath, typeSymbol, parameter, sourceLines, sink);
             }
         }
     }
 
     private void collectFieldDeclarations(
             ExtractionContext context,
-            Path javaFile,
             String relativePath,
             String ownerTypeSymbol,
             FieldDeclaration fieldDeclaration,
+            List<String> sourceLines,
             ExtractionSink sink
     ) {
         for (com.github.javaparser.ast.body.VariableDeclarator variable : fieldDeclaration.getVariables()) {
             String fieldSymbol = SymbolIdFactory.field(ownerTypeSymbol.substring("type:".length()), variable.getNameAsString());
-            EvidenceFact evidence = buildAstEvidence(relativePath, javaFile, variable, fieldSymbol, EvidenceType.AST);
+            EvidenceFact evidence = buildAstEvidence(relativePath, sourceLines, variable, fieldSymbol, EvidenceType.AST);
             sink.addEvidence(evidence);
 
             TypeRef fieldTypeRef = toTypeRef(variable.getType(), sink);
@@ -412,7 +414,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                     .evidenceIds(List.of(evidence.id()))
                     .signature(signature)
                     .sourceFile(relativePath)
-                    .docComment(extractDocComment(fieldDeclaration))
+                    .docComment(extractDocCommentFromSource(sourceLines, fieldDeclaration))
                     .build();
             sink.addSymbol(fieldFact);
 
@@ -422,17 +424,17 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
 
     private void collectConstructor(
             ExtractionContext context,
-            Path javaFile,
             String relativePath,
             String ownerTypeSymbol,
             ConstructorDeclaration declaration,
+            List<String> sourceLines,
             ExtractionSink sink
     ) {
-        String javadocText = extractDocComment(declaration);
+        String javadocText = extractDocCommentFromSource(sourceLines, declaration);
         SignatureFact signature = callableSignature(declaration, javadocText, sink);
         String ownerQualifiedName = ownerTypeSymbol.substring("type:".length());
         String constructorSymbol = SymbolIdFactory.constructor(ownerQualifiedName, signature);
-        EvidenceFact evidence = buildAstEvidence(relativePath, javaFile, declaration, constructorSymbol, EvidenceType.AST);
+        EvidenceFact evidence = buildAstEvidence(relativePath, sourceLines, declaration, constructorSymbol, EvidenceType.AST);
         sink.addEvidence(evidence);
 
         SymbolFact fact = SymbolFact.builder()
@@ -459,17 +461,17 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
 
     private void collectMethod(
             ExtractionContext context,
-            Path javaFile,
             String relativePath,
             String ownerTypeSymbol,
             MethodDeclaration declaration,
+            List<String> sourceLines,
             ExtractionSink sink
     ) {
-        String javadocText = extractDocComment(declaration);
+        String javadocText = extractDocCommentFromSource(sourceLines, declaration);
         SignatureFact signature = callableSignature(declaration, javadocText, sink);
         String ownerQualifiedName = ownerTypeSymbol.substring("type:".length());
         String methodSymbol = SymbolIdFactory.method(ownerQualifiedName, declaration.getNameAsString(), signature);
-        EvidenceFact evidence = buildAstEvidence(relativePath, javaFile, declaration, methodSymbol, EvidenceType.AST);
+        EvidenceFact evidence = buildAstEvidence(relativePath, sourceLines, declaration, methodSymbol, EvidenceType.AST);
         sink.addEvidence(evidence);
 
         ThrowAnalysis throwAnalysis = analyzeThrows(declaration, sink);
@@ -500,13 +502,12 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         addMethodObservationsIfNeeded(context, declaration, methodSymbol, evidence.id(), sink);
 
         if (isExampleFile(relativePath)) {
-            collectExampleTypeRefs(relativePath, javaFile, declaration, sink);
+            collectExampleTypeRefs(relativePath, declaration, sink);
         }
     }
 
     private void collectExampleTypeRefs(
             String relativePath,
-            Path javaFile,
             MethodDeclaration declaration,
             ExtractionSink sink
     ) {
@@ -569,14 +570,14 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
 
     private void collectEnumConstant(
             ExtractionContext context,
-            Path javaFile,
             String relativePath,
             String ownerTypeSymbol,
             EnumConstantDeclaration constant,
+            List<String> sourceLines,
             ExtractionSink sink
     ) {
         String fieldSymbol = SymbolIdFactory.field(ownerTypeSymbol.substring("type:".length()), constant.getNameAsString());
-        EvidenceFact evidence = buildAstEvidence(relativePath, javaFile, constant, fieldSymbol, EvidenceType.AST);
+        EvidenceFact evidence = buildAstEvidence(relativePath, sourceLines, constant, fieldSymbol, EvidenceType.AST);
         sink.addEvidence(evidence);
 
         SymbolFact fact = SymbolFact.builder()
@@ -600,14 +601,14 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
 
     private void collectRecordComponent(
             ExtractionContext context,
-            Path javaFile,
             String relativePath,
             String ownerTypeSymbol,
             Parameter parameter,
+            List<String> sourceLines,
             ExtractionSink sink
     ) {
         String fieldSymbol = SymbolIdFactory.field(ownerTypeSymbol.substring("type:".length()), parameter.getNameAsString());
-        EvidenceFact evidence = buildAstEvidence(relativePath, javaFile, parameter, fieldSymbol, EvidenceType.AST);
+        EvidenceFact evidence = buildAstEvidence(relativePath, sourceLines, parameter, fieldSymbol, EvidenceType.AST);
         sink.addEvidence(evidence);
 
         TypeRef fieldTypeRef = toTypeRef(parameter.getType(), sink);
@@ -936,8 +937,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             String relativePath,
             CompilationUnit cu,
             String moduleSymbol,
-            ExtractionSink sink,
-            Path javaFile
+            ExtractionSink sink
     ) {
         return SymbolIdFactory.packageSymbol(packageName);
     }
@@ -1176,28 +1176,6 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         });
     }
 
-    private String extractDocComment(NodeWithJavadoc<?> node) {
-        return node.getJavadoc().map(javadoc -> {
-            // 설명 본문 (블록 태그 이전)
-            String desc = javadoc.getDescription().toText();
-            int blankLine = desc.indexOf("\n\n");
-            if (blankLine > 0) desc = desc.substring(0, blankLine);
-            desc = desc.replaceAll("<[^>]+>", "").trim();
-
-            // 블록 태그 전체 포함 — @implSpec, @apiNote 등이 publicapi 탐지에 필요
-            String tags = javadoc.getBlockTags().stream()
-                    .map(tag -> "@" + tag.getTagName() + " " + tag.getContent().toText().trim())
-                    .filter(s -> !s.isBlank())
-                    .collect(Collectors.joining(" "));
-            tags = tags.replaceAll("<[^>]+>", "").trim();
-
-            String result = desc.isBlank() ? tags
-                    : tags.isBlank() ? desc
-                    : desc + " " + tags;
-            return result.isBlank() ? null : result;
-        }).orElse(null);
-    }
-
     private List<TypeParam> extractTypeParams(TypeDeclaration<?> typeDecl, ExtractionSink sink) {
         NodeList<TypeParameter> typeParameters;
         if (typeDecl instanceof ClassOrInterfaceDeclaration cid) {
@@ -1375,7 +1353,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         return set;
     }
 
-    private EvidenceFact buildAstEvidence(String relativePath, Path javaFile, Node node, String symbol, EvidenceType kind) {
+    private EvidenceFact buildAstEvidence(String relativePath, List<String> sourceLines, Node node, String symbol, EvidenceType kind) {
         Integer startLine = null, startCol = null, endLine = null, endCol = null;
         if (node.getRange().isPresent()) {
             Range range = node.getRange().get();
@@ -1384,7 +1362,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             endLine = range.end.line;
             endCol = range.end.column;
         }
-        String snippet = readSnippet(javaFile, startLine, endLine);
+        String snippet = readSnippetFromLines(sourceLines, startLine, endLine);
         if (snippet != null && snippet.length() > 300) {
             snippet = snippet.substring(0, 300);
         }
@@ -1403,21 +1381,173 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                 .build();
     }
 
-    private String readSnippet(Path javaFile, Integer startLine, Integer endLine) {
-        if (startLine == null || endLine == null) {
+    private List<String> readSourceLines(Path javaFile, ExtractionSink sink) {
+        try {
+            return Files.readAllLines(javaFile, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            // UTF-8 strict decode failed (non-UTF-8 bytes in comments or string literals).
+            // JavaParser uses CodingErrorAction.REPLACE internally and succeeds on the same file.
+            // Re-read leniently so invalid bytes become replacement chars rather than producing
+            // an empty sourceLines list that silently drops all snippet and Javadoc output.
+            try {
+                byte[] bytes = Files.readAllBytes(javaFile);
+                String content = StandardCharsets.UTF_8.newDecoder()
+                        .onMalformedInput(CodingErrorAction.REPLACE)
+                        .onUnmappableCharacter(CodingErrorAction.REPLACE)
+                        .decode(ByteBuffer.wrap(bytes))
+                        .toString();
+                sink.addWarning("source file contains non-UTF-8 bytes; snippet/javadoc extraction used lenient decoding: "
+                        + javaFile.getFileName());
+                return content.lines().collect(Collectors.toList());
+            } catch (IOException e2) {
+                sink.addWarning("failed to read source lines for snippet/javadoc extraction: " + javaFile.getFileName());
+                return List.of();
+            }
+        }
+    }
+
+    private String readSnippetFromLines(List<String> sourceLines, Integer startLine, Integer endLine) {
+        if (startLine == null || endLine == null || sourceLines.isEmpty()) {
             return null;
         }
-        try {
-            List<String> lines = Files.readAllLines(javaFile, java.nio.charset.StandardCharsets.UTF_8);
-            int start = Math.max(1, startLine);
-            int end = Math.min(lines.size(), endLine);
-            if (start > end) {
+        int start = Math.max(1, startLine);
+        int end = Math.min(sourceLines.size(), endLine);
+        if (start > end) {
+            return null;
+        }
+        return String.join("\n", sourceLines.subList(start - 1, end));
+    }
+
+    private String extractDocCommentFromSource(List<String> sourceLines, Node node) {
+        if (sourceLines.isEmpty()) return null;
+        int beginLine = node.getRange().map(r -> r.begin.line).orElse(-1);
+        if (beginLine <= 1) return null;
+
+        final int MAX_BLANK_SKIP = 2;
+        int blankCount = 0;
+        int parenDepth = 0;
+
+        for (int i = beginLine - 2; i >= 0; i--) {
+            String line = sourceLines.get(i);
+            String trimmed = line.trim();
+
+            // [A] Javadoc block end marker
+            if (parenDepth == 0 && trimmed.endsWith("*/")) {
+                return extractJavadocBlock(sourceLines, i);
+            }
+
+            // [B] Blank line
+            if (trimmed.isEmpty()) {
+                if (blankCount >= MAX_BLANK_SKIP) return null;
+                blankCount++;
+                continue;
+            }
+
+            // [D] Inside multiline annotation body (going backward)
+            if (parenDepth > 0) {
+                int opens = countChar(trimmed, '(');
+                int closes = countChar(trimmed, ')');
+                parenDepth += closes - opens;
+                if (parenDepth <= 0) {
+                    parenDepth = 0;
+                    blankCount = 0;
+                }
+                continue;
+            }
+
+            // [C] Single-line or start of multiline annotation
+            if (trimmed.startsWith("@")) {
+                blankCount = 0;
+                int opens = countChar(trimmed, '(');
+                int closes = countChar(trimmed, ')');
+                if (opens > closes) {
+                    parenDepth = opens - closes;
+                }
+                continue;
+            }
+
+            // [E] Closing paren of a multiline annotation above (e.g., a line that is just ")")
+            int opens = countChar(trimmed, '(');
+            int closes = countChar(trimmed, ')');
+            if (closes > opens) {
+                parenDepth = closes - opens;
+                continue;
+            }
+
+            // Everything else is code — stop scanning
+            return null;
+        }
+
+        return null;
+    }
+
+    private String extractJavadocBlock(List<String> sourceLines, int endIdx) {
+        // endIdx is the 0-based index of the line ending with */
+        int startIdx = -1;
+        int limit = Math.max(0, endIdx - 200);
+        for (int i = endIdx; i >= limit; i--) {
+            String t = sourceLines.get(i).trim();
+            if (t.startsWith("/**")) {
+                startIdx = i;
+                break;
+            }
+            // Regular block comment (not Javadoc) — stop; don't attribute a distant /** to this node
+            if (t.startsWith("/*")) {
                 return null;
             }
-            return String.join("\n", lines.subList(start - 1, end));
-        } catch (IOException e) {
-            return null;
         }
+        if (startIdx < 0) return null;
+
+        List<String> rawLines = new ArrayList<>();
+        for (int i = startIdx; i <= endIdx; i++) {
+            // Apply all three strip operations unconditionally (handles single-line /** desc */ correctly)
+            String trimmed = sourceLines.get(i).trim()
+                    .replaceFirst("^/\\*\\*\\s?", "")
+                    .replaceFirst("\\s?\\*/$", "")
+                    .replaceFirst("^\\*\\s?", "");
+            rawLines.add(trimmed);
+        }
+
+        StringBuilder desc = new StringBuilder();
+        StringBuilder tags = new StringBuilder();
+        boolean inTags = false;
+
+        for (String raw : rawLines) {
+            if (!inTags && raw.isEmpty()) {
+                inTags = true;
+                continue;
+            }
+            if (raw.startsWith("@")) {
+                inTags = true;
+            }
+            if (inTags) {
+                if (!raw.isEmpty()) {
+                    if (tags.length() > 0) tags.append(" ");
+                    tags.append(raw);
+                }
+            } else {
+                if (!raw.isEmpty()) {
+                    if (desc.length() > 0) desc.append(" ");
+                    desc.append(raw);
+                }
+            }
+        }
+
+        String descStr = desc.toString().replaceAll("<[^>]+>", "").trim();
+        String tagsStr = tags.toString().replaceAll("<[^>]+>", "").trim();
+
+        String result = descStr.isBlank() ? tagsStr
+                : tagsStr.isBlank() ? descStr
+                : descStr + " " + tagsStr;
+        return result.isBlank() ? null : result;
+    }
+
+    private int countChar(String s, char c) {
+        int count = 0;
+        for (int i = 0; i < s.length(); i++) {
+            if (s.charAt(i) == c) count++;
+        }
+        return count;
     }
 
     private String methodSymbol(ResolvedMethodDeclaration resolved, ExtractionSink sink) {
