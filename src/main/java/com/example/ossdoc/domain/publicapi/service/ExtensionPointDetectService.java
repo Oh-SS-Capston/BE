@@ -242,7 +242,7 @@ public class ExtensionPointDetectService {
     /**
      * FACTS_JSON 아티팩트에서 Phase 1 신호(SPI, module uses)와 Phase 4 신호(contract test)를 추출한다.
      *
-     * SPI: observations 배열에서 kind = "spi_provider" → symbol(interface FQCN) 추출
+     * SPI: observations.spi_providers 버킷에서 target_symbol(interface FQCN) 추출
      * module uses: MODULE 심볼의 signature.uses 배열
      * contract test: evidence 배열에서 test 경로의 Abstract*Test / *ContractTest 파일
      */
@@ -271,13 +271,12 @@ public class ExtensionPointDetectService {
 
         JsonNode meta = opt.get().getMeta();
 
-        // observations: SPI_PROVIDER
-        JsonNode observations = meta.path("observations");
-        if (observations.isArray()) {
-            for (JsonNode obs : observations) {
-                String kind   = obs.path("kind").asText("").toLowerCase(Locale.ROOT);
-                String symbol = obs.path("symbol").asText("");
-                if ("spi_provider".equals(kind) && !symbol.isBlank()) {
+        // observations.spi_providers 버킷: target_symbol = 인터페이스 FQCN
+        JsonNode spiProviders = meta.path("observations").path("spi_providers");
+        if (spiProviders.isArray()) {
+            for (JsonNode obs : spiProviders) {
+                String symbol = obs.path("target_symbol").asText("");
+                if (!symbol.isBlank()) {
                     spiQualifiedNames.add(extractQualifiedName(symbol));
                 }
             }
@@ -287,7 +286,7 @@ public class ExtensionPointDetectService {
         JsonNode evidenceArray = meta.path("evidence");
         if (evidenceArray.isArray()) {
             for (JsonNode ev : evidenceArray) {
-                String filePath = ev.path("file").asText("")
+                String filePath = ev.path("path").asText("")
                         .replace('\\', '/').toLowerCase(Locale.ROOT);
                 if (!filePath.contains("src/test/")) continue;
 

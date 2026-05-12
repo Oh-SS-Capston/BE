@@ -178,6 +178,10 @@ final class FactsSectionFactory {
         List<ObservationFact> scheduling = new ArrayList<>();
         List<ObservationFact> asyncMethods = new ArrayList<>();
         List<ObservationFact> configWiring = new ArrayList<>();
+        List<ObservationFact> readmeMentions = new ArrayList<>();
+        List<ObservationFact> moduleExports = new ArrayList<>();
+        List<ObservationFact> moduleUses = new ArrayList<>();
+        List<ObservationFact> moduleProvides = new ArrayList<>();
 
         for (ObservationFact observation : merged.values()) {
             if (observation == null || observation.kind() == null) {
@@ -194,6 +198,10 @@ final class FactsSectionFactory {
                 case SCHEDULED_TASK -> scheduling.add(observation);
                 case ASYNC_METHOD -> asyncMethods.add(observation);
                 case CONFIG_WIRING -> configWiring.add(observation);
+                case README_MENTION -> readmeMentions.add(observation);
+                case MODULE_EXPORTS -> moduleExports.add(observation);
+                case MODULE_USES -> moduleUses.add(observation);
+                case MODULE_PROVIDES -> moduleProvides.add(observation);
             }
         }
 
@@ -207,6 +215,10 @@ final class FactsSectionFactory {
         scheduling.sort(OBSERVATION_ORDER);
         asyncMethods.sort(OBSERVATION_ORDER);
         configWiring.sort(OBSERVATION_ORDER);
+        readmeMentions.sort(OBSERVATION_ORDER);
+        moduleExports.sort(OBSERVATION_ORDER);
+        moduleUses.sort(OBSERVATION_ORDER);
+        moduleProvides.sort(OBSERVATION_ORDER);
 
         return ObservationTable.builder()
                 .diInjectionSites(List.copyOf(diInjectionSites))
@@ -219,6 +231,10 @@ final class FactsSectionFactory {
                 .scheduling(List.copyOf(scheduling))
                 .asyncMethods(List.copyOf(asyncMethods))
                 .configWiring(List.copyOf(configWiring))
+                .readmeMentions(List.copyOf(readmeMentions))
+                .moduleExports(List.copyOf(moduleExports))
+                .moduleUses(List.copyOf(moduleUses))
+                .moduleProvides(List.copyOf(moduleProvides))
                 .build();
     }
 
@@ -234,6 +250,10 @@ final class FactsSectionFactory {
                 .scheduling(List.of())
                 .asyncMethods(List.of())
                 .configWiring(List.of())
+                .readmeMentions(List.of())
+                .moduleExports(List.of())
+                .moduleUses(List.of())
+                .moduleProvides(List.of())
                 .build();
     }
 
@@ -308,6 +328,10 @@ final class FactsSectionFactory {
         addAll(all, table.scheduling());
         addAll(all, table.asyncMethods());
         addAll(all, table.configWiring());
+        addAll(all, table.readmeMentions());
+        addAll(all, table.moduleExports());
+        addAll(all, table.moduleUses());
+        addAll(all, table.moduleProvides());
         return all;
     }
 

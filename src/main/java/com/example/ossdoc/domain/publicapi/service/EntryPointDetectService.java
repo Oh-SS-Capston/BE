@@ -182,7 +182,7 @@ public class EntryPointDetectService {
     /**
      * FACTS_JSON 아티팩트에서 README 언급 / 예제 코드 참조 신호를 추출한다.
      *
-     * observations 배열에서 kind 가 "readme_" 계열인 항목을 README 신호로 인식한다.
+     * observations.readme_mentions 버킷에서 target_symbol(simpleName)을 README 신호로 인식한다.
      * evidence 배열에서 파일 경로가 example/sample/demo 계열이면 예제 코드 신호로 인식한다.
      */
     private FactsSignals loadFactsSignals(String runId) {
@@ -196,22 +196,20 @@ public class EntryPointDetectService {
         Set<String> readmeMentioned   = new HashSet<>();
         Set<String> exampleReferenced = new HashSet<>();
 
-        JsonNode observations = meta.path("observations");
-        if (observations.isArray()) {
-            for (JsonNode obs : observations) {
-                String kind   = obs.path("kind").asText("").toLowerCase(Locale.ROOT);
-                String symbol = obs.path("symbol").asText("");
-                if (kind.startsWith("readme") || kind.contains("quickstart") || kind.contains("usage")) {
-                    String simpleName = extractSimpleName(symbol);
-                    if (!simpleName.isEmpty()) readmeMentioned.add(simpleName);
-                }
+        // observations.readme_mentions 버킷: target_symbol = simpleName 또는 FQCN
+        JsonNode readmeMentions = meta.path("observations").path("readme_mentions");
+        if (readmeMentions.isArray()) {
+            for (JsonNode obs : readmeMentions) {
+                String symbol = obs.path("target_symbol").asText("");
+                String simpleName = extractSimpleName(symbol);
+                if (!simpleName.isEmpty()) readmeMentioned.add(simpleName);
             }
         }
 
         JsonNode evidenceArray = meta.path("evidence");
         if (evidenceArray.isArray()) {
             for (JsonNode ev : evidenceArray) {
-                String filePath = ev.path("file").asText("")
+                String filePath = ev.path("path").asText("")
                         .replace('\\', '/').toLowerCase(Locale.ROOT);
                 if (filePath.contains("/example") || filePath.contains("/sample")
                         || filePath.contains("/demo")) {

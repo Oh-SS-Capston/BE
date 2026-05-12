@@ -49,6 +49,10 @@ public class ExtractionSink {
     private final Map<String, ObservationFact> scheduling = new LinkedHashMap<>();
     private final Map<String, ObservationFact> asyncMethods = new LinkedHashMap<>();
     private final Map<String, ObservationFact> configWiring = new LinkedHashMap<>();
+    private final Map<String, ObservationFact> readmeMentions = new LinkedHashMap<>();
+    private final Map<String, ObservationFact> moduleExports = new LinkedHashMap<>();
+    private final Map<String, ObservationFact> moduleUses = new LinkedHashMap<>();
+    private final Map<String, ObservationFact> moduleProvides = new LinkedHashMap<>();
 
     private final StatsAccumulator stats = new StatsAccumulator();
     private final WarningCollector warnings = new WarningCollector();
@@ -163,7 +167,11 @@ public class ExtractionSink {
                 || !httpEndpoints.isEmpty()
                 || !scheduling.isEmpty()
                 || !asyncMethods.isEmpty()
-                || !configWiring.isEmpty();
+                || !configWiring.isEmpty()
+                || !readmeMentions.isEmpty()
+                || !moduleExports.isEmpty()
+                || !moduleUses.isEmpty()
+                || !moduleProvides.isEmpty();
 
         ChunkStatus status;
         if (errorList.isEmpty()) {
@@ -212,6 +220,10 @@ public class ExtractionSink {
                         .scheduling(List.copyOf(scheduling.values()))
                         .asyncMethods(List.copyOf(asyncMethods.values()))
                         .configWiring(List.copyOf(configWiring.values()))
+                        .readmeMentions(List.copyOf(readmeMentions.values()))
+                        .moduleExports(List.copyOf(moduleExports.values()))
+                        .moduleUses(List.copyOf(moduleUses.values()))
+                        .moduleProvides(List.copyOf(moduleProvides.values()))
                         .build(),
                 stats.snapshot(),
                 warnings.snapshot(),
@@ -248,6 +260,10 @@ public class ExtractionSink {
         items.addAll(scheduling.values());
         items.addAll(asyncMethods.values());
         items.addAll(configWiring.values());
+        items.addAll(readmeMentions.values());
+        items.addAll(moduleExports.values());
+        items.addAll(moduleUses.values());
+        items.addAll(moduleProvides.values());
         return List.copyOf(items);
     }
 
@@ -280,6 +296,10 @@ public class ExtractionSink {
             case SCHEDULED_TASK -> scheduling;
             case ASYNC_METHOD -> asyncMethods;
             case CONFIG_WIRING -> configWiring;
+            case README_MENTION -> readmeMentions;
+            case MODULE_EXPORTS -> moduleExports;
+            case MODULE_USES -> moduleUses;
+            case MODULE_PROVIDES -> moduleProvides;
         };
     }
 

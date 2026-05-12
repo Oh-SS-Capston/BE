@@ -40,6 +40,18 @@ public record ObservationTable(
         List<ObservationFact> asyncMethods,
 
         @JsonProperty("config_wiring")
-        List<ObservationFact> configWiring
+        List<ObservationFact> configWiring,
+
+        @JsonProperty("readme_mentions")
+        List<ObservationFact> readmeMentions,
+
+        @JsonProperty("module_exports")
+        List<ObservationFact> moduleExports,
+
+        @JsonProperty("module_uses")
+        List<ObservationFact> moduleUses,
+
+        @JsonProperty("module_provides")
+        List<ObservationFact> moduleProvides
 ) {
 }

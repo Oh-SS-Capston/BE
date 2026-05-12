@@ -38,6 +38,11 @@ import com.github.javaparser.Range;
 import com.github.javaparser.ast.CompilationUnit;
 // com.github.javaparser.ast.Modifier is used via FQN to avoid clash with extraction Modifier enum
 import com.github.javaparser.ast.Node;
+import com.github.javaparser.ast.modules.ModuleDeclaration;
+import com.github.javaparser.ast.modules.ModuleDirective;
+import com.github.javaparser.ast.modules.ModuleExportsDirective;
+import com.github.javaparser.ast.modules.ModuleProvidesDirective;
+import com.github.javaparser.ast.modules.ModuleUsesDirective;
 import com.github.javaparser.ast.body.AnnotationDeclaration;
 import com.github.javaparser.ast.body.BodyDeclaration;
 import com.github.javaparser.ast.body.CallableDeclaration;
@@ -57,6 +62,7 @@ import com.example.ossdoc.domain.extraction.dto.model.TypeParam;
 import com.github.javaparser.ast.NodeList;
 import com.github.javaparser.ast.expr.AnnotationExpr;
 import com.github.javaparser.ast.expr.AssignExpr;
+import com.github.javaparser.ast.expr.ClassExpr;
 import com.github.javaparser.ast.expr.Expression;
 import com.github.javaparser.ast.expr.FieldAccessExpr;
 import com.github.javaparser.ast.expr.MethodCallExpr;
@@ -244,8 +250,59 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         String moduleSymbol = ensureModuleSymbol(context, sink);
         String packageSymbol = ensurePackageSymbol(context, packageName, relativePath, cu, moduleSymbol, sink, javaFile);
 
+        cu.getModule().ifPresent(moduleDecl ->
+                collectModuleDirectives(moduleDecl, relativePath, javaFile, sink));
+
         for (TypeDeclaration<?> typeDeclaration : cu.getTypes()) {
             collectTypeRecursive(context, javaFile, relativePath, packageSymbol, null, typeDeclaration, sink);
+        }
+    }
+
+    private void collectModuleDirectives(
+            ModuleDeclaration moduleDecl,
+            String relativePath,
+            Path javaFile,
+            ExtractionSink sink
+    ) {
+        String moduleName = moduleDecl.getNameAsString();
+        String moduleSymbol = SymbolIdFactory.module(moduleName);
+        EvidenceFact evidence = buildAstEvidence(relativePath, javaFile, moduleDecl, moduleSymbol, EvidenceType.AST);
+        sink.addEvidence(evidence);
+        List<String> evidenceIds = List.of(evidence.id());
+
+        for (ModuleDirective directive : moduleDecl.getDirectives()) {
+            if (directive instanceof ModuleExportsDirective e) {
+                sink.addObservation(ObservationFact.builder()
+                        .kind(ObservationKind.MODULE_EXPORTS)
+                        .siteSymbol(moduleSymbol)
+                        .targetSymbol(e.getNameAsString())
+                        .origin(FactOriginKind.AST)
+                        .confidenceHint(0.9)
+                        .evidenceIds(evidenceIds)
+                        .build());
+            } else if (directive instanceof ModuleUsesDirective u) {
+                sink.addObservation(ObservationFact.builder()
+                        .kind(ObservationKind.MODULE_USES)
+                        .siteSymbol(moduleSymbol)
+                        .targetSymbol(u.getNameAsString())
+                        .origin(FactOriginKind.AST)
+                        .confidenceHint(0.9)
+                        .evidenceIds(evidenceIds)
+                        .build());
+            } else if (directive instanceof ModuleProvidesDirective p) {
+                String serviceInterface = p.getNameAsString();
+                for (var impl : p.getWith()) {
+                    sink.addObservation(ObservationFact.builder()
+                            .kind(ObservationKind.MODULE_PROVIDES)
+                            .siteSymbol(moduleSymbol)
+                            .targetSymbol(serviceInterface)
+                            .origin(FactOriginKind.AST)
+                            .confidenceHint(0.9)
+                            .attrs(Map.of("implementation", impl.asString()))
+                            .evidenceIds(evidenceIds)
+                            .build());
+                }
+            }
         }
     }
 
@@ -441,6 +498,73 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
 
         addCallableBodyRelations(declaration, methodSymbol, evidence.id(), sink);
         addMethodObservationsIfNeeded(context, declaration, methodSymbol, evidence.id(), sink);
+
+        if (isExampleFile(relativePath)) {
+            collectExampleTypeRefs(relativePath, javaFile, declaration, sink);
+        }
+    }
+
+    private void collectExampleTypeRefs(
+            String relativePath,
+            Path javaFile,
+            MethodDeclaration declaration,
+            ExtractionSink sink
+    ) {
+        declaration.findAll(ObjectCreationExpr.class).forEach(expr -> {
+            try {
+                String fqcn = expr.getType().resolve().asReferenceType().getQualifiedName();
+                if (!isStandardLibrary(fqcn)) {
+                    Integer line = expr.getBegin().map(p -> p.line).orElse(null);
+                    String id = EvidenceIdGenerator.generate(EvidenceType.AST, relativePath, line, null, null, null, fqcn);
+                    sink.addEvidence(EvidenceFact.builder()
+                            .id(id)
+                            .type(EvidenceType.AST)
+                            .path(relativePath)
+                            .startLine(line)
+                            .symbol(fqcn)
+                            .build());
+                }
+            } catch (Exception ignored) {
+            }
+        });
+
+        declaration.findAll(MethodCallExpr.class).forEach(call -> {
+            call.getScope().ifPresent(scope -> {
+                try {
+                    ResolvedType resolved = scope.calculateResolvedType();
+                    if (resolved.isReferenceType()) {
+                        String fqcn = resolved.asReferenceType().getQualifiedName();
+                        if (!isStandardLibrary(fqcn)) {
+                            Integer line = call.getBegin().map(p -> p.line).orElse(null);
+                            String id = EvidenceIdGenerator.generate(EvidenceType.AST, relativePath, line, null, null, null, fqcn);
+                            sink.addEvidence(EvidenceFact.builder()
+                                    .id(id)
+                                    .type(EvidenceType.AST)
+                                    .path(relativePath)
+                                    .startLine(line)
+                                    .symbol(fqcn)
+                                    .build());
+                        }
+                    }
+                } catch (Exception ignored) {
+                }
+            });
+        });
+    }
+
+    private boolean isExampleFile(String relativePath) {
+        String lower = relativePath.replace('\\', '/').toLowerCase(java.util.Locale.ROOT);
+        return lower.contains("/example") || lower.contains("/sample") || lower.contains("/demo");
+    }
+
+    private static final Set<String> STDLIB_PREFIXES = Set.of(
+            "java.", "javax.", "jakarta.", "sun.", "com.sun.",
+            "org.junit.", "org.testng.", "org.mockito.", "org.assertj.",
+            "org.springframework.", "org.apache.", "org.slf4j.", "org.log4j."
+    );
+
+    private boolean isStandardLibrary(String fqcn) {
+        return STDLIB_PREFIXES.stream().anyMatch(fqcn::startsWith);
     }
 
     private void collectEnumConstant(
@@ -782,6 +906,22 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                                 "scope", call.getScope().map(Expression::toString).orElse("")
                         ))
                         .build());
+            }
+
+            if (isServiceLoaderLoad(call)) {
+                TypeRef serviceType = resolveServiceLoaderArg(call, sink);
+                ObservationFact.ObservationFactBuilder builder = ObservationFact.builder()
+                        .kind(ObservationKind.SPI_PROVIDER)
+                        .siteSymbol(methodSymbol)
+                        .evidenceIds(List.of(evidenceId))
+                        .origin(FactOriginKind.AST)
+                        .confidenceHint(ConfidenceHints.observation(List.of(EvidenceType.AST)));
+                if (serviceType != null && !Boolean.TRUE.equals(serviceType.unresolved())) {
+                    builder.targetSymbol(serviceType.raw());
+                } else if (serviceType != null) {
+                    builder.targetTypeRef(serviceType);
+                }
+                sink.addObservation(builder.build());
             }
         });
     }
@@ -1344,6 +1484,20 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                 || "invoke".equals(name)
                 || "getDeclaredField".equals(name)
                 || "getField".equals(name);
+    }
+
+    private boolean isServiceLoaderLoad(MethodCallExpr call) {
+        return "load".equals(call.getNameAsString())
+                && call.getScope().map(s -> "ServiceLoader".equals(s.toString())).orElse(false)
+                && !call.getArguments().isEmpty();
+    }
+
+    private TypeRef resolveServiceLoaderArg(MethodCallExpr call, ExtractionSink sink) {
+        Expression firstArg = call.getArgument(0);
+        if (firstArg instanceof ClassExpr classExpr) {
+            return toTypeRef(classExpr.getType(), sink);
+        }
+        return firstArgumentType(call, sink);
     }
 
     private TypeRef firstParameterType(MethodDeclaration declaration, ExtractionSink sink) {

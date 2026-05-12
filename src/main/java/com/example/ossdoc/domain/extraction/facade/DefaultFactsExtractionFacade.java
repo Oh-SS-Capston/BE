@@ -16,7 +16,9 @@ import com.example.ossdoc.domain.extraction.dto.model.RootMergeResult;
 import com.example.ossdoc.domain.extraction.dto.model.StatsMeta;
 import com.example.ossdoc.domain.extraction.dto.request.FactsExtractRequest;
 import com.example.ossdoc.domain.extraction.dto.response.FactsExtractResponse;
+import com.example.ossdoc.domain.extraction.dto.context.ExtractionSink;
 import com.example.ossdoc.domain.extraction.enums.BuildStatus;
+import com.example.ossdoc.domain.extraction.enums.ChunkKind;
 import com.example.ossdoc.domain.extraction.enums.ChunkStatus;
 import com.example.ossdoc.domain.extraction.enums.ExtractionMode;
 import com.example.ossdoc.domain.extraction.exception.ExtractionErrorCode;
@@ -24,6 +26,8 @@ import com.example.ossdoc.domain.extraction.exception.ExtractionException;
 import com.example.ossdoc.domain.extraction.service.composer.FactsComposer;
 import com.example.ossdoc.domain.extraction.dto.context.FactsCompositionContext;
 import com.example.ossdoc.domain.extraction.service.extractor.ChunkFactsExtractionCoordinator;
+import com.example.ossdoc.domain.extraction.service.extractor.MetaInfServiceScanner;
+import com.example.ossdoc.domain.extraction.service.extractor.ReadmeObservationScanner;
 import com.example.ossdoc.domain.build.support.RepoRootResolver;
 import com.example.ossdoc.domain.extraction.service.support.preflight.BuildManifestLoader;
 import com.example.ossdoc.domain.extraction.service.support.planning.ChunkPlanner;
@@ -73,6 +77,8 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
     private final ChunkPlanner chunkPlanner;
     private final ChunkFactsExtractionCoordinator chunkFactsExtractionCoordinator;
     private final ExtractionMergeSupport extractionMergeSupport;
+    private final MetaInfServiceScanner metaInfServiceScanner;
+    private final ReadmeObservationScanner readmeObservationScanner;
     private final FactsComposer factsComposer;
     private final FactsWriter factsWriter;
     private final RepoRunRepository repoRunRepository;
@@ -153,6 +159,41 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
         warnings.addAll(aggregate.warnings());
         log.info("[EXTRACTION] Phase 5 완료 — 병합 (evidence={}, warnings={})",
                 aggregate.evidence().size(), aggregate.warnings().size());
+
+        // META-INF/services SPI 스캔 (청크 병합 완료 후, composer 직전)
+        List<BuildModuleManifest> buildModules = facadeContext.buildManifest() != null
+                ? facadeContext.buildManifest().getModules()
+                : List.of();
+        ExtractionSink resourceSink = new ExtractionSink();
+        metaInfServiceScanner.scan(facadeContext.repoRoot(), buildModules, resourceSink);
+        ChunkDescriptor resourceChunk = ChunkDescriptor.builder()
+                .chunkId("meta-inf-services")
+                .kind(ChunkKind.AST)
+                .module("resource")
+                .rootPath("")
+                .files(List.of())
+                .totalBytes(0)
+                .fileCount(0)
+                .build();
+        aggregate = extractionMergeSupport.mergeChunkIntoAggregate(
+                aggregate, resourceSink.toChunkResult(resourceChunk));
+        log.info("[EXTRACTION] Phase 5-1 완료 — META-INF/services 스캔");
+
+        // README 스캔 (청크 병합 + META-INF 스캔 완료 후, public surface 확보된 시점)
+        ExtractionSink readmeSink = new ExtractionSink();
+        readmeObservationScanner.scan(facadeContext.repoRoot(), aggregate, readmeSink);
+        ChunkDescriptor readmeChunk = ChunkDescriptor.builder()
+                .chunkId("readme-scan")
+                .kind(ChunkKind.AST)
+                .module("resource")
+                .rootPath("")
+                .files(List.of())
+                .totalBytes(0)
+                .fileCount(0)
+                .build();
+        aggregate = extractionMergeSupport.mergeChunkIntoAggregate(
+                aggregate, readmeSink.toChunkResult(readmeChunk));
+        log.info("[EXTRACTION] Phase 5-2 완료 — README 스캔");
 
         OffsetDateTime finishedAt = extractionClock.now();
 

@@ -39,7 +39,11 @@ final class FactsStatsCalculator {
                 + size(observations.httpEndpoints())
                 + size(observations.scheduling())
                 + size(observations.asyncMethods())
-                + size(observations.configWiring());
+                + size(observations.configWiring())
+                + size(observations.readmeMentions())
+                + size(observations.moduleExports())
+                + size(observations.moduleUses())
+                + size(observations.moduleProvides());
 
         long unresolvedTotal = base.unresolvedTypeRefsTotal();
         long totalTypeRefs = base.totalTypeRefsTotal();

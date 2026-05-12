@@ -106,6 +106,29 @@ public class ExtractionMergeSupport {
                 .build();
     }
 
+    public ExtractionAggregate mergeChunkIntoAggregate(ExtractionAggregate base, ChunkResult extra) {
+        if (extra == null) return base;
+
+        Map<String, EvidenceFact> evidence = new LinkedHashMap<>(base.evidence());
+        Map<String, SymbolFact> symbols = flattenSymbols(base.symbols());
+        Map<String, RelationFact> relations = flattenRelations(base.relations());
+        Map<String, ObservationFact> observations = flattenObservations(base.observations());
+
+        mergeEvidence(evidence, extra.evidence());
+        mergeSymbols(symbols, extra.symbols(), null);
+        mergeRelations(relations, extra.relations(), null);
+        mergeObservations(observations, extra.observations(), null);
+
+        return ExtractionAggregate.builder()
+                .evidence(evidence)
+                .symbols(toSymbolTable(symbols.values()))
+                .relations(toRelationTable(relations.values()))
+                .observations(toObservationTable(observations.values()))
+                .stats(base.stats())
+                .warnings(base.warnings())
+                .build();
+    }
+
     public ExtractionAggregate aggregate(List<ModuleMergeResult> modules) {
         List<ModuleMergeResult> safeModules = modules == null ? List.of() : List.copyOf(modules);
         StatsAccumulator stats = new StatsAccumulator();
@@ -256,6 +279,10 @@ public class ExtractionMergeSupport {
                 .scheduling(filterObservations(all, ObservationKind.SCHEDULED_TASK))
                 .asyncMethods(filterObservations(all, ObservationKind.ASYNC_METHOD))
                 .configWiring(filterObservations(all, ObservationKind.CONFIG_WIRING))
+                .readmeMentions(filterObservations(all, ObservationKind.README_MENTION))
+                .moduleExports(filterObservations(all, ObservationKind.MODULE_EXPORTS))
+                .moduleUses(filterObservations(all, ObservationKind.MODULE_USES))
+                .moduleProvides(filterObservations(all, ObservationKind.MODULE_PROVIDES))
                 .build();
     }
 
@@ -278,5 +305,67 @@ public class ExtractionMergeSupport {
                 .filter(Objects::nonNull)
                 .filter(value -> value.kind() == kind)
                 .toList();
+    }
+
+    private Map<String, SymbolFact> flattenSymbols(SymbolTable table) {
+        Map<String, SymbolFact> map = new LinkedHashMap<>();
+        if (table == null) return map;
+        addToSymbolMap(map, table.types());
+        addToSymbolMap(map, table.constructors());
+        addToSymbolMap(map, table.methods());
+        addToSymbolMap(map, table.fields());
+        return map;
+    }
+
+    private void addToSymbolMap(Map<String, SymbolFact> map, List<SymbolFact> symbols) {
+        if (symbols == null) return;
+        for (SymbolFact s : symbols) {
+            if (s != null && s.symbol() != null && !s.symbol().isBlank()) {
+                map.put(s.symbol(), s);
+            }
+        }
+    }
+
+    private Map<String, RelationFact> flattenRelations(RelationTable table) {
+        Map<String, RelationFact> map = new LinkedHashMap<>();
+        if (table == null) return map;
+        addToRelationMap(map, table.calls());
+        addToRelationMap(map, table.overrides());
+        addToRelationMap(map, table.accessesField());
+        return map;
+    }
+
+    private void addToRelationMap(Map<String, RelationFact> map, List<RelationFact> relations) {
+        if (relations == null) return;
+        for (RelationFact r : relations) {
+            if (r != null) map.put(relationKey(r), r);
+        }
+    }
+
+    private Map<String, ObservationFact> flattenObservations(ObservationTable table) {
+        Map<String, ObservationFact> map = new LinkedHashMap<>();
+        if (table == null) return map;
+        addToObservationMap(map, table.diInjectionSites());
+        addToObservationMap(map, table.diProviders());
+        addToObservationMap(map, table.spiProviders());
+        addToObservationMap(map, table.eventPublications());
+        addToObservationMap(map, table.eventSubscriptions());
+        addToObservationMap(map, table.reflectionSites());
+        addToObservationMap(map, table.httpEndpoints());
+        addToObservationMap(map, table.scheduling());
+        addToObservationMap(map, table.asyncMethods());
+        addToObservationMap(map, table.configWiring());
+        addToObservationMap(map, table.readmeMentions());
+        addToObservationMap(map, table.moduleExports());
+        addToObservationMap(map, table.moduleUses());
+        addToObservationMap(map, table.moduleProvides());
+        return map;
+    }
+
+    private void addToObservationMap(Map<String, ObservationFact> map, List<ObservationFact> observations) {
+        if (observations == null) return;
+        for (ObservationFact o : observations) {
+            if (o != null) map.put(observationKey(o), o);
+        }
     }
 }

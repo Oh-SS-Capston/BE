@@ -15,7 +15,11 @@ public enum ObservationKind {
     HTTP_ENDPOINT("http_endpoint"),
     SCHEDULED_TASK("scheduled_task"),
     ASYNC_METHOD("async_method"),
-    CONFIG_WIRING("config_wiring");
+    CONFIG_WIRING("config_wiring"),
+    README_MENTION("readme_mention"),
+    MODULE_EXPORTS("module_exports"),
+    MODULE_USES("module_uses"),
+    MODULE_PROVIDES("module_provides");
 
     private final String code;
 
