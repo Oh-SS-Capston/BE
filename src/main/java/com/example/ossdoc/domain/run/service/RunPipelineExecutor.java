@@ -11,11 +11,15 @@ import com.example.ossdoc.domain.extraction.dto.request.FactsExtractRequest;
 import com.example.ossdoc.domain.extraction.facade.FactsExtractionFacade;
 import com.example.ossdoc.domain.graphstore.dto.request.GraphStoreIngestRequest;
 import com.example.ossdoc.domain.graphstore.service.GraphStoreIngestService;
+import com.example.ossdoc.domain.rule.dto.request.RuleCandidateMineRequest;
+import com.example.ossdoc.domain.rule.service.RuleCandidateMiningService;
 import com.example.ossdoc.domain.run.entity.RunPipelineJob;
 import com.example.ossdoc.domain.run.enums.RunStage;
 import com.example.ossdoc.domain.run.exception.RunException;
 import com.example.ossdoc.domain.run.exception.code.RunErrorCode;
 import com.example.ossdoc.domain.run.repository.RunPipelineJobRepository;
+import com.example.ossdoc.global.llm.dto.request.LlmRequest;
+import com.example.ossdoc.global.llm.service.LlmService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -30,7 +34,7 @@ import java.util.List;
  * SNAPSHOT → BUILD → EXTRACTION → GRAPHSTORE
  *
  * 선택 단계:
- * CLUSTER → CLASSMAP
+ * CLUSTER → CLASSMAP → RULE → LLM
  *
  * 필수 단계 실패: FAILED
  * 선택 단계 실패: PARTIAL_SUCCESS
@@ -51,6 +55,9 @@ public class RunPipelineExecutor {
     private final ClusterParameterRecommendService clusterParameterRecommendService;
     private final ClusterBuildService clusterBuildService;
     private final ClassMapBuildService classMapBuildService;
+
+    private final RuleCandidateMiningService ruleCandidateMiningService;
+    private final LlmService llmService;
 
     public void execute(Long jobId) {
         RunPipelineJob job = jobRepository.findById(jobId)
@@ -110,10 +117,8 @@ public class RunPipelineExecutor {
             );
 
             /*
-             * GRAPHSTORE 완료 후, 실제 그래프 규모를 기준으로
-             * 군집화와 클래스맵 추천 파라미터를 한 번 계산합니다.
-             *
-             * 이후 CLUSTER와 CLASSMAP은 같은 추천 기준을 공유합니다.
+             * GRAPHSTORE 완료 후 실제 그래프 규모를 기준으로
+             * CLUSTER / CLASSMAP 추천 파라미터를 계산합니다.
              */
             PipelineAnalysisParameters parameters =
                     resolveRecommendedParameters(runId);
@@ -152,6 +157,55 @@ public class RunPipelineExecutor {
                     )
             );
 
+            /*
+             * LLM 자동 입력 조립에는 rule_candidates.json이 필요하므로,
+             * LLM 전에 RULE 단계를 먼저 실행합니다.
+             */
+            boolean ruleSucceeded = executeOptional(
+                    jobId,
+                    RunStage.RULE,
+                    "규칙 후보를 추출 중입니다.",
+                    "규칙 후보 생성에 실패했습니다.",
+                    optionalFailures,
+                    () -> ruleCandidateMiningService.mine(
+                            new RuleCandidateMineRequest(
+                                    runId,
+                                    null,
+                                    null
+                            ),
+                            userId
+                    )
+            );
+
+            /*
+             * RULE이 실패하면 LLM 입력 전제가 깨지므로,
+             * LLM을 억지로 실행하지 않고 SKIPPED로 남깁니다.
+             */
+            if (ruleSucceeded) {
+                executeOptional(
+                        jobId,
+                        RunStage.LLM,
+                        "LLM 분석 결과를 생성 중입니다.",
+                        "LLM 결과 생성에 실패했습니다.",
+                        optionalFailures,
+                        () -> llmService.refine(
+                                new LlmRequest(
+                                        runId,
+                                        null,
+                                        null,
+                                        true,
+                                        true
+                                )
+                        )
+                );
+            } else {
+                stepService.skipStep(
+                        jobId,
+                        RunStage.LLM,
+                        "규칙 후보 생성 실패로 LLM 결과 생성을 건너뛰었습니다."
+                );
+            }
+
             if (optionalFailures.isEmpty()) {
                 stepService.markRunSuccess(jobId);
             } else {
@@ -173,8 +227,8 @@ public class RunPipelineExecutor {
 
     /**
      * 추천 서비스가 정상 동작하면 추천값을 사용하고,
-     * 만약 추천 계산 자체가 실패하더라도 파이프라인 전체가 멈추지 않도록
-     * 기존 자동 파이프라인 기본값으로 안전하게 fallback 합니다.
+     * 추천 계산 자체가 실패해도 파이프라인이 멈추지 않도록
+     * 기존 기본값으로 fallback 합니다.
      */
     private PipelineAnalysisParameters resolveRecommendedParameters(String runId) {
         try {
@@ -224,11 +278,6 @@ public class RunPipelineExecutor {
                     e
             );
 
-            /*
-             * fallback:
-             * 추천 서비스 장애가 cluster/classMap 전체 실패로 번지지 않게
-             * 기존 자동 파이프라인 값을 사용합니다.
-             */
             return PipelineAnalysisParameters.fallbackDefaults();
         }
     }
@@ -273,7 +322,7 @@ public class RunPipelineExecutor {
         }
     }
 
-    private void executeOptional(
+    private boolean executeOptional(
             Long jobId,
             RunStage stage,
             String message,
@@ -288,11 +337,13 @@ public class RunPipelineExecutor {
         try {
             runnable.run();
             stepService.succeedStep(jobId, stage, stage.getDefaultMessage());
+            return true;
         } catch (Exception e) {
             log.warn("[PIPELINE] Optional step failed. stage={}, jobId={}", stage, jobId, e);
 
             stepService.failStep(jobId, stage, failureMessage);
             optionalFailures.add(failureMessage);
+            return false;
         }
     }
 
