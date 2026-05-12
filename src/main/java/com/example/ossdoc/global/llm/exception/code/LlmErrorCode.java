@@ -24,7 +24,16 @@ public enum LlmErrorCode implements BaseCode {
     RESPONSE_PARSE_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "LLM_500_002", "LLM response is not valid JSON."),
 
     // Artifact 저장 실패
-    ARTIFACT_SAVE_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "LLM_500_003", "Failed to save LLM artifact.");
+    ARTIFACT_SAVE_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "LLM_500_003", "Failed to save LLM artifact."),
+
+    // 자동 컨텍스트 조립 실패
+    CONTEXT_ASSEMBLE_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "LLM_500_004", "Failed to assemble LLM context."),
+
+    // 필수 산출물 누락
+    REQUIRED_ARTIFACT_NOT_FOUND(HttpStatus.NOT_FOUND, "LLM_404_002", "Required analysis artifact not found."),
+
+    // 시나리오 캐시 저장 실패
+    SCENARIO_CACHE_SAVE_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "LLM_500_005", "Failed to save scenario cache.");
 
     private final HttpStatus httpStatus;
     private final String code;

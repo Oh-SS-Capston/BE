@@ -37,7 +37,7 @@ public enum RunStage {
     ),
 
     CLUSTER(
-            80,
+            78,
             false,
             "주요 모듈과 군집을 분석 중입니다."
     ),
@@ -49,9 +49,21 @@ public enum RunStage {
     ),
 
     CLASSMAP(
-            95,
+            86,
             false,
             "클래스 다이어그램을 생성 중입니다."
+    ),
+
+    RULE(
+            92,
+            false,
+            "규칙 후보를 추출 중입니다."
+    ),
+
+    LLM(
+            97,
+            false,
+            "LLM 분석 결과를 생성 중입니다."
     ),
 
     DONE(

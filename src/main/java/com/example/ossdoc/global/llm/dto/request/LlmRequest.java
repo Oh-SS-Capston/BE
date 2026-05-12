@@ -18,13 +18,35 @@ public class LlmRequest {
 
     /**
      * 구조 엔진 분석 출력물 JSON.
-     * Jackson 3.x(Spring Boot 4.x)에서 JsonNode 직접 역직렬화 불가 → Map 사용
+     * - null이면 서버가 runId 기준으로 자동 조립한다.
+     * - 값이 있으면 외부에서 조합한 컨텍스트를 그대로 사용할 수 있다.
      */
-    @NotNull
     private Map<String, Object> structureEngineOutput;
 
-    @NotNull
+    /**
+     * LLM 근거 스니펫 묶음.
+     * - null/빈 배열이면 서버가 rule/class-map 기반 근거를 자동 구성한다.
+     */
     private List<EvidenceSnippet> evidenceBundle;
+
+    /**
+     * true(기본): 서버가 runId 기준 자동 컨텍스트를 우선 생성한다.
+     * false: 요청 바디에 전달된 structure/evidence를 그대로 사용한다.
+     */
+    private Boolean autoAssemble;
+
+    /**
+     * true(기본): LLM 자연어 응답을 한국어로 생성한다.
+     */
+    private Boolean preferKorean;
+
+    public boolean useAutoAssemble() {
+        return autoAssemble == null || autoAssemble;
+    }
+
+    public boolean useKorean() {
+        return preferKorean == null || preferKorean;
+    }
 
     @Getter
     @NoArgsConstructor
