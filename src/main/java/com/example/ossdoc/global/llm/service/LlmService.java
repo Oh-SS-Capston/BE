@@ -15,6 +15,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -23,18 +24,22 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientResponseException;
 
-import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
- * ?뚯씠?꾨씪???곗텧臾쇱쓣 湲곕컲?쇰줈 LLM ?뺤젣 寃곌낵瑜??앹꽦?쒕떎.
+ * LLM 파이프라인 서비스.
+ * - 출력 계약(8개)을 기준으로 결과를 구성한다.
+ * - 실패가 잦은 구간은 결정론 fallback으로 안정화한다.
  */
 @Slf4j
 @Service
@@ -42,69 +47,98 @@ import java.util.Set;
 public class LlmService {
 
     private static final String ARTIFACT_SCHEMA_VERSION = "1.0";
-    private static final String SCENARIO_PROMPT_VERSION = "scenario-spec-v2";
-    private static final int MAX_CLAUDE_RETRY_ATTEMPTS = 3;
-    private static final long BASE_RETRY_DELAY_MILLIS = 1500L;
-    private static final long MAX_RETRY_DELAY_MILLIS = 15000L;
-
-    private static final int MAX_REFINED_RULES_FOR_CONTEXT = 80;
-    private static final int MAX_SCENARIOS_FOR_CONTEXT = 30;
-    private static final int MAX_STEPS_PER_SCENARIO_FOR_CONTEXT = 6;
-    private static final int MAX_SUBSYSTEMS_FOR_CONTEXT = 18;
-    private static final int MAX_API_ENTRIES_FOR_CONTEXT = 50;
-    private static final int REFINED_RULE_CHUNK_SIZE = 12;
-    private static final int MAX_REFINED_RULES_PER_CHUNK = 6;
-    private static final int MAX_MERGED_REFINED_RULES = 40;
-    private static final int MAX_MERGED_GROUPS_PER_RULE = 6;
-    private static final int MAX_MERGED_EVIDENCE_IDS_PER_RULE = 10;
-
-    // Step5??public API 臾몄꽌??紐⑹쟻?대?濡??낅젰/異쒕젰 ?덉궛??蹂꾨룄濡?媛뺥븯寃??쒗븳?쒕떎.
-    private static final int MAX_FILE_TREE_RULES_FOR_CONTEXT = 16;
-    private static final int MAX_FILE_TREE_SCENARIOS_FOR_CONTEXT = 10;
-    private static final int MAX_FILE_TREE_STEPS_PER_SCENARIO = 3;
-    private static final int MAX_FILE_TREE_API_ENTRIES_FOR_CONTEXT = 24;
-    private static final int MAX_FILE_TREE_RELATED_SCENARIOS_PER_API = 2;
-
-    // ?④퀎蹂?異쒕젰 ?좏겙 ?덉궛
-    private static final int MAX_TOKENS_REFINED_RULES_CHUNK = 2800;
-    private static final int MAX_TOKENS_SCENARIO_SPECS = 2400;
-    private static final int MAX_TOKENS_SUBSYSTEM_SUMMARIES = 2000;
-    private static final int MAX_TOKENS_API_DOCS = 2400;
-    private static final int MAX_TOKENS_FILE_TREE_DOCS = 3600;
-
-    // Step2 ?덉젙?붾? ?꾪븳 ?쒕굹由ъ삤 異쒕젰 ?쒗븳
-    private static final int MAX_SCENARIOS_OUTPUT = 8;
-    private static final int MAX_STEPS_PER_SCENARIO_OUTPUT = 4;
-    private static final int MAX_EVIDENCE_LINKS_PER_STEP_OUTPUT = 2;
-    private static final int MAX_SCENARIO_TITLE_LENGTH = 80;
-    private static final int MAX_SCENARIO_SUBSYSTEM_LENGTH = 60;
-    private static final int MAX_SCENARIO_STEP_DESCRIPTION_LENGTH = 140;
-    private static final int MAX_SCENARIO_RETRY_CONTEXT_CHARS = 12000;
-    private static final int MAX_SUBSYSTEMS_OUTPUT = 12;
-    private static final int MAX_TOP_SYMBOLS_PER_SUBSYSTEM_OUTPUT = 8;
-    private static final int MAX_RULE_IDS_PER_SUBSYSTEM_OUTPUT = 10;
-    private static final int MAX_SUBSYSTEM_LABEL_LENGTH = 60;
-    private static final int MAX_SUBSYSTEM_DESCRIPTION_LENGTH = 140;
-    private static final int MAX_SUBSYSTEM_RETRY_CONTEXT_CHARS = 14000;
-    private static final int MAX_API_ENTRIES_OUTPUT = 12;
-    private static final int MAX_API_RELATED_SCENARIOS_PER_ENTRY_OUTPUT = 2;
-    private static final int MAX_API_TEXT_LENGTH = 120;
-    private static final int MAX_API_RETRY_CONTEXT_CHARS = 10000;
-    private static final int MAX_API_MINI_RETRY_CONTEXT_CHARS = 7000;
-    private static final int MAX_FILE_TREE_DIRS_OUTPUT = 14;
-    private static final int MAX_FILES_PER_DIR_OUTPUT = 10;
-    private static final int MAX_CLASSES_PER_FILE_OUTPUT = 6;
-    private static final int MAX_METHODS_PER_CLASS_OUTPUT = 8;
-    private static final int MAX_FILE_TREE_SUMMARY_LENGTH = 160;
-    private static final int MAX_FILE_TREE_RETRY_CONTEXT_CHARS = 18000;
-    private static final int MAX_REFINED_RULE_RETRY_CONTEXT_CHARS = 28000;
-    private static final int MAX_REFINED_RULES_PER_CHUNK_COMPACT = 4;
+    private static final String SCENARIO_PROMPT_VERSION = "scenario-spec-v4";
 
     private static final String STEP1_REFINED_RULES = "Step 1/5 - refined_rules";
     private static final String STEP2_SCENARIO_SPECS = "Step 2/5 - scenario_specs";
     private static final String STEP3_SUBSYSTEM_SUMMARIES = "Step 3/5 - subsystem_summaries";
     private static final String STEP4_API_DOCS = "Step 4/5 - api_docs";
     private static final String STEP5_FILE_TREE_DOCS = "Step 5/5 - file_tree_docs";
+
+    private static final String PATH_REFINED_RULES = "llm/refined_rules.json";
+    private static final String PATH_SCENARIO_SPECS = "llm/scenario_specs.json";
+    private static final String PATH_SUBSYSTEM_SUMMARIES = "llm/subsystem_summaries.json";
+    private static final String PATH_API_DOCS = "llm/api_docs.json";
+    private static final String PATH_FILE_TREE_DOCS = "llm/file_tree_docs.json";
+
+    private static final int MAX_CLAUDE_RETRY_ATTEMPTS = 2;
+    private static final long BASE_RETRY_DELAY_MILLIS = 1500L;
+    private static final long MAX_RETRY_DELAY_MILLIS = 12000L;
+
+    private static final int MAX_CAUTIONS = 12;
+    private static final int MAX_SCENARIOS = 4;
+    private static final int MAX_STEPS_PER_SCENARIO = 4;
+    private static final int MAX_CORE_CLASSES = 10;
+    private static final int MAX_CORE_METHODS = 18;
+    private static final int MAX_METHOD_FLOW = 8;
+    private static final int MAX_EVIDENCE_LINKS = 3;
+    private static final int MAX_API_ENTRY_OUTPUT = 14;
+
+    private static final int TOKENS_CAUTIONS = 1400;
+    private static final int TOKENS_SCENARIOS = 1800;
+    private static final int CONTEXT_LIMIT_CAUTIONS_COMPACT = 9000;
+    private static final int CONTEXT_LIMIT_SCENARIOS_COMPACT = 11000;
+
+    private static final String KOREAN_POLICY = """
+            - 자연어 출력은 반드시 한국어로 작성한다.
+            - JSON만 출력하고 마크다운/코드블록은 금지한다.
+            - 근거가 없으면 '추정'으로 표기하거나 해당 문장을 제거한다.
+            - 규칙 ID 자체를 설명 중심으로 그대로 노출하지 말고 사용자 주의사항으로 변환한다.
+            """;
+
+    private static final String PROMPT_CAUTIONS = """
+            역할: 구조 시드를 바탕으로 "사용자 주의사항/예외"를 작성한다.
+            목표: 코드 내부 규칙명을 그대로 복제하지 말고, 실제 사용자가 실수하기 쉬운 포인트를 안내한다.
+            제약:
+            1) cautions는 최대 %d개
+            2) 각 항목은 title(짧게), message(1~2문장), when(언제 주의할지) 포함
+            3) relatedClass/relatedMethod/evidenceIds를 가능한 범위에서 채운다.
+            출력 스키마(JSON):
+            {"cautions":[{"cautionId":"CAU-001","title":"string","message":"string","when":"string",
+            "relatedClass":"pkg.Type","relatedMethod":"pkg.Type.method","evidenceIds":[1],"confidence":0.0}]}
+            """;
+
+    private static final String PROMPT_CAUTIONS_COMPACT = """
+            역할: 주의사항/예외를 짧게 요약한다.
+            제약:
+            1) cautions 최대 %d개
+            2) message는 100자 이내
+            3) 중복 항목 제거
+            출력 스키마(JSON):
+            {"cautions":[{"cautionId":"CAU-001","title":"string","message":"string","when":"string",
+            "relatedClass":"pkg.Type","relatedMethod":"pkg.Type.method","evidenceIds":[1],"confidence":0.0}]}
+            """;
+
+    private static final String PROMPT_SCENARIOS = """
+            역할: 오픈소스 첫 사용자를 위한 "시작 가이드 시나리오"를 작성한다.
+            반드시 아래 출력 계약을 따른다.
+            1) overview: 문제/목적/적합한 사용 상황/핵심 기능/시작 가이드
+            2) scenarios: 단계별 흐름(각 단계는 classFqn, methodFqn, evidenceLinks 연결)
+            3) methodFlow: 실제 호출 순서(order, title, methodFqn)
+            제약:
+            - scenarios 최대 %d개
+            - scenario 당 steps 최대 %d개
+            출력 스키마(JSON):
+            {"overview":{"project":"string","purpose":"string","fitSituation":"string","coreFeatures":"string","startGuide":"string"},
+            "scenarios":[{"scenarioId":"SCN-001","title":"string","intent":"string",
+            "steps":[{"stepNo":1,"description":"string","classFqn":"pkg.Type","methodFqn":"pkg.Type.method",
+            "evidenceLinks":[{"evidenceId":1,"filePath":"path","lines":"10-20"}]}]}],
+            "methodFlow":[{"order":1,"title":"string","description":"string","methodFqn":"pkg.Type.method"}]}
+            """;
+
+    private static final String PROMPT_SCENARIOS_COMPACT = """
+            역할: 시작 시나리오를 compact 모드로 작성한다.
+            제약:
+            - scenarios 최대 %d개
+            - 각 step 설명은 1문장
+            - 근거 링크가 없는 문장은 최소화
+            출력 스키마(JSON):
+            {"overview":{"project":"string","purpose":"string","fitSituation":"string","coreFeatures":"string","startGuide":"string"},
+            "scenarios":[{"scenarioId":"SCN-001","title":"string","intent":"string",
+            "steps":[{"stepNo":1,"description":"string","classFqn":"pkg.Type","methodFqn":"pkg.Type.method",
+            "evidenceLinks":[{"evidenceId":1,"filePath":"path","lines":"10-20"}]}]}],
+            "methodFlow":[{"order":1,"title":"string","description":"string","methodFqn":"pkg.Type.method"}]}
+            """;
 
     private final RestClient claudeRestClient;
     private final LlmConfig llmConfig;
@@ -114,174 +148,8 @@ public class LlmService {
     private final LlmInputAssemblerService llmInputAssemblerService;
     private final LlmScenarioCacheService llmScenarioCacheService;
 
-    private static final String PATH_REFINED_RULES = "llm/refined_rules.json";
-    private static final String PATH_SCENARIO_SPECS = "llm/scenario_specs.json";
-    private static final String PATH_SUBSYSTEM_SUMMARIES = "llm/subsystem_summaries.json";
-    private static final String PATH_API_DOCS = "llm/api_docs.json";
-    private static final String PATH_FILE_TREE_DOCS = "llm/file_tree_docs.json";
-
-    private static final String PROMPT_REFINED_RULES_CHUNK = """
-            역할: rule candidate를 정식 규칙으로 병합한다.
-            강제 제약:
-            1) 규칙은 최대 %d개만 출력한다.
-            2) description은 1~2문장으로 짧게 작성한다.
-            3) mergedFromGroups는 최대 3개만 포함한다.
-            4) evidenceIds는 최대 5개만 포함한다.
-            5) 중복/저효용 규칙은 제거한다.
-            출력 JSON 스키마:
-            {"rules":[{"ruleId":"string","name":"string","classification":"defensive|domain",
-            "description":"string","mergedFromGroups":["groupId"],"evidenceIds":[1],"confidence":0.0}]}
-            """;
-
-    private static final String PROMPT_REFINED_RULES_CHUNK_COMPACT = """
-            역할: rule candidate를 토큰 절약 모드로 압축 병합한다.
-            강제 제약:
-            1) 규칙은 최대 %d개만 출력한다.
-            2) description은 1문장, 80자 이내로 작성한다.
-            3) mergedFromGroups는 최대 2개, evidenceIds는 최대 3개만 출력한다.
-            4) 스키마 외 필드는 출력하지 않는다.
-            5) 마크다운/코드블록 없이 JSON만 출력한다.
-            출력 JSON 스키마:
-            {"rules":[{"ruleId":"string","name":"string","classification":"defensive|domain",
-            "description":"string","mergedFromGroups":["groupId"],"evidenceIds":[1],"confidence":0.0}]}
-            """;
-
-    private static final String PROMPT_SCENARIO_SPECS = """
-            역할: 구조 분석 결과를 시나리오 명세(JSON)로 변환한다.
-            강제 제약:
-            1) 최상위 키는 scenarios 하나만 사용한다.
-            2) schemaVersion/runId/repository/overview 같은 보조 키는 출력하지 않는다.
-            3) scenarios는 최대 6개만 출력한다.
-            4) 각 scenario의 steps는 최대 4개만 출력한다.
-            5) 각 step의 evidenceLinks는 최대 2개만 출력한다.
-            6) description은 한 문장, 120자 이내로 작성한다.
-            7) 마크다운/코드블록 없이 JSON만 출력한다.
-            출력 JSON 스키마:
-            {"scenarios":[{"scenarioId":"SCN-001","title":"string","subsystem":"string",
-            "steps":[{"stepNo":1,"description":"string",
-            "evidenceLinks":[{"evidenceId":1,"filePath":"string","lines":"10-15"}]}]}]}
-            """;
-
-    private static final String PROMPT_SCENARIO_SPECS_COMPACT = """
-            역할: 시나리오 명세를 토큰 절약 모드로 압축 생성한다.
-            강제 제약:
-            1) 최상위 키는 scenarios 하나만 사용한다.
-            2) scenarios는 최대 4개만 출력한다.
-            3) 각 scenario의 steps는 최대 3개만 출력한다.
-            4) 각 step의 evidenceLinks는 최대 1개만 출력한다.
-            5) description은 90자 이내로 간결하게 작성한다.
-            6) 스키마 외 필드는 출력하지 않는다.
-            7) 마크다운/코드블록 없이 JSON만 출력한다.
-            출력 JSON 스키마:
-            {"scenarios":[{"scenarioId":"SCN-001","title":"string","subsystem":"string",
-            "steps":[{"stepNo":1,"description":"string",
-            "evidenceLinks":[{"evidenceId":1,"filePath":"string","lines":"10-15"}]}]}]}
-            """;
-
-    private static final String PROMPT_SUBSYSTEM_SUMMARIES = """
-            역할: subsystem 경계와 책임을 요약한다.
-            강제 제약:
-            1) 최상위 키는 subsystems 하나만 사용한다.
-            2) subsystems는 최대 10개만 출력한다.
-            3) topSymbols는 유효한 FQN만 사용한다.
-            4) layer는 infrastructure/domain/application 중 하나로 지정한다.
-            5) rules/scenarios/apiEntries/directories는 출력하지 않는다.
-            출력 JSON 스키마:
-            {"subsystems":[{"subsystemId":"string","label":"string","description":"string",
-            "layer":"infrastructure|domain|application","topSymbols":["fqn1"],"ruleIds":["ruleId1"]}]}
-            """;
-
-    private static final String PROMPT_SUBSYSTEM_SUMMARIES_COMPACT = """
-            역할: subsystem 요약을 토큰 절약 모드로 압축 생성한다.
-            강제 제약:
-            1) 최상위 키는 subsystems 하나만 사용한다.
-            2) subsystems는 최대 8개만 출력한다.
-            3) label/description은 짧은 문장으로 작성한다.
-            4) 각 subsystem의 topSymbols는 최대 6개, ruleIds는 최대 8개만 출력한다.
-            5) rules/scenarios/apiEntries/directories는 출력하지 않는다.
-            6) 마크다운/코드블록 없이 JSON만 출력한다.
-            출력 JSON 스키마:
-            {"subsystems":[{"subsystemId":"string","label":"string","description":"string",
-            "layer":"infrastructure|domain|application","topSymbols":["fqn1"],"ruleIds":["ruleId1"]}]}
-            """;
-
-    private static final String PROMPT_API_DOCS = """
-            역할: 공개 API 인덱스를 생성한다.
-            강제 제약:
-            1) 최상위 키는 apiEntries 하나만 사용한다.
-            2) apiEntries는 최대 10개만 출력한다.
-            3) summary는 한 문장으로 작성한다.
-            4) relatedScenarios는 최대 2개만 출력한다.
-            5) parameters/returns/throws/rules/scenarios/subsystems/directories는 출력하지 않는다.
-            출력 JSON 스키마:
-            {"apiEntries":[{"fqn":"string","summary":"string",
-            "relatedScenarios":["scenarioId1"],"subsystem":"string"}]}
-            """;
-
-    private static final String PROMPT_API_DOCS_COMPACT = """
-            역할: 공개 API 인덱스를 토큰 절약 모드로 압축 생성한다.
-            강제 제약:
-            1) 최상위 키는 apiEntries 하나만 사용한다.
-            2) apiEntries는 최대 8개만 출력한다.
-            3) summary는 80자 이내로 작성한다.
-            4) relatedScenarios는 최대 2개만 출력한다.
-            5) parameters/returns/throws/rules/scenarios/subsystems/directories는 출력하지 않는다.
-            6) 마크다운/코드블록 없이 JSON만 출력한다.
-            출력 JSON 스키마:
-            {"apiEntries":[{"fqn":"string","summary":"string",
-            "relatedScenarios":["scenarioId1"],"subsystem":"string"}]}
-            """;
-
-    private static final String PROMPT_API_DOCS_MINI = """
-            역할: 공개 API 인덱스를 최소 출력으로 생성한다.
-            강제 제약:
-            1) 최상위 키는 apiEntries 하나만 사용한다.
-            2) apiEntries는 최대 6개만 출력한다.
-            3) 각 entry는 fqn, summary, subsystem, relatedScenarios만 포함한다.
-            4) summary는 60자 이내로 작성한다.
-            5) relatedScenarios는 최대 1개만 포함한다.
-            6) parameters/returns/throws/rules/scenarios/subsystems/directories는 출력하지 않는다.
-            7) 마크다운/코드블록 없이 JSON만 출력한다.
-            출력 JSON 스키마:
-            {"apiEntries":[{"fqn":"string","summary":"string",
-            "relatedScenarios":["scenarioId1"],"subsystem":"string"}]}
-            """;
-
-    private static final String PROMPT_FILE_TREE_DOCS = """
-            역할: public API 전달 중심의 파일 트리 문서를 생성한다.
-            강제 제약:
-            1) 입력에 포함된 public 클래스/메서드만 문서화한다.
-            2) private/protected/package 멤버는 생성하지 않는다.
-            3) 테스트 또는 내부 구현 추정은 금지한다.
-            4) 요약은 1~2문장으로 짧게 작성한다.
-            5) 불확실하면 estimated=true로 표시한다.
-            6) 최상위 키는 directories 하나만 사용한다.
-            7) rules/scenarios/subsystems/apiEntries는 출력하지 않는다.
-            출력 JSON 스키마:
-            {"directories":[{"path":"src/main/java/...","files":[{"path":"...","classes":[
-            {"symbolId":"...","name":"...","summary":"string","estimated":false,
-            "methods":[{"symbolId":"...","name":"...","summary":"string","estimated":false,
-            "relatedRules":["RULE-001"],"relatedScenarios":["SCN-001"]}]}]}]}]}
-            """;
-
-    private static final String PROMPT_FILE_TREE_DOCS_COMPACT = """
-            역할: 파일 트리 문서를 토큰 절약 모드로 압축 생성한다.
-            강제 제약:
-            1) 최상위 키는 directories 하나만 사용한다.
-            2) directories 최대 12개, 파일 최대 8개, 클래스 최대 5개만 출력한다.
-            3) 각 클래스의 method는 최대 6개만 출력한다.
-            4) summary는 짧게 작성하고 장문 설명은 금지한다.
-            5) rules/scenarios/subsystems/apiEntries는 출력하지 않는다.
-            6) 마크다운/코드블록 없이 JSON만 출력한다.
-            출력 JSON 스키마:
-            {"directories":[{"path":"src/main/java/...","files":[{"path":"...","classes":[
-            {"symbolId":"...","name":"...","summary":"string","estimated":false,
-            "methods":[{"symbolId":"...","name":"...","summary":"string","estimated":false,
-            "relatedRules":["RULE-001"],"relatedScenarios":["SCN-001"]}]}]}]}]}
-            """;
-
     /**
-     * LLM ?뺤젣 ?뚯씠?꾨씪?몄쓣 ?ㅽ뻾?섍퀬 ?꾪떚?⑺듃? DB 罹먯떆瑜???ν븳??
+     * LLM 정제 실행.
      */
     @Transactional
     public LlmResponse refine(LlmRequest request) {
@@ -290,109 +158,46 @@ public class LlmService {
         RepoRun run = repoRunRepository.findById(request.getRunId())
                 .orElseThrow(() -> new LlmException(LlmErrorCode.RUN_NOT_FOUND));
 
-        LlmInputAssemblerService.LlmContextBundle contextBundle = llmInputAssemblerService.assemble(request);
-        JsonNode structureNode = objectMapper.valueToTree(contextBundle.structureEngineOutput());
-
-        // Step 1~4와 Step 5의 입력 구조를 분리해 토큰 중복을 줄인다.
-        JsonNode generalStructure = buildGeneralStructureContext(structureNode);
-        JsonNode fileTreeStructure = buildFileTreeOnlyContext(structureNode);
-        PublicSurfaceIndex publicSurfaceIndex = buildPublicSurfaceIndex(fileTreeStructure);
-
-        List<LlmRequest.EvidenceSnippet> evidenceBundle = contextBundle.evidenceBundle() == null
+        LlmInputAssemblerService.LlmContextBundle bundle = llmInputAssemblerService.assemble(request);
+        JsonNode structure = objectMapper.valueToTree(bundle.structureEngineOutput());
+        List<LlmRequest.EvidenceSnippet> evidence = bundle.evidenceBundle() == null
                 ? List.of()
-                : contextBundle.evidenceBundle();
-        String languageInstruction = buildLanguageInstruction(request.useKorean());
+                : bundle.evidenceBundle();
 
-        // 1) 규칙 정제(분할/병합)
-        JsonNode step1RuleStructure = buildRuleRefinementStructureContext(generalStructure);
-        JsonNode refinedRules = refineRulesWithChunkMerge(
-                step1RuleStructure,
-                evidenceBundle,
-                languageInstruction
-        );
+        JsonNode refinedRules = generateCautions(structure, evidence);
         artifactService.saveJsonArtifact(
                 run, ArtifactKind.LLM_REFINED_RULES, ARTIFACT_SCHEMA_VERSION, PATH_REFINED_RULES, refinedRules
         );
 
-        // Step1 이후에는 ruleCandidates 원문을 제거한 경량 컨텍스트를 사용한다.
-        JsonNode postRefinementStructure = buildPostRefinementStructureContext(generalStructure);
-        String generalContextWithEvidence = buildContext(postRefinementStructure, evidenceBundle);
-        String generalContextWithoutEvidence = buildContext(postRefinementStructure, List.of());
-        String fileTreeContextBase = buildContext(fileTreeStructure, List.of());
-
-        // 2) 시나리오 생성 + DB 캐시 저장
-        String scenarioContext = appendContextSection(
-                generalContextWithEvidence,
-                "정제 규칙",
-                limitRefinedRulesForContext(refinedRules)
-        );
-        log.info("[LlmService] Step 2/5 - scenario_specs (contextChars={})", scenarioContext.length());
-        JsonNode scenarioSpecs = generateScenarioSpecsWithRetry(scenarioContext, languageInstruction);
-        scenarioSpecs = applyPublicFilterToScenarioSpecs(scenarioSpecs, publicSurfaceIndex);
+        JsonNode scenarioSpecs = generateScenarioSpecs(structure, refinedRules, evidence);
         artifactService.saveJsonArtifact(
                 run, ArtifactKind.LLM_SCENARIO_SPECS, ARTIFACT_SCHEMA_VERSION, PATH_SCENARIO_SPECS, scenarioSpecs
         );
         LlmScenarioCache scenarioCache = llmScenarioCacheService.upsertScenarioCache(
-                run, scenarioSpecs, resolveHaikuModel(), SCENARIO_PROMPT_VERSION
+                run,
+                scenarioSpecs,
+                resolvePrimaryModel(),
+                SCENARIO_PROMPT_VERSION
         );
 
-        // 3) 서브시스템 요약
-        String subsystemContext = appendContextSection(
-                appendContextSection(
-                        generalContextWithoutEvidence,
-                        "정제 규칙",
-                        limitRefinedRulesForContext(refinedRules)
-                ),
-                "시나리오 명세",
-                limitScenarioSpecsForContext(scenarioSpecs)
-        );
-        log.info("[LlmService] Step 3/5 - subsystem_summaries (contextChars={})", subsystemContext.length());
-        JsonNode subsystemSummaries = generateSubsystemSummariesWithRetry(subsystemContext, languageInstruction);
+        JsonNode subsystemSummaries = buildSubsystemSummaries(structure, scenarioSpecs, refinedRules);
         artifactService.saveJsonArtifact(
                 run, ArtifactKind.LLM_SUBSYSTEM_SUMMARIES, ARTIFACT_SCHEMA_VERSION, PATH_SUBSYSTEM_SUMMARIES, subsystemSummaries
         );
 
-        // 4) API 문서
-        String apiContext = appendContextSection(
-                appendContextSection(
-                        generalContextWithoutEvidence,
-                        "서브시스템 요약",
-                        limitSubsystemSummariesForContext(subsystemSummaries)
-                ),
-                "시나리오 명세",
-                limitScenarioSpecsForContext(scenarioSpecs)
-        );
-        log.info("[LlmService] Step 4/5 - api_docs (contextChars={})", apiContext.length());
-        JsonNode apiDocs = generateApiDocsWithRetry(apiContext, languageInstruction);
-        apiDocs = applyPublicFilterToApiDocs(apiDocs, publicSurfaceIndex);
+        JsonNode apiDocs = buildApiDocs(structure, scenarioSpecs, refinedRules);
         artifactService.saveJsonArtifact(
                 run, ArtifactKind.LLM_API_DOCS, ARTIFACT_SCHEMA_VERSION, PATH_API_DOCS, apiDocs
         );
 
-        // 5) 파일 트리 기반 클래스/메서드 설명
-        String fileTreeContext = appendContextSection(
-                appendContextSection(
-                        appendContextSection(
-                                fileTreeContextBase,
-                                "정제 규칙 요약",
-                                compactRefinedRulesForFileTreeContext(refinedRules)
-                        ),
-                        "시나리오 요약",
-                        compactScenarioSpecsForFileTreeContext(scenarioSpecs)
-                ),
-                "Public API 요약",
-                compactApiDocsForFileTreeContext(apiDocs)
-        );
-        log.info("[LlmService] Step 5/5 - file_tree_docs (contextChars={})", fileTreeContext.length());
-        JsonNode fileTreeDocs = generateFileTreeDocsWithRetry(fileTreeContext, languageInstruction);
-        fileTreeDocs = applyPublicFilterToFileTreeDocs(fileTreeDocs, publicSurfaceIndex);
+        JsonNode fileTreeDocs = buildFileTreeDocs(structure, apiDocs);
         artifactService.saveJsonArtifact(
                 run, ArtifactKind.LLM_FILE_TREE_DOCS, ARTIFACT_SCHEMA_VERSION, PATH_FILE_TREE_DOCS, fileTreeDocs
         );
 
         log.info("[LlmService] Refinement complete. runId={}", request.getRunId());
 
-        LlmResult llmResult = LlmResult.builder()
+        LlmResult result = LlmResult.builder()
                 .runId(request.getRunId())
                 .refinedRules(refinedRules)
                 .scenarioSpecs(scenarioSpecs)
@@ -402,1415 +207,902 @@ public class LlmService {
                 .scenarioCacheId(scenarioCache.getCacheId())
                 .build();
 
-        return new LlmResponse(request.getRunId(), llmResult);
+        return new LlmResponse(request.getRunId(), result);
     }
 
     /**
-     * 洹쒖튃 ?뺤젣瑜?泥?겕 ?⑥쐞濡??섑뻾?섍퀬 寃곌낵瑜?濡쒖뺄?먯꽌 蹂묓빀?쒕떎.
+     * Step 1: 규칙 후보를 사용자 주의사항으로 변환.
      */
-    private JsonNode refineRulesWithChunkMerge(
-            JsonNode generalStructure,
-            List<LlmRequest.EvidenceSnippet> evidenceBundle,
-            String languageInstruction
-    ) {
-        List<JsonNode> chunkedStructures = buildRuleCandidateChunks(generalStructure, REFINED_RULE_CHUNK_SIZE);
-        if (chunkedStructures.isEmpty()) {
-            chunkedStructures = List.of(generalStructure);
-        }
+    private JsonNode generateCautions(JsonNode structure, List<LlmRequest.EvidenceSnippet> evidence) {
+        String context = buildCautionContext(structure, evidence);
+        log.info("[LlmService] {} (contextChars={})", STEP1_REFINED_RULES, context.length());
 
-        List<JsonNode> chunkRules = new ArrayList<>();
-        int chunkIndex = 1;
-        for (JsonNode chunkStructure : chunkedStructures) {
-            Set<Long> chunkEvidenceIds = extractChunkEvidenceIds(chunkStructure);
-            List<LlmRequest.EvidenceSnippet> filteredEvidence = filterEvidenceByIds(evidenceBundle, chunkEvidenceIds);
-            String chunkContext = buildContext(chunkStructure, filteredEvidence);
-
-            log.info(
-                    "[LlmService] Step 1/5 - refined_rules chunk {}/{} (contextChars={}, evidenceCount={})",
-                    chunkIndex,
-                    chunkedStructures.size(),
-                    chunkContext.length(),
-                    filteredEvidence.size()
-            );
-
-            JsonNode chunkResponse = generateRefinedRuleChunkWithRetry(
-                    chunkStructure,
-                    chunkContext,
-                    languageInstruction
-            );
-            chunkRules.add(chunkResponse);
-            chunkIndex++;
-        }
-
-        JsonNode merged = mergeRefinedRuleChunks(chunkRules);
-        log.info(
-                "[LlmService] Step 1/5 - refined_rules merged. chunkCount={}, mergedRules={}",
-                chunkedStructures.size(),
-                merged.path("rules").size()
+        JsonNode cautions = generateWithRetryPlan(
+                STEP1_REFINED_RULES,
+                applyLanguagePolicy(String.format(PROMPT_CAUTIONS, MAX_CAUTIONS)),
+                applyLanguagePolicy(String.format(PROMPT_CAUTIONS_COMPACT, Math.min(8, MAX_CAUTIONS))),
+                context,
+                TOKENS_CAUTIONS,
+                CONTEXT_LIMIT_CAUTIONS_COMPACT,
+                raw -> normalizeCautions(raw, structure),
+                () -> fallbackCautions(structure)
         );
-        return merged;
+
+        // 기존 클라이언트 호환을 위해 rules 키도 함께 제공한다.
+        ObjectNode out = objectMapper.createObjectNode();
+        out.set("cautions", cautions.path("cautions"));
+        out.set("rules", toRulesFromCautions(cautions.path("cautions")));
+        out.put("cautionCount", cautions.path("cautions").size());
+        out.put("contractVersion", "guide-v1");
+        return out;
     }
 
     /**
-     * ruleCandidates瑜??쇱젙 媛쒖닔 ?⑥쐞濡?履쇨컻 Step1 ?낅젰/異쒕젰 ?좏겙???덉젙?뷀븳??
+     * Step 2: 프로젝트 개요 + 대표 시나리오 + 메서드 사용 순서 생성.
      */
-    private List<JsonNode> buildRuleCandidateChunks(JsonNode generalStructure, int chunkSize) {
-        if (generalStructure == null || !generalStructure.isObject()) {
-            return List.of();
-        }
-
-        JsonNode pipeline = generalStructure.path("pipeline");
-        JsonNode ruleCandidates = pipeline.path("ruleCandidates");
-        JsonNode candidates = ruleCandidates.path("candidates");
-        if (!candidates.isArray() || candidates.isEmpty()) {
-            return List.of();
-        }
-
-        List<JsonNode> chunks = new ArrayList<>();
-        for (int start = 0; start < candidates.size(); start += chunkSize) {
-            int end = Math.min(start + chunkSize, candidates.size());
-            ObjectNode chunkRoot = createRuleChunkRoot(generalStructure);
-            ObjectNode chunkRuleCandidates = chunkRoot.with("pipeline").with("ruleCandidates");
-            ArrayNode chunkCandidates = objectMapper.createArrayNode();
-            for (int idx = start; idx < end; idx++) {
-                chunkCandidates.add(candidates.get(idx));
-            }
-            chunkRuleCandidates.set("candidates", chunkCandidates);
-            chunkRuleCandidates.put("chunkStart", start);
-            chunkRuleCandidates.put("chunkEndExclusive", end);
-            chunkRuleCandidates.put("chunkCandidateCount", chunkCandidates.size());
-            chunks.add(chunkRoot);
-        }
-        return chunks;
-    }
-
-    private Set<Long> extractChunkEvidenceIds(JsonNode chunkStructure) {
-        Set<Long> ids = new HashSet<>();
-        JsonNode candidates = chunkStructure.path("pipeline").path("ruleCandidates").path("candidates");
-        if (!candidates.isArray()) {
-            return ids;
-        }
-        for (JsonNode candidate : candidates) {
-            JsonNode evidences = candidate.path("evidences");
-            if (!evidences.isArray()) {
-                continue;
-            }
-            for (JsonNode evidence : evidences) {
-                JsonNode evidenceIdNode = evidence.get("evidenceId");
-                if (evidenceIdNode != null && evidenceIdNode.canConvertToLong()) {
-                    ids.add(evidenceIdNode.asLong());
-                }
-            }
-        }
-        return ids;
-    }
-
-    private List<LlmRequest.EvidenceSnippet> filterEvidenceByIds(
-            List<LlmRequest.EvidenceSnippet> evidenceBundle,
-            Set<Long> targetEvidenceIds
+    private JsonNode generateScenarioSpecs(
+            JsonNode structure,
+            JsonNode refinedRules,
+            List<LlmRequest.EvidenceSnippet> evidence
     ) {
-        if (evidenceBundle == null || evidenceBundle.isEmpty()) {
-            return List.of();
-        }
+        String context = buildScenarioContext(structure, refinedRules, evidence);
+        log.info("[LlmService] {} (contextChars={})", STEP2_SCENARIO_SPECS, context.length());
 
-        List<LlmRequest.EvidenceSnippet> result = new ArrayList<>();
-        for (LlmRequest.EvidenceSnippet evidence : evidenceBundle) {
-            if (evidence == null) {
-                continue;
-            }
-            if (targetEvidenceIds.isEmpty()) {
-                if (result.size() >= 24) {
-                    break;
-                }
-                result.add(evidence);
-                continue;
-            }
-            if (evidence.getEvidenceId() != null && targetEvidenceIds.contains(evidence.getEvidenceId())) {
-                result.add(evidence);
-            }
-        }
-        return result;
-    }
-
-    private String buildRefinedRuleChunkPrompt(int maxRulesPerChunk) {
-        return String.format(PROMPT_REFINED_RULES_CHUNK, maxRulesPerChunk);
-    }
-
-    private String buildRefinedRuleChunkCompactPrompt(int maxRulesPerChunk) {
-        return String.format(PROMPT_REFINED_RULES_CHUNK_COMPACT, maxRulesPerChunk);
+        return generateWithRetryPlan(
+                STEP2_SCENARIO_SPECS,
+                applyLanguagePolicy(String.format(PROMPT_SCENARIOS, MAX_SCENARIOS, MAX_STEPS_PER_SCENARIO)),
+                applyLanguagePolicy(String.format(PROMPT_SCENARIOS_COMPACT, Math.min(3, MAX_SCENARIOS))),
+                context,
+                TOKENS_SCENARIOS,
+                CONTEXT_LIMIT_SCENARIOS_COMPACT,
+                raw -> normalizeScenarioSpecs(raw, structure),
+                () -> fallbackScenarioSpecs(structure, refinedRules)
+        );
     }
 
     /**
-     * Step1 泥?겕??異쒕젰 ?덈떒????븘???쇰컲/?뺤텞 2?④퀎 ?ъ떆?꾨? 癒쇱? ?섑뻾?섍퀬,
-     * 洹몃옒???ㅽ뙣?섎㈃ 援ъ“ 湲곕컲 洹쒖튃?쇰줈 ?먮룞 蹂듦뎄???뚯씠?꾨씪??以묐떒??留됰뒗??
+     * Step 3: 핵심 클래스/서브시스템/확장 포인트를 결정론적으로 정리한다.
+     * 대형 JSON 생성을 LLM에 위임하지 않아 실패율과 비용을 낮춘다.
      */
-    private JsonNode generateRefinedRuleChunkWithRetry(
-            JsonNode chunkStructure,
-            String chunkContext,
-            String languageInstruction
+    private JsonNode buildSubsystemSummaries(JsonNode structure, JsonNode scenarioSpecs, JsonNode refinedRules) {
+        log.info("[LlmService] {} (deterministic)", STEP3_SUBSYSTEM_SUMMARIES);
+
+        ObjectNode out = objectMapper.createObjectNode();
+        ArrayNode coreClasses = buildCoreClassDocs(structure.path("coreClassSeed"), structure.path("coreMethodSeed"));
+        ArrayNode extensionPoints = buildExtensionPointDocs(structure.path("extensionSeed"));
+        ArrayNode subsystems = buildSubsystemDocs(coreClasses, scenarioSpecs, refinedRules);
+
+        out.set("coreClasses", coreClasses);
+        out.set("extensionPoints", extensionPoints);
+        out.set("subsystems", subsystems);
+        out.put("fallbackApplied", false);
+        out.put("deterministicSeedApplied", true);
+        out.put("contractVersion", "guide-v1");
+        return out;
+    }
+
+    /**
+     * Step 4: 핵심 메서드 카드와 사용 순서를 결정론적으로 생성한다.
+     */
+    private JsonNode buildApiDocs(JsonNode structure, JsonNode scenarioSpecs, JsonNode refinedRules) {
+        log.info("[LlmService] {} (deterministic)", STEP4_API_DOCS);
+
+        ArrayNode coreMethods = buildCoreMethodCards(
+                structure.path("coreMethodSeed"),
+                structure.path("methodFlowSeed"),
+                refinedRules.path("cautions")
+        );
+        ArrayNode methodUsageOrder = buildMethodUsageOrder(
+                structure.path("methodFlowSeed"),
+                scenarioSpecs.path("scenarios")
+        );
+        ArrayNode apiEntries = buildApiEntriesCompat(coreMethods);
+
+        ObjectNode out = objectMapper.createObjectNode();
+        out.set("coreMethods", coreMethods);
+        out.set("methodUsageOrder", methodUsageOrder);
+        out.set("apiEntries", apiEntries);
+        out.put("fallbackApplied", false);
+        out.put("deterministicSeedApplied", true);
+        out.put("contractVersion", "guide-v1");
+        return out;
+    }
+
+    /**
+     * Step 5: 디렉터리/근거 위치 출력.
+     */
+    private JsonNode buildFileTreeDocs(JsonNode structure, JsonNode apiDocs) {
+        log.info("[LlmService] {} (deterministic)", STEP5_FILE_TREE_DOCS);
+
+        ObjectNode out = objectMapper.createObjectNode();
+        out.set("directories", structure.path("directories").deepCopy());
+        out.set("evidenceLocations", structure.path("evidenceIndex").deepCopy());
+        out.set("coreMethods", apiDocs.path("coreMethods").deepCopy());
+        out.put("fallbackApplied", false);
+        out.put("deterministicSeedApplied", true);
+        out.put("contractVersion", "guide-v1");
+        return out;
+    }
+
+    private JsonNode generateWithRetryPlan(
+            String stepName,
+            String normalPrompt,
+            String compactPrompt,
+            String context,
+            int maxTokens,
+            int compactContextLimit,
+            Function<JsonNode, JsonNode> normalizer,
+            Supplier<JsonNode> fallbackSupplier
     ) {
         try {
-            return callClaudeWithHaikuFallback(
-                    STEP1_REFINED_RULES,
-                    applyLanguagePolicy(buildRefinedRuleChunkPrompt(MAX_REFINED_RULES_PER_CHUNK), languageInstruction),
-                    chunkContext,
-                    MAX_TOKENS_REFINED_RULES_CHUNK
-            );
+            JsonNode raw = callClaudeWithHaikuFallback(stepName, normalPrompt, context, maxTokens);
+            return normalizer.apply(raw);
         } catch (LlmException firstFailure) {
             if (!isResponseParseFailed(firstFailure)) {
                 throw firstFailure;
             }
-            log.warn("[LlmService] Step 1/5 refined_rules chunk parse failed. retrying with compact prompt/context.");
+            log.warn("[LlmService] {} parse failed. retrying compact mode.", stepName);
         }
 
-        String compactContext = shortenText(chunkContext, MAX_REFINED_RULE_RETRY_CONTEXT_CHARS);
+        String compactContext = shortenText(context, compactContextLimit);
         try {
-            return callClaudeWithHaikuFallback(
-                    STEP1_REFINED_RULES + " compact",
-                    applyLanguagePolicy(buildRefinedRuleChunkCompactPrompt(MAX_REFINED_RULES_PER_CHUNK_COMPACT), languageInstruction),
-                    compactContext,
-                    MAX_TOKENS_REFINED_RULES_CHUNK
-            );
+            JsonNode raw = callClaudeWithHaikuFallback(stepName + " compact", compactPrompt, compactContext, maxTokens);
+            return normalizer.apply(raw);
         } catch (LlmException secondFailure) {
             if (!isResponseParseFailed(secondFailure)) {
                 throw secondFailure;
             }
-            log.warn("[LlmService] Step 1/5 refined_rules chunk compact parse failed. applying deterministic fallback.");
+            log.warn("[LlmService] {} fallback applied.", stepName);
+            return fallbackSupplier.get();
         }
-
-        return buildDeterministicRuleChunkFallback(chunkStructure, MAX_REFINED_RULES_PER_CHUNK_COMPACT);
     }
 
-    /**
-     * LLM ?묐떟 ?뚯떛??諛섎났 ?ㅽ뙣????理쒖냼 洹쒖튃 吏묓빀??援ъ“ ?곗씠?곗뿉??吏곸젒 援ъ꽦?쒕떎.
-     */
-    private JsonNode buildDeterministicRuleChunkFallback(JsonNode chunkStructure, int maxRules) {
-        ObjectNode result = objectMapper.createObjectNode();
-        ArrayNode rulesOut = result.putArray("rules");
+    private JsonNode normalizeCautions(JsonNode raw, JsonNode structure) {
+        JsonNode cautionsRaw = extractArrayByKey(raw, "cautions");
+        if (cautionsRaw == null || !cautionsRaw.isArray()) {
+            cautionsRaw = extractArrayByKey(raw, "rules");
+        }
+        if (cautionsRaw == null || !cautionsRaw.isArray()) {
+            throw new LlmException(LlmErrorCode.RESPONSE_PARSE_FAILED);
+        }
 
-        JsonNode candidates = chunkStructure.path("pipeline").path("ruleCandidates").path("candidates");
-        if (candidates.isArray()) {
-            int seq = 1;
-            for (JsonNode candidate : candidates) {
-                if (rulesOut.size() >= maxRules) {
-                    break;
-                }
-                if (!candidate.isObject()) {
-                    continue;
-                }
+        ArrayNode cautions = objectMapper.createArrayNode();
+        Set<String> dedupe = new HashSet<>();
 
-                ObjectNode rule = rulesOut.addObject();
-                rule.put("ruleId", "FALLBACK-" + seq++);
-                rule.put("name", shortenText(resolveFallbackRuleName(candidate), 80));
-                rule.put("classification", inferFallbackClassification(candidate));
-                rule.put("description", shortenDescription(resolveFallbackRuleDescription(candidate)));
+        for (int i = 0; i < cautionsRaw.size() && cautions.size() < MAX_CAUTIONS; i++) {
+            JsonNode rawItem = cautionsRaw.get(i);
+            if (!rawItem.isObject()) {
+                continue;
+            }
 
-                ArrayNode groups = rule.putArray("mergedFromGroups");
-                String groupId = firstNonBlankText(candidate.path("groupId").asText(""), candidate.path("ruleKey").asText(""));
-                if (!groupId.isBlank()) {
-                    groups.add(groupId);
-                }
+            String title = shortenText(firstNonBlank(
+                    rawItem.path("title").asText(""),
+                    rawItem.path("name").asText("")
+            ), 70);
+            String message = shortenText(firstNonBlank(
+                    rawItem.path("message").asText(""),
+                    rawItem.path("description").asText("")
+            ), 180);
 
-                ArrayNode evidenceIds = rule.putArray("evidenceIds");
-                JsonNode evidences = candidate.path("evidences");
-                if (evidences.isArray()) {
-                    for (JsonNode evidence : evidences) {
-                        if (evidenceIds.size() >= 3) {
-                            break;
-                        }
-                        JsonNode evidenceIdNode = evidence.path("evidenceId");
-                        if (evidenceIdNode.canConvertToLong()) {
-                            evidenceIds.add(evidenceIdNode.asLong());
-                        }
+            if (title.isBlank() || message.isBlank()) {
+                continue;
+            }
+            String key = (title + "|" + message).toLowerCase(Locale.ROOT);
+            if (!dedupe.add(key)) {
+                continue;
+            }
+
+            ObjectNode item = cautions.addObject();
+            item.put("cautionId", String.format("CAU-%03d", cautions.size()));
+            item.put("title", title);
+            item.put("message", message);
+            item.put("when", shortenText(rawItem.path("when").asText("호출 전 입력값과 호출 순서를 점검할 때"), 100));
+            putIfText(item, "relatedClass", rawItem.path("relatedClass").asText(""));
+            putIfText(item, "relatedMethod", rawItem.path("relatedMethod").asText(""));
+            item.set("evidenceIds", limitLongArray(rawItem.path("evidenceIds"), MAX_EVIDENCE_LINKS));
+            item.put("confidence", normalizeConfidence(rawItem.path("confidence").asDouble(0.75d)));
+        }
+
+        if (cautions.isEmpty()) {
+            throw new LlmException(LlmErrorCode.RESPONSE_PARSE_FAILED);
+        }
+
+        ObjectNode out = objectMapper.createObjectNode();
+        out.set("cautions", cautions);
+        return out;
+    }
+
+    private JsonNode normalizeScenarioSpecs(JsonNode raw, JsonNode structure) {
+        JsonNode scenariosRaw = extractArrayByKey(raw, "scenarios");
+        if (scenariosRaw == null || !scenariosRaw.isArray()) {
+            throw new LlmException(LlmErrorCode.RESPONSE_PARSE_FAILED);
+        }
+
+        ObjectNode out = objectMapper.createObjectNode();
+        out.set("overview", normalizeOverview(raw.path("overview"), structure));
+        out.set("methodFlow", normalizeMethodFlow(raw.path("methodFlow"), structure.path("methodFlowSeed")));
+
+        ArrayNode scenarios = out.putArray("scenarios");
+        for (int i = 0; i < scenariosRaw.size() && scenarios.size() < MAX_SCENARIOS; i++) {
+            JsonNode rawScenario = scenariosRaw.get(i);
+            if (!rawScenario.isObject()) {
+                continue;
+            }
+
+            ObjectNode scenario = scenarios.addObject();
+            scenario.put("scenarioId", firstNonBlank(rawScenario.path("scenarioId").asText(""), String.format("SCN-%03d", scenarios.size())));
+            scenario.put("title", shortenText(rawScenario.path("title").asText("대표 사용 시나리오"), 90));
+            scenario.put("intent", shortenText(rawScenario.path("intent").asText("핵심 API를 순서대로 호출해 기능을 완성한다."), 160));
+
+            ArrayNode steps = scenario.putArray("steps");
+            JsonNode rawSteps = rawScenario.path("steps");
+            if (rawSteps.isArray()) {
+                for (int s = 0; s < rawSteps.size() && steps.size() < MAX_STEPS_PER_SCENARIO; s++) {
+                    JsonNode rawStep = rawSteps.get(s);
+                    if (!rawStep.isObject()) {
+                        continue;
                     }
+                    ObjectNode step = steps.addObject();
+                    step.put("stepNo", rawStep.path("stepNo").asInt(s + 1));
+                    step.put("description", shortenText(rawStep.path("description").asText("핵심 메서드를 호출한다."), 160));
+                    putIfText(step, "classFqn", rawStep.path("classFqn").asText(""));
+                    putIfText(step, "methodFqn", rawStep.path("methodFqn").asText(""));
+                    step.set("evidenceLinks", normalizeEvidenceLinks(rawStep.path("evidenceLinks"), MAX_EVIDENCE_LINKS));
                 }
+            }
 
-                rule.put("confidence", roundConfidence(resolveFallbackConfidence(candidate)));
+            if (steps.isEmpty()) {
+                ObjectNode step = steps.addObject();
+                step.put("stepNo", 1);
+                step.put("description", "핵심 API 호출 순서를 따라 실행한다.");
+                step.putArray("evidenceLinks");
             }
         }
 
-        if (rulesOut.isEmpty()) {
-            ObjectNode rule = rulesOut.addObject();
-            rule.put("ruleId", "FALLBACK-001");
-            rule.put("name", "援ъ“ 湲곕컲 洹쒖튃 蹂듦뎄");
+        if (scenarios.isEmpty()) {
+            throw new LlmException(LlmErrorCode.RESPONSE_PARSE_FAILED);
+        }
+        return out;
+    }
+
+    private JsonNode fallbackCautions(JsonNode structure) {
+        ObjectNode out = objectMapper.createObjectNode();
+        ArrayNode cautions = out.putArray("cautions");
+        JsonNode seed = structure.path("cautionSeed").path("cautions");
+
+        if (seed.isArray()) {
+            for (int i = 0; i < seed.size() && cautions.size() < MAX_CAUTIONS; i++) {
+                JsonNode item = seed.get(i);
+                ObjectNode caution = cautions.addObject();
+                caution.put("cautionId", String.format("CAU-%03d", cautions.size()));
+                caution.put("title", shortenText(item.path("title").asText("입력 검증 필요"), 70));
+                caution.put("message", shortenText(item.path("message").asText("호출 전 입력값 검증이 필요합니다."), 180));
+                caution.put("when", "메서드 호출 전 파라미터를 구성할 때");
+                putIfText(caution, "relatedClass", item.path("relatedClass").asText(""));
+                putIfText(caution, "relatedMethod", item.path("relatedMethod").asText(""));
+                caution.set("evidenceIds", limitLongArray(item.path("evidenceIds"), MAX_EVIDENCE_LINKS));
+                caution.put("confidence", normalizeConfidence(item.path("confidence").asDouble(0.70d)));
+            }
+        }
+
+        if (cautions.isEmpty()) {
+            ObjectNode caution = cautions.addObject();
+            caution.put("cautionId", "CAU-001");
+            caution.put("title", "필수 입력값 검증");
+            caution.put("message", "필수 파라미터가 누락되면 예외가 발생할 수 있으므로 호출 전 검증하세요.");
+            caution.put("when", "API 호출 전");
+            caution.putArray("evidenceIds");
+            caution.put("confidence", 0.60d);
+        }
+        return out;
+    }
+
+    private JsonNode fallbackScenarioSpecs(JsonNode structure, JsonNode refinedRules) {
+        ObjectNode out = objectMapper.createObjectNode();
+        out.set("overview", normalizeOverview(NullNode.getInstance(), structure));
+        out.set("methodFlow", normalizeMethodFlow(NullNode.getInstance(), structure.path("methodFlowSeed")));
+        ArrayNode scenarios = out.putArray("scenarios");
+
+        ObjectNode scenario = scenarios.addObject();
+        scenario.put("scenarioId", "SCN-001");
+        scenario.put("title", "기본 사용 흐름");
+        scenario.put("intent", "옵션 정의 -> 파싱 -> 결과 조회 -> 예외/도움말 처리 순서로 사용한다.");
+        ArrayNode steps = scenario.putArray("steps");
+
+        ArrayNode flow = out.path("methodFlow").isArray() ? (ArrayNode) out.path("methodFlow") : objectMapper.createArrayNode();
+        for (int i = 0; i < flow.size() && i < MAX_STEPS_PER_SCENARIO; i++) {
+            JsonNode flowStep = flow.get(i);
+            ObjectNode step = steps.addObject();
+            step.put("stepNo", i + 1);
+            step.put("description", shortenText(flowStep.path("description").asText("핵심 메서드를 순서대로 호출한다."), 160));
+            putIfText(step, "classFqn", flowStep.path("classFqn").asText(""));
+            putIfText(step, "methodFqn", flowStep.path("methodFqn").asText(""));
+            ArrayNode evidenceLinks = step.putArray("evidenceLinks");
+            ObjectNode link = evidenceLinks.addObject();
+            putIfText(link, "filePath", flowStep.path("filePath").asText(""));
+            putIfText(link, "lines", formatLines(flowStep.path("startLine"), flowStep.path("endLine")));
+        }
+
+        if (steps.isEmpty()) {
+            ObjectNode step = steps.addObject();
+            step.put("stepNo", 1);
+            step.put("description", "핵심 API를 선택하고 입력값을 구성한다.");
+            step.putArray("evidenceLinks");
+        }
+        out.put("fallbackApplied", true);
+        return out;
+    }
+
+    private JsonNode toRulesFromCautions(JsonNode cautions) {
+        ArrayNode rules = objectMapper.createArrayNode();
+        if (!cautions.isArray()) {
+            return rules;
+        }
+        for (int i = 0; i < cautions.size(); i++) {
+            JsonNode caution = cautions.get(i);
+            ObjectNode rule = rules.addObject();
+            rule.put("ruleId", String.format("RULE-%03d", i + 1));
+            rule.put("name", caution.path("title").asText("주의사항"));
             rule.put("classification", "defensive");
-            rule.put("description", "LLM ?묐떟 ?뚯떛 ?ㅽ뙣濡??명빐 援ъ“ ?곗씠?곗뿉??理쒖냼 洹쒖튃??蹂듦뎄?덈떎.");
+            rule.put("description", caution.path("message").asText(""));
             rule.putArray("mergedFromGroups");
-            rule.putArray("evidenceIds");
-            rule.put("confidence", 0.55d);
+            rule.set("evidenceIds", limitLongArray(caution.path("evidenceIds"), MAX_EVIDENCE_LINKS));
+            rule.put("confidence", normalizeConfidence(caution.path("confidence").asDouble(0.70d)));
+        }
+        return rules;
+    }
+
+    private ObjectNode normalizeOverview(JsonNode rawOverview, JsonNode structure) {
+        JsonNode seed = structure.path("overviewSeed");
+        ObjectNode overview = objectMapper.createObjectNode();
+
+        String repoName = firstNonBlank(seed.path("repoName").asText(""), "오픈소스 프로젝트");
+        overview.put("project", firstNonBlank(rawOverview.path("project").asText(""), repoName));
+        overview.put("purpose", firstNonBlank(
+                rawOverview.path("purpose").asText(""),
+                "공개 API를 빠르게 이해하고 실제 사용 순서를 안내한다."
+        ));
+        overview.put("fitSituation", firstNonBlank(
+                rawOverview.path("fitSituation").asText(""),
+                "처음 라이브러리를 도입하거나 기존 코드의 사용 흐름을 점검할 때 적합하다."
+        ));
+        overview.put("coreFeatures", firstNonBlank(
+                rawOverview.path("coreFeatures").asText(""),
+                "핵심 클래스/메서드, 사용 순서, 주의사항, 확장 포인트를 근거와 함께 제공한다."
+        ));
+        overview.put("startGuide", firstNonBlank(
+                rawOverview.path("startGuide").asText(""),
+                "대표 시나리오의 1단계부터 순서대로 실행하고, 각 단계의 메서드/근거 위치를 함께 확인한다."
+        ));
+        return overview;
+    }
+
+    private JsonNode normalizeMethodFlow(JsonNode rawFlow, JsonNode seedFlow) {
+        ArrayNode source = objectMapper.createArrayNode();
+        if (rawFlow != null && rawFlow.isArray() && !rawFlow.isEmpty()) {
+            source.addAll((ArrayNode) rawFlow);
+        } else if (seedFlow != null && seedFlow.isArray()) {
+            source.addAll((ArrayNode) seedFlow);
         }
 
-        result.put("chunkFallbackApplied", true);
-        result.put("ruleCount", rulesOut.size());
-        return result;
-    }
-
-    private String resolveFallbackRuleName(JsonNode candidate) {
-        String name = firstNonBlankText(
-                candidate.path("title").asText(""),
-                candidate.path("ruleKey").asText(""),
-                candidate.path("candidateKind").asText(""),
-                candidate.path("groupId").asText("")
-        );
-        return name.isBlank() ? "洹쒖튃 ?꾨낫 蹂듦뎄" : name;
-    }
-
-    private String resolveFallbackRuleDescription(JsonNode candidate) {
-        String description = firstNonBlankText(
-                candidate.path("description").asText(""),
-                candidate.path("summary").asText(""),
-                candidate.path("qualityReason").asText("")
-        );
-        return description.isBlank() ? "규칙 후보 데이터 기반으로 자동 복구한 규칙입니다." : description;
-    }
-
-    private String inferFallbackClassification(JsonNode candidate) {
-        String basis = firstNonBlankText(
-                candidate.path("candidateKind").asText(""),
-                candidate.path("ruleKey").asText(""),
-                candidate.path("title").asText(""),
-                candidate.path("description").asText("")
-        ).toLowerCase();
-
-        if (basis.contains("null")
-                || basis.contains("guard")
-                || basis.contains("throw")
-                || basis.contains("assert")
-                || basis.contains("require")
-                || basis.contains("validate")
-                || basis.contains("check")
-                || basis.contains("검증")
-                || basis.contains("예외")
-                || basis.contains("방어")
-                || basis.contains("필수")) {
-            return "defensive";
-        }
-        return "domain";
-    }
-
-    private double resolveFallbackConfidence(JsonNode candidate) {
-        JsonNode scoreNode = candidate.path("score");
-        if (scoreNode.isNumber()) {
-            double score = scoreNode.asDouble();
-            if (score > 0.0d && score <= 1.0d) {
-                return score;
-            }
-        }
-
-        String confidence = candidate.path("confidence").asText("").trim().toUpperCase();
-        return switch (confidence) {
-            case "HIGH" -> 0.82d;
-            case "MEDIUM" -> 0.72d;
-            case "LOW" -> 0.62d;
-            default -> 0.60d;
-        };
-    }
-
-    /**
-     * 泥?겕蹂?洹쒖튃 寃곌낵瑜??대쫫/遺꾨쪟 湲곗??쇰줈 蹂묓빀?섍퀬 理쒖쥌 ruleId瑜?遺?ы븳??
-     */
-    private JsonNode mergeRefinedRuleChunks(List<JsonNode> chunkResponses) {
-        Map<String, ObjectNode> mergedByKey = new LinkedHashMap<>();
-
-        for (JsonNode response : chunkResponses) {
-            JsonNode rules = response == null ? null : response.path("rules");
-            if (rules == null || !rules.isArray()) {
-                continue;
-            }
-
-            for (JsonNode ruleNode : rules) {
-                if (!ruleNode.isObject()) {
-                    continue;
-                }
-                ObjectNode rule = (ObjectNode) ruleNode.deepCopy();
-                String key = buildRuleMergeKey(rule);
-
-                if (!mergedByKey.containsKey(key)) {
-                    mergedByKey.put(key, compactMergedRule(rule));
-                    continue;
-                }
-                ObjectNode existing = mergedByKey.get(key);
-                mergeRuleNode(existing, rule);
-            }
-        }
-
-        List<ObjectNode> mergedList = new ArrayList<>(mergedByKey.values());
-        mergedList.sort(Comparator.comparingDouble(this::extractConfidence).reversed());
-        if (mergedList.size() > MAX_MERGED_REFINED_RULES) {
-            mergedList = new ArrayList<>(mergedList.subList(0, MAX_MERGED_REFINED_RULES));
-        }
-
-        ArrayNode rulesOut = objectMapper.createArrayNode();
-        int seq = 1;
-        for (ObjectNode rule : mergedList) {
-            rule.put("ruleId", String.format("RULE-%03d", seq++));
-            rulesOut.add(rule);
-        }
-
-        ObjectNode result = objectMapper.createObjectNode();
-        result.set("rules", rulesOut);
-        result.put("chunkMergeApplied", true);
-        result.put("ruleCount", rulesOut.size());
-        return result;
-    }
-
-    private String buildRuleMergeKey(JsonNode rule) {
-        String name = rule.path("name").asText("").trim().toLowerCase();
-        String classification = rule.path("classification").asText("").trim().toLowerCase();
-        return classification + "|" + name;
-    }
-
-    private ObjectNode compactMergedRule(ObjectNode rule) {
-        ObjectNode compact = objectMapper.createObjectNode();
-        compact.put("ruleId", rule.path("ruleId").asText(""));
-        compact.put("name", rule.path("name").asText(""));
-        compact.put("classification", rule.path("classification").asText(""));
-        compact.put("description", shortenDescription(rule.path("description").asText("")));
-        compact.set("mergedFromGroups", limitTextArray(rule.path("mergedFromGroups"), MAX_MERGED_GROUPS_PER_RULE));
-        compact.set("evidenceIds", limitLongArray(rule.path("evidenceIds"), MAX_MERGED_EVIDENCE_IDS_PER_RULE));
-        compact.put("confidence", roundConfidence(rule.path("confidence").asDouble(0.5d)));
-        return compact;
-    }
-
-    private void mergeRuleNode(ObjectNode base, ObjectNode incoming) {
-        base.set(
-                "mergedFromGroups",
-                mergeDistinctTextArrays(
-                        base.path("mergedFromGroups"),
-                        incoming.path("mergedFromGroups"),
-                        MAX_MERGED_GROUPS_PER_RULE
-                )
-        );
-        base.set(
-                "evidenceIds",
-                mergeDistinctLongArrays(
-                        base.path("evidenceIds"),
-                        incoming.path("evidenceIds"),
-                        MAX_MERGED_EVIDENCE_IDS_PER_RULE
-                )
-        );
-
-        double currentConfidence = base.path("confidence").asDouble(0.0d);
-        double incomingConfidence = incoming.path("confidence").asDouble(0.0d);
-        base.put("confidence", roundConfidence(Math.max(currentConfidence, incomingConfidence)));
-    }
-
-    private ArrayNode limitTextArray(JsonNode source, int limit) {
         ArrayNode out = objectMapper.createArrayNode();
-        if (source == null || !source.isArray()) {
-            return out;
-        }
-        for (int i = 0; i < source.size() && out.size() < limit; i++) {
-            JsonNode item = source.get(i);
-            if (item != null && item.isTextual() && !item.asText().isBlank()) {
-                out.add(item.asText());
+        for (int i = 0; i < source.size() && out.size() < MAX_METHOD_FLOW; i++) {
+            JsonNode raw = source.get(i);
+            ObjectNode node = out.addObject();
+            node.put("order", raw.path("order").asInt(i + 1));
+            node.put("title", shortenText(raw.path("title").asText("단계"), 50));
+            node.put("description", shortenText(raw.path("description").asText("핵심 메서드를 호출한다."), 120));
+            putIfText(node, "classFqn", raw.path("classFqn").asText(""));
+            putIfText(node, "methodFqn", raw.path("methodFqn").asText(""));
+            putIfText(node, "filePath", raw.path("filePath").asText(""));
+            if (raw.path("startLine").canConvertToInt()) {
+                node.put("startLine", raw.path("startLine").asInt());
+            }
+            if (raw.path("endLine").canConvertToInt()) {
+                node.put("endLine", raw.path("endLine").asInt());
             }
         }
         return out;
     }
 
-    private ArrayNode limitLongArray(JsonNode source, int limit) {
+    private ArrayNode buildCoreClassDocs(JsonNode classSeed, JsonNode methodSeed) {
+        Map<String, List<JsonNode>> methodsByClassId = new HashMap<>();
+        if (methodSeed.isArray()) {
+            for (JsonNode method : methodSeed) {
+                String classId = method.path("classSymbolId").asText("");
+                methodsByClassId.computeIfAbsent(classId, k -> new ArrayList<>()).add(method);
+            }
+        }
+
         ArrayNode out = objectMapper.createArrayNode();
-        if (source == null || !source.isArray()) {
+        if (!classSeed.isArray()) {
             return out;
         }
-        for (int i = 0; i < source.size() && out.size() < limit; i++) {
-            JsonNode item = source.get(i);
-            if (item != null && item.canConvertToLong()) {
-                out.add(item.asLong());
+
+        for (int i = 0; i < classSeed.size() && out.size() < MAX_CORE_CLASSES; i++) {
+            JsonNode seed = classSeed.get(i);
+            String classId = seed.path("symbolId").asText("");
+            ObjectNode item = out.addObject();
+            item.put("classId", classId);
+            item.put("packageName", seed.path("packageName").asText(""));
+            item.put("className", seed.path("className").asText(""));
+            item.put("fqn", seed.path("fqn").asText(""));
+            item.put("role", seed.path("role").asText(""));
+            item.put("responsibility", seed.path("role").asText(""));
+            item.put("useCase", seed.path("usage").asText(""));
+            item.put("importance", seed.path("importance").asInt(0));
+            putIfText(item, "filePath", seed.path("filePath").asText(""));
+            if (seed.path("startLine").canConvertToInt()) {
+                item.put("startLine", seed.path("startLine").asInt());
+            }
+            if (seed.path("endLine").canConvertToInt()) {
+                item.put("endLine", seed.path("endLine").asInt());
+            }
+
+            ArrayNode keyMethods = item.putArray("keyMethods");
+            // getOrDefault의 기본값(List.of)은 불변 리스트이므로 정렬 전에 가변 복사본으로 변환한다.
+            List<JsonNode> classMethods = new ArrayList<>(methodsByClassId.getOrDefault(classId, List.of()));
+            classMethods.sort(Comparator.comparingInt((JsonNode m) -> m.path("importance").asInt(0)).reversed());
+            for (int m = 0; m < classMethods.size() && m < 5; m++) {
+                JsonNode method = classMethods.get(m);
+                keyMethods.add(method.path("fqn").asText(""));
+            }
+            item.putArray("relatedScenarios");
+        }
+        return out;
+    }
+
+    private ArrayNode buildExtensionPointDocs(JsonNode extensionSeed) {
+        ArrayNode out = objectMapper.createArrayNode();
+        if (!extensionSeed.isArray()) {
+            return out;
+        }
+        for (int i = 0; i < extensionSeed.size() && i < MAX_CORE_CLASSES; i++) {
+            JsonNode seed = extensionSeed.get(i);
+            ObjectNode point = out.addObject();
+            point.put("fqn", seed.path("fqn").asText(""));
+            point.put("className", seed.path("className").asText(""));
+            point.put("reason", seed.path("reason").asText(""));
+            point.put("confidenceSource", seed.path("confidenceSource").asText("구조"));
+            point.put("confidenceLevel", "추론".equals(seed.path("confidenceSource").asText("")) ? 0.65d : 0.85d);
+            putIfText(point, "filePath", seed.path("filePath").asText(""));
+        }
+        return out;
+    }
+
+    private ArrayNode buildSubsystemDocs(JsonNode coreClasses, JsonNode scenarioSpecs, JsonNode refinedRules) {
+        Map<String, ObjectNode> byPackage = new LinkedHashMap<>();
+        if (coreClasses.isArray()) {
+            for (JsonNode type : coreClasses) {
+                String packageName = type.path("packageName").asText("");
+                String key = topPackageKey(packageName);
+                byPackage.computeIfAbsent(key, k -> {
+                    ObjectNode node = objectMapper.createObjectNode();
+                    node.put("subsystemId", "ss_" + (byPackage.size() + 1));
+                    node.put("label", key.isBlank() ? "core" : key);
+                    node.put("description", "관련 클래스와 메서드를 묶어 사용 흐름을 설명하는 서브시스템");
+                    node.put("layer", "application");
+                    node.putArray("topSymbols");
+                    node.putArray("relatedScenarios");
+                    node.putArray("ruleIds");
+                    return node;
+                });
+                byPackage.get(key).withArray("topSymbols").add("type:" + type.path("fqn").asText(""));
+            }
+        }
+
+        ArrayNode scenarios = scenarioSpecs.path("scenarios").isArray()
+                ? (ArrayNode) scenarioSpecs.path("scenarios")
+                : objectMapper.createArrayNode();
+        List<String> scenarioIds = new ArrayList<>();
+        for (int i = 0; i < scenarios.size(); i++) {
+            scenarioIds.add(scenarios.get(i).path("scenarioId").asText(""));
+        }
+
+        ArrayNode rules = refinedRules.path("rules").isArray()
+                ? (ArrayNode) refinedRules.path("rules")
+                : objectMapper.createArrayNode();
+        List<String> ruleIds = new ArrayList<>();
+        for (int i = 0; i < rules.size(); i++) {
+            ruleIds.add(rules.get(i).path("ruleId").asText(""));
+        }
+
+        ArrayNode out = objectMapper.createArrayNode();
+        int index = 0;
+        for (ObjectNode subsystem : byPackage.values()) {
+            if (index++ >= MAX_CORE_CLASSES) {
+                break;
+            }
+            ArrayNode relatedScenarios = subsystem.withArray("relatedScenarios");
+            for (int i = 0; i < scenarioIds.size() && i < 3; i++) {
+                relatedScenarios.add(scenarioIds.get(i));
+            }
+            ArrayNode relatedRules = subsystem.withArray("ruleIds");
+            for (int i = 0; i < ruleIds.size() && i < 4; i++) {
+                relatedRules.add(ruleIds.get(i));
+            }
+            out.add(subsystem);
+        }
+        return out;
+    }
+
+    private String topPackageKey(String packageName) {
+        String value = safeText(packageName);
+        if (value.isBlank()) {
+            return "core";
+        }
+        String[] tokens = value.split("\\.");
+        if (tokens.length <= 2) {
+            return value;
+        }
+        return tokens[0] + "." + tokens[1] + "." + tokens[2];
+    }
+
+    private ArrayNode buildCoreMethodCards(JsonNode methodSeed, JsonNode flowSeed, JsonNode cautions) {
+        Map<String, List<String>> cautionByMethod = indexCautionsByMethod(cautions);
+        Map<String, Integer> orderByMethod = indexMethodOrder(flowSeed);
+
+        ArrayNode out = objectMapper.createArrayNode();
+        if (!methodSeed.isArray()) {
+            return out;
+        }
+
+        for (int i = 0; i < methodSeed.size() && out.size() < MAX_CORE_METHODS; i++) {
+            JsonNode seed = methodSeed.get(i);
+            ObjectNode card = out.addObject();
+
+            String fqn = seed.path("fqn").asText("");
+            String methodName = seed.path("methodName").asText("");
+
+            card.put("methodName", methodName);
+            card.put("classFqn", seed.path("classFqn").asText(""));
+            card.put("fqn", fqn);
+            card.put("whatItDoes", seed.path("summarySeed").asText("핵심 동작을 수행한다."));
+            card.put("whenToUse", inferWhenToUse(methodName));
+            card.put("inputs", extractInputs(seed.path("signatureHint").asText("")));
+            card.put("returns", extractReturns(seed.path("signatureHint").asText("")));
+            card.put("changesState", inferStateChange(methodName));
+            card.set("pairedWith", inferPairedMethods(methodName, methodSeed));
+            card.put("callOrderNotes", formatCallOrderNote(orderByMethod.get(fqn)));
+            card.set("cautions", toTextArray(cautionByMethod.getOrDefault(fqn, List.of())));
+            card.put("importance", seed.path("importance").asInt(0));
+
+            ObjectNode evidence = card.putObject("evidence");
+            putIfText(evidence, "filePath", seed.path("filePath").asText(""));
+            if (seed.path("startLine").canConvertToInt()) {
+                evidence.put("startLine", seed.path("startLine").asInt());
+            }
+            if (seed.path("endLine").canConvertToInt()) {
+                evidence.put("endLine", seed.path("endLine").asInt());
             }
         }
         return out;
     }
 
-    private ArrayNode mergeDistinctTextArrays(JsonNode left, JsonNode right, int limit) {
-        ArrayNode merged = objectMapper.createArrayNode();
-        Set<String> seen = new HashSet<>();
-        appendDistinctText(left, merged, seen, limit);
-        appendDistinctText(right, merged, seen, limit);
-        return merged;
-    }
-
-    private ArrayNode mergeDistinctLongArrays(JsonNode left, JsonNode right, int limit) {
-        ArrayNode merged = objectMapper.createArrayNode();
-        Set<Long> seen = new HashSet<>();
-        appendDistinctLong(left, merged, seen, limit);
-        appendDistinctLong(right, merged, seen, limit);
-        return merged;
-    }
-
-    private void appendDistinctText(JsonNode source, ArrayNode target, Set<String> seen, int limit) {
-        if (source == null || !source.isArray()) {
-            return;
+    private Map<String, List<String>> indexCautionsByMethod(JsonNode cautions) {
+        Map<String, List<String>> out = new HashMap<>();
+        if (!cautions.isArray()) {
+            return out;
         }
-        for (JsonNode item : source) {
-            if (target.size() >= limit) {
-                return;
-            }
-            if (item == null || !item.isTextual()) {
+        for (JsonNode caution : cautions) {
+            String method = caution.path("relatedMethod").asText("");
+            if (method.isBlank()) {
                 continue;
             }
-            String value = item.asText().trim();
-            if (!value.isBlank() && seen.add(value)) {
-                target.add(value);
-            }
+            out.computeIfAbsent(method, k -> new ArrayList<>())
+                    .add(caution.path("message").asText(""));
         }
+        return out;
     }
 
-    private void appendDistinctLong(JsonNode source, ArrayNode target, Set<Long> seen, int limit) {
-        if (source == null || !source.isArray()) {
-            return;
+    private Map<String, Integer> indexMethodOrder(JsonNode flowSeed) {
+        Map<String, Integer> out = new HashMap<>();
+        if (!flowSeed.isArray()) {
+            return out;
         }
-        for (JsonNode item : source) {
-            if (target.size() >= limit) {
-                return;
+        for (JsonNode step : flowSeed) {
+            String method = step.path("methodFqn").asText("");
+            if (method.isBlank()) {
+                continue;
             }
-            if (item != null && item.canConvertToLong()) {
-                long value = item.asLong();
-                if (seen.add(value)) {
-                    target.add(value);
+            out.put(method, step.path("order").asInt(0));
+        }
+        return out;
+    }
+
+    private String inferWhenToUse(String methodName) {
+        String lower = safeText(methodName).toLowerCase(Locale.ROOT);
+        if (lower.contains("parse")) {
+            return "옵션 정의가 끝난 뒤 실제 입력(args)을 해석할 때";
+        }
+        if (lower.contains("add") || lower.contains("required") || lower.contains("builder")) {
+            return "애플리케이션 시작 시 옵션 스키마를 정의할 때";
+        }
+        if (lower.contains("get") || lower.contains("has")) {
+            return "파싱 완료 후 값을 읽거나 분기 처리할 때";
+        }
+        if (lower.contains("help") || lower.contains("print")) {
+            return "오류 처리 또는 사용법 안내를 출력할 때";
+        }
+        return "핵심 흐름 중 해당 기능이 필요할 때";
+    }
+
+    private String extractInputs(String signatureHint) {
+        if (signatureHint == null || signatureHint.isBlank()) {
+            return "입력 파라미터는 소속 클래스의 시그니처를 따른다.";
+        }
+        int idx = signatureHint.indexOf("->");
+        if (idx < 0) {
+            return shortenText(signatureHint, 120);
+        }
+        return shortenText(signatureHint.substring(0, idx).trim(), 120);
+    }
+
+    private String extractReturns(String signatureHint) {
+        if (signatureHint == null || signatureHint.isBlank()) {
+            return "반환 타입은 소속 메서드 시그니처를 따른다.";
+        }
+        int idx = signatureHint.indexOf("->");
+        if (idx < 0) {
+            return "반환 타입 정보가 시드에 명확하지 않음(추정)";
+        }
+        return shortenText(signatureHint.substring(idx + 2).trim(), 80);
+    }
+
+    private boolean inferStateChange(String methodName) {
+        String lower = safeText(methodName).toLowerCase(Locale.ROOT);
+        return lower.startsWith("set")
+                || lower.startsWith("add")
+                || lower.contains("build")
+                || lower.contains("parse");
+    }
+
+    private ArrayNode inferPairedMethods(String methodName, JsonNode methodSeed) {
+        ArrayNode out = objectMapper.createArrayNode();
+        String lower = safeText(methodName).toLowerCase(Locale.ROOT);
+        List<String> keywords = new ArrayList<>();
+        if (lower.contains("parse")) {
+            keywords = List.of("add", "required", "get", "has");
+        } else if (lower.contains("add") || lower.contains("required")) {
+            keywords = List.of("parse");
+        } else if (lower.contains("get") || lower.contains("has")) {
+            keywords = List.of("parse");
+        } else if (lower.contains("help") || lower.contains("print")) {
+            keywords = List.of("parse");
+        }
+
+        if (keywords.isEmpty() || !methodSeed.isArray()) {
+            return out;
+        }
+        for (JsonNode seed : methodSeed) {
+            String peer = seed.path("fqn").asText("");
+            String peerName = seed.path("methodName").asText("").toLowerCase(Locale.ROOT);
+            if (peer.isBlank() || peerName.equals(lower)) {
+                continue;
+            }
+            for (String keyword : keywords) {
+                if (peerName.contains(keyword)) {
+                    out.add(peer);
+                    break;
+                }
+            }
+            if (out.size() >= 3) {
+                break;
+            }
+        }
+        return out;
+    }
+
+    private String formatCallOrderNote(Integer order) {
+        if (order == null || order <= 0) {
+            return "호출 순서는 시나리오 문맥에 따라 달라질 수 있음";
+        }
+        return "권장 호출 순서 단계: " + order;
+    }
+
+    private ArrayNode buildMethodUsageOrder(JsonNode flowSeed, JsonNode scenarios) {
+        ArrayNode out = objectMapper.createArrayNode();
+        if (flowSeed.isArray()) {
+            for (int i = 0; i < flowSeed.size() && out.size() < MAX_METHOD_FLOW; i++) {
+                JsonNode seed = flowSeed.get(i);
+                ObjectNode item = out.addObject();
+                item.put("order", seed.path("order").asInt(i + 1));
+                item.put("title", seed.path("title").asText("단계"));
+                item.put("description", seed.path("description").asText("메서드를 호출한다."));
+                putIfText(item, "methodFqn", seed.path("methodFqn").asText(""));
+                putIfText(item, "classFqn", seed.path("classFqn").asText(""));
+            }
+            return out;
+        }
+
+        // flow seed가 없으면 시나리오에서 추출
+        if (scenarios != null && scenarios.isArray() && !scenarios.isEmpty()) {
+            JsonNode firstScenario = scenarios.get(0).path("steps");
+            if (firstScenario.isArray()) {
+                for (int i = 0; i < firstScenario.size() && out.size() < MAX_METHOD_FLOW; i++) {
+                    JsonNode step = firstScenario.get(i);
+                    ObjectNode item = out.addObject();
+                    item.put("order", i + 1);
+                    item.put("title", "시나리오 단계");
+                    item.put("description", step.path("description").asText("메서드를 호출한다."));
+                    putIfText(item, "methodFqn", step.path("methodFqn").asText(""));
+                    putIfText(item, "classFqn", step.path("classFqn").asText(""));
                 }
             }
         }
+        return out;
     }
 
-    private double roundConfidence(double value) {
-        BigDecimal rounded = BigDecimal.valueOf(value).setScale(3, RoundingMode.HALF_UP);
-        return rounded.doubleValue();
+    private ArrayNode buildApiEntriesCompat(JsonNode coreMethods) {
+        ArrayNode out = objectMapper.createArrayNode();
+        if (!coreMethods.isArray()) {
+            return out;
+        }
+        for (int i = 0; i < coreMethods.size() && out.size() < MAX_API_ENTRY_OUTPUT; i++) {
+            JsonNode method = coreMethods.get(i);
+            ObjectNode entry = out.addObject();
+            entry.put("fqn", method.path("fqn").asText(""));
+            entry.put("summary", shortenText(method.path("whatItDoes").asText("핵심 동작 수행"), 140));
+            entry.put("subsystem", shortenText(method.path("classFqn").asText("core"), 80));
+            ArrayNode relatedScenarios = entry.putArray("relatedScenarios");
+            relatedScenarios.add("SCN-001");
+        }
+        return out;
     }
 
-    private double extractConfidence(ObjectNode rule) {
-        return rule.path("confidence").asDouble(0.0d);
+    private ArrayNode normalizeEvidenceLinks(JsonNode links, int maxCount) {
+        ArrayNode out = objectMapper.createArrayNode();
+        if (links == null || !links.isArray()) {
+            return out;
+        }
+        for (int i = 0; i < links.size() && out.size() < maxCount; i++) {
+            JsonNode link = links.get(i);
+            if (!link.isObject()) {
+                continue;
+            }
+            ObjectNode item = out.addObject();
+            if (link.path("evidenceId").canConvertToLong()) {
+                item.put("evidenceId", link.path("evidenceId").asLong());
+            }
+            putIfText(item, "filePath", link.path("filePath").asText(""));
+            putIfText(item, "lines", firstNonBlank(
+                    link.path("lines").asText(""),
+                    formatLines(link.path("startLine"), link.path("endLine"))
+            ));
+        }
+        return out;
     }
 
-    private String shortenDescription(String description) {
-        if (description == null) {
+    private String formatLines(JsonNode startLine, JsonNode endLine) {
+        if (startLine == null || startLine.isMissingNode() || startLine.isNull()) {
             return "";
         }
-        String value = description.trim();
-        if (value.length() <= 120) {
-            return value;
+        if (endLine != null && endLine.canConvertToInt() && startLine.canConvertToInt()) {
+            int start = startLine.asInt();
+            int end = endLine.asInt();
+            return start == end ? String.valueOf(start) : start + "-" + end;
         }
-        return value.substring(0, 120);
+        return startLine.asText("");
     }
 
-    private String shortenText(String text, int maxLength) {
-        if (text == null) {
-            return "";
-        }
-        String value = text.trim();
-        if (value.length() <= maxLength) {
-            return value;
-        }
-        return value.substring(0, maxLength);
+    private String buildCautionContext(JsonNode structure, List<LlmRequest.EvidenceSnippet> evidence) {
+        ObjectNode context = objectMapper.createObjectNode();
+        context.set("overviewSeed", structure.path("overviewSeed"));
+        context.set("cautionSeed", structure.path("cautionSeed"));
+        context.set("coreMethodSeed", takeFirst(structure.path("coreMethodSeed"), 12));
+        context.set("qualityGate", structure.path("qualityGate"));
+        context.set("evidence", toEvidenceNode(evidence, 12));
+        return toJson(context);
     }
 
-    private String firstNonBlankText(String... values) {
-        if (values == null) {
-            return "";
-        }
-        for (String value : values) {
-            if (value != null && !value.isBlank()) {
-                return value.trim();
-            }
-        }
-        return "";
-    }
-
-    /**
-     * Step2 ?쒕굹由ъ삤 ?앹꽦? 湲몄씠 珥덇낵媛 ??븘??1李??ㅽ뙣 ???뺤텞 紐⑤뱶濡?1???ъ떆?꾪븳??
-     */
-    private JsonNode generateScenarioSpecsWithRetry(String scenarioContext, String languageInstruction) {
-        try {
-            JsonNode scenarioSpecs = callClaudeWithHaikuFallback(
-                    STEP2_SCENARIO_SPECS,
-                    applyLanguagePolicy(PROMPT_SCENARIO_SPECS, languageInstruction),
-                    scenarioContext,
-                    MAX_TOKENS_SCENARIO_SPECS
-            );
-            return normalizeScenarioSpecs(scenarioSpecs);
-        } catch (LlmException firstFailure) {
-            if (!isResponseParseFailed(firstFailure)) {
-                throw firstFailure;
-            }
-            log.warn(
-                    "[LlmService] Step 2/5 scenario_specs parse failed. retrying with compact prompt/context."
-            );
-        }
-
-        String compactContext = shortenText(scenarioContext, MAX_SCENARIO_RETRY_CONTEXT_CHARS);
-        try {
-            JsonNode compactScenarioSpecs = callClaudeWithHaikuFallback(
-                    STEP2_SCENARIO_SPECS + " compact",
-                    applyLanguagePolicy(PROMPT_SCENARIO_SPECS_COMPACT, languageInstruction),
-                    compactContext,
-                    MAX_TOKENS_SCENARIO_SPECS
-            );
-            return normalizeScenarioSpecs(compactScenarioSpecs);
-        } catch (LlmException secondFailure) {
-            if (!isResponseParseFailed(secondFailure)) {
-                throw secondFailure;
-            }
-            log.warn("[LlmService] Step 2/5 scenario_specs fallback applied.");
-            return fallbackScenarioSpecs();
-        }
-    }
-
-    /**
-     * Step3 ?쒕툕?쒖뒪???붿빟? ?섎┝/?ㅽ궎留??댄깉 ???뺤텞 紐⑤뱶濡?1???ъ떆?꾪븳??
-     */
-    private JsonNode generateSubsystemSummariesWithRetry(String subsystemContext, String languageInstruction) {
-        try {
-            JsonNode subsystemSummaries = callClaudeWithHaikuFallback(
-                    STEP3_SUBSYSTEM_SUMMARIES,
-                    applyLanguagePolicy(PROMPT_SUBSYSTEM_SUMMARIES, languageInstruction),
-                    subsystemContext,
-                    MAX_TOKENS_SUBSYSTEM_SUMMARIES
-            );
-            return normalizeSubsystemSummaries(subsystemSummaries);
-        } catch (LlmException firstFailure) {
-            if (!isResponseParseFailed(firstFailure)) {
-                throw firstFailure;
-            }
-            log.warn(
-                    "[LlmService] Step 3/5 subsystem_summaries parse failed. retrying with compact prompt/context."
-            );
-        }
-
-        String compactContext = shortenText(subsystemContext, MAX_SUBSYSTEM_RETRY_CONTEXT_CHARS);
-        try {
-            JsonNode compactSubsystemSummaries = callClaudeWithHaikuFallback(
-                    STEP3_SUBSYSTEM_SUMMARIES + " compact",
-                    applyLanguagePolicy(PROMPT_SUBSYSTEM_SUMMARIES_COMPACT, languageInstruction),
-                    compactContext,
-                    MAX_TOKENS_SUBSYSTEM_SUMMARIES
-            );
-            return normalizeSubsystemSummaries(compactSubsystemSummaries);
-        } catch (LlmException secondFailure) {
-            if (!isResponseParseFailed(secondFailure)) {
-                throw secondFailure;
-            }
-            log.warn("[LlmService] Step 3/5 subsystem_summaries fallback applied.");
-            return fallbackSubsystemSummaries();
-        }
-    }
-
-    /**
-     * Step4 API 臾몄꽌???섎┝/?ㅽ궎留??댄깉 ???뺤텞 紐⑤뱶濡?1???ъ떆?꾪븳??
-     */
-    private JsonNode generateApiDocsWithRetry(String apiContext, String languageInstruction) {
-        try {
-            JsonNode apiDocs = callClaudeWithHaikuFallback(
-                    STEP4_API_DOCS,
-                    applyLanguagePolicy(PROMPT_API_DOCS, languageInstruction),
-                    apiContext,
-                    MAX_TOKENS_API_DOCS
-            );
-            return normalizeApiDocs(apiDocs);
-        } catch (LlmException firstFailure) {
-            if (!isResponseParseFailed(firstFailure)) {
-                throw firstFailure;
-            }
-            log.warn(
-                    "[LlmService] Step 4/5 api_docs parse failed. retrying with compact prompt/context."
-            );
-        }
-
-        String compactContext = shortenText(apiContext, MAX_API_RETRY_CONTEXT_CHARS);
-        try {
-            JsonNode compactApiDocs = callClaudeWithHaikuFallback(
-                    STEP4_API_DOCS + " compact",
-                    applyLanguagePolicy(PROMPT_API_DOCS_COMPACT, languageInstruction),
-                    compactContext,
-                    MAX_TOKENS_API_DOCS
-            );
-            return normalizeApiDocs(compactApiDocs);
-        } catch (LlmException secondFailure) {
-            if (!isResponseParseFailed(secondFailure)) {
-                throw secondFailure;
-            }
-            log.warn(
-                    "[LlmService] Step 4/5 api_docs compact parse failed. retrying with mini prompt/context."
-            );
-        }
-
-        String miniContext = shortenText(apiContext, MAX_API_MINI_RETRY_CONTEXT_CHARS);
-        try {
-            JsonNode miniApiDocs = callClaudeWithHaikuFallback(
-                    STEP4_API_DOCS + " mini",
-                    applyLanguagePolicy(PROMPT_API_DOCS_MINI, languageInstruction),
-                    miniContext,
-                    MAX_TOKENS_API_DOCS
-            );
-            return normalizeApiDocs(miniApiDocs);
-        } catch (LlmException thirdFailure) {
-            if (!isResponseParseFailed(thirdFailure)) {
-                throw thirdFailure;
-            }
-            log.warn("[LlmService] Step 4/5 api_docs fallback applied.");
-            return fallbackApiDocs();
-        }
-    }
-
-    /**
-     * Step5 ?뚯씪 ?몃━ 臾몄꽌???섎┝/?ㅽ궎留??댄깉 ???뺤텞 紐⑤뱶濡?1???ъ떆?꾪븳??
-     */
-    private JsonNode generateFileTreeDocsWithRetry(String fileTreeContext, String languageInstruction) {
-        try {
-            JsonNode fileTreeDocs = callClaudeWithHaikuFallback(
-                    STEP5_FILE_TREE_DOCS,
-                    applyLanguagePolicy(PROMPT_FILE_TREE_DOCS, languageInstruction),
-                    fileTreeContext,
-                    MAX_TOKENS_FILE_TREE_DOCS
-            );
-            return normalizeFileTreeDocs(fileTreeDocs);
-        } catch (LlmException firstFailure) {
-            if (!isResponseParseFailed(firstFailure)) {
-                throw firstFailure;
-            }
-            log.warn(
-                    "[LlmService] Step 5/5 file_tree_docs parse failed. retrying with compact prompt/context."
-            );
-        }
-
-        String compactContext = shortenText(fileTreeContext, MAX_FILE_TREE_RETRY_CONTEXT_CHARS);
-        try {
-            JsonNode compactFileTreeDocs = callClaudeWithHaikuFallback(
-                    STEP5_FILE_TREE_DOCS + " compact",
-                    applyLanguagePolicy(PROMPT_FILE_TREE_DOCS_COMPACT, languageInstruction),
-                    compactContext,
-                    MAX_TOKENS_FILE_TREE_DOCS
-            );
-            return normalizeFileTreeDocs(compactFileTreeDocs);
-        } catch (LlmException secondFailure) {
-            if (!isResponseParseFailed(secondFailure)) {
-                throw secondFailure;
-            }
-            log.warn("[LlmService] Step 5/5 file_tree_docs fallback applied.");
-            return fallbackFileTreeDocs();
-        }
-    }
-
-    private JsonNode fallbackScenarioSpecs() {
-        ObjectNode fallback = objectMapper.createObjectNode();
-        fallback.putArray("scenarios");
-        fallback.put("fallbackApplied", true);
-        return fallback;
-    }
-
-    private JsonNode fallbackSubsystemSummaries() {
-        ObjectNode fallback = objectMapper.createObjectNode();
-        fallback.putArray("subsystems");
-        fallback.put("fallbackApplied", true);
-        return fallback;
-    }
-
-    private JsonNode fallbackApiDocs() {
-        ObjectNode fallback = objectMapper.createObjectNode();
-        fallback.putArray("apiEntries");
-        fallback.put("fallbackApplied", true);
-        return fallback;
-    }
-
-    private JsonNode fallbackFileTreeDocs() {
-        ObjectNode fallback = objectMapper.createObjectNode();
-        fallback.putArray("directories");
-        fallback.put("fallbackApplied", true);
-        return fallback;
-    }
-
-    /**
-     * ?쒕굹由ъ삤 寃곌낵瑜??ㅽ궎留?以묒떖?쇰줈 ?뺢퇋?뷀븯???꾩냽 ?④퀎???좏겙 蹂?숈쓣 以꾩씤??
-     */
-    private JsonNode normalizeScenarioSpecs(JsonNode rawScenarioSpecs) {
-        JsonNode scenariosNode = extractScenarioArray(rawScenarioSpecs);
-        if (scenariosNode == null || !scenariosNode.isArray()) {
-            throw new LlmException(LlmErrorCode.RESPONSE_PARSE_FAILED);
-        }
-
-        ObjectNode normalized = objectMapper.createObjectNode();
-        ArrayNode scenariosOut = normalized.putArray("scenarios");
-
-        for (int i = 0; i < scenariosNode.size() && i < MAX_SCENARIOS_OUTPUT; i++) {
-            JsonNode scenario = scenariosNode.get(i);
-            if (!scenario.isObject()) {
-                continue;
-            }
-
-            ObjectNode scenarioOut = scenariosOut.addObject();
-            String scenarioId = scenario.path("scenarioId").asText("").trim();
-            if (scenarioId.isBlank()) {
-                scenarioId = String.format("SCN-%03d", i + 1);
-            }
-            scenarioOut.put("scenarioId", scenarioId);
-            scenarioOut.put("title", shortenText(scenario.path("title").asText(""), MAX_SCENARIO_TITLE_LENGTH));
-            scenarioOut.put("subsystem", shortenText(scenario.path("subsystem").asText(""), MAX_SCENARIO_SUBSYSTEM_LENGTH));
-
-            ArrayNode stepsOut = scenarioOut.putArray("steps");
-            JsonNode steps = scenario.path("steps");
-            if (steps.isArray()) {
-                for (int stepIdx = 0;
-                     stepIdx < steps.size() && stepIdx < MAX_STEPS_PER_SCENARIO_OUTPUT;
-                     stepIdx++) {
-                    JsonNode step = steps.get(stepIdx);
-                    if (!step.isObject()) {
-                        continue;
-                    }
-
-                    ObjectNode stepOut = stepsOut.addObject();
-                    int stepNo = step.path("stepNo").asInt(stepIdx + 1);
-                    stepOut.put("stepNo", stepNo > 0 ? stepNo : stepIdx + 1);
-
-                    String description = shortenText(
-                            step.path("description").asText(""),
-                            MAX_SCENARIO_STEP_DESCRIPTION_LENGTH
-                    );
-                    if (description.isBlank()) {
-                        description = "단계 설명 요약";
-                    }
-                    stepOut.put("description", description);
-
-                    ArrayNode evidenceOut = stepOut.putArray("evidenceLinks");
-                    JsonNode evidenceLinks = step.path("evidenceLinks");
-                    if (evidenceLinks.isArray()) {
-                        for (int linkIdx = 0;
-                             linkIdx < evidenceLinks.size() && linkIdx < MAX_EVIDENCE_LINKS_PER_STEP_OUTPUT;
-                             linkIdx++) {
-                            JsonNode link = evidenceLinks.get(linkIdx);
-                            if (!link.isObject()) {
-                                continue;
-                            }
-
-                            ObjectNode linkOut = objectMapper.createObjectNode();
-                            JsonNode evidenceIdNode = link.path("evidenceId");
-                            if (evidenceIdNode.isNumber()) {
-                                linkOut.put("evidenceId", evidenceIdNode.asLong());
-                            }
-
-                            String filePath = shortenText(link.path("filePath").asText(""), 200);
-                            if (!filePath.isBlank()) {
-                                linkOut.put("filePath", filePath);
-                            }
-
-                            String lines = shortenText(link.path("lines").asText(""), 40);
-                            if (!lines.isBlank()) {
-                                linkOut.put("lines", lines);
-                            }
-
-                            if (linkOut.size() > 0) {
-                                evidenceOut.add(linkOut);
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (stepsOut.size() == 0) {
-                ObjectNode fallbackStep = stepsOut.addObject();
-                fallbackStep.put("stepNo", 1);
-                fallbackStep.put("description", "단계 설명 요약");
-                fallbackStep.putArray("evidenceLinks");
-            }
-        }
-
-        if (scenariosOut.size() == 0) {
-            throw new LlmException(LlmErrorCode.RESPONSE_PARSE_FAILED);
-        }
-        return normalized;
-    }
-
-    /**
-     * subsystem_summaries 寃곌낵瑜??ㅽ궎留?以묒떖?쇰줈 ?뺢퇋?뷀븳??
-     */
-    private JsonNode normalizeSubsystemSummaries(JsonNode rawSubsystemSummaries) {
-        JsonNode subsystemsNode = extractArrayByKey(rawSubsystemSummaries, "subsystems");
-        if (subsystemsNode == null || !subsystemsNode.isArray()) {
-            throw new LlmException(LlmErrorCode.RESPONSE_PARSE_FAILED);
-        }
-
-        ObjectNode normalized = objectMapper.createObjectNode();
-        ArrayNode subsystemsOut = normalized.putArray("subsystems");
-        for (int i = 0; i < subsystemsNode.size() && i < MAX_SUBSYSTEMS_OUTPUT; i++) {
-            JsonNode subsystem = subsystemsNode.get(i);
-            if (!subsystem.isObject()) {
-                continue;
-            }
-
-            ObjectNode out = subsystemsOut.addObject();
-            String subsystemId = subsystem.path("subsystemId").asText("").trim();
-            if (subsystemId.isBlank()) {
-                subsystemId = String.format("ss_%03d", i + 1);
-            }
-            out.put("subsystemId", subsystemId);
-            out.put("label", shortenText(subsystem.path("label").asText(""), MAX_SUBSYSTEM_LABEL_LENGTH));
-            out.put("description", shortenText(subsystem.path("description").asText(""), MAX_SUBSYSTEM_DESCRIPTION_LENGTH));
-
-            String layer = subsystem.path("layer").asText("").trim().toLowerCase();
-            if (!"infrastructure".equals(layer) && !"domain".equals(layer) && !"application".equals(layer)) {
-                layer = "application";
-            }
-            out.put("layer", layer);
-
-            out.set("topSymbols", limitTextArray(subsystem.path("topSymbols"), MAX_TOP_SYMBOLS_PER_SUBSYSTEM_OUTPUT));
-            out.set("ruleIds", limitTextArray(subsystem.path("ruleIds"), MAX_RULE_IDS_PER_SUBSYSTEM_OUTPUT));
-        }
-
-        if (subsystemsOut.size() == 0) {
-            throw new LlmException(LlmErrorCode.RESPONSE_PARSE_FAILED);
-        }
-        return normalized;
-    }
-
-    /**
-     * api_docs 寃곌낵瑜??ㅽ궎留?以묒떖?쇰줈 ?뺢퇋?뷀븳??
-     */
-    private JsonNode normalizeApiDocs(JsonNode rawApiDocs) {
-        JsonNode entriesNode = extractArrayByKey(rawApiDocs, "apiEntries");
-        if (entriesNode == null || !entriesNode.isArray()) {
-            throw new LlmException(LlmErrorCode.RESPONSE_PARSE_FAILED);
-        }
-
-        ObjectNode normalized = objectMapper.createObjectNode();
-        ArrayNode entriesOut = normalized.putArray("apiEntries");
-        for (int i = 0; i < entriesNode.size() && i < MAX_API_ENTRIES_OUTPUT; i++) {
-            JsonNode entry = entriesNode.get(i);
-            if (!entry.isObject()) {
-                continue;
-            }
-
-            String fqn = entry.path("fqn").asText("").trim();
-            if (fqn.isBlank()) {
-                continue;
-            }
-
-            ObjectNode out = entriesOut.addObject();
-            out.put("fqn", shortenText(fqn, MAX_API_TEXT_LENGTH));
-            String summary = firstNonBlankText(
-                    entry.path("summary").asText(""),
-                    entry.path("description").asText(""),
-                    entry.path("title").asText("")
-            );
-            out.put("summary", shortenText(summary, MAX_API_TEXT_LENGTH));
-            out.put("subsystem", shortenText(entry.path("subsystem").asText(""), 80));
-
-            out.set(
-                    "relatedScenarios",
-                    limitTextArray(entry.path("relatedScenarios"), MAX_API_RELATED_SCENARIOS_PER_ENTRY_OUTPUT)
-            );
-        }
-
-        if (entriesOut.size() == 0) {
-            throw new LlmException(LlmErrorCode.RESPONSE_PARSE_FAILED);
-        }
-        return normalized;
-    }
-
-    /**
-     * file_tree_docs 寃곌낵瑜??ㅽ궎留?以묒떖?쇰줈 ?뺢퇋?뷀븳??
-     */
-    private JsonNode normalizeFileTreeDocs(JsonNode rawFileTreeDocs) {
-        JsonNode directoriesNode = extractArrayByKey(rawFileTreeDocs, "directories");
-        if (directoriesNode == null || !directoriesNode.isArray()) {
-            throw new LlmException(LlmErrorCode.RESPONSE_PARSE_FAILED);
-        }
-
-        ObjectNode normalized = objectMapper.createObjectNode();
-        ArrayNode directoriesOut = normalized.putArray("directories");
-        for (int dirIdx = 0; dirIdx < directoriesNode.size() && dirIdx < MAX_FILE_TREE_DIRS_OUTPUT; dirIdx++) {
-            JsonNode directory = directoriesNode.get(dirIdx);
-            if (!directory.isObject()) {
-                continue;
-            }
-
-            ObjectNode directoryOut = directoriesOut.addObject();
-            directoryOut.put("path", shortenText(directory.path("path").asText(""), 240));
-
-            ArrayNode filesOut = directoryOut.putArray("files");
-            JsonNode files = directory.path("files");
-            if (files.isArray()) {
-                for (int fileIdx = 0; fileIdx < files.size() && fileIdx < MAX_FILES_PER_DIR_OUTPUT; fileIdx++) {
-                    JsonNode file = files.get(fileIdx);
-                    if (!file.isObject()) {
-                        continue;
-                    }
-
-                    ObjectNode fileOut = filesOut.addObject();
-                    fileOut.put("path", shortenText(file.path("path").asText(""), 260));
-
-                    ArrayNode classesOut = fileOut.putArray("classes");
-                    JsonNode classes = file.path("classes");
-                    if (classes.isArray()) {
-                        for (int classIdx = 0;
-                             classIdx < classes.size() && classIdx < MAX_CLASSES_PER_FILE_OUTPUT;
-                             classIdx++) {
-                            JsonNode clazz = classes.get(classIdx);
-                            if (!clazz.isObject()) {
-                                continue;
-                            }
-
-                            ObjectNode classOut = classesOut.addObject();
-                            classOut.put("symbolId", shortenText(clazz.path("symbolId").asText(""), 180));
-                            classOut.put("name", shortenText(clazz.path("name").asText(""), 120));
-                            classOut.put(
-                                    "summary",
-                                    shortenText(clazz.path("summary").asText(""), MAX_FILE_TREE_SUMMARY_LENGTH)
-                            );
-                            classOut.put("estimated", clazz.path("estimated").asBoolean(false));
-
-                            ArrayNode methodsOut = classOut.putArray("methods");
-                            JsonNode methods = clazz.path("methods");
-                            if (methods.isArray()) {
-                                for (int methodIdx = 0;
-                                     methodIdx < methods.size() && methodIdx < MAX_METHODS_PER_CLASS_OUTPUT;
-                                     methodIdx++) {
-                                    JsonNode method = methods.get(methodIdx);
-                                    if (!method.isObject()) {
-                                        continue;
-                                    }
-                                    ObjectNode methodOut = methodsOut.addObject();
-                                    methodOut.put("symbolId", shortenText(method.path("symbolId").asText(""), 180));
-                                    methodOut.put("name", shortenText(method.path("name").asText(""), 120));
-                                    methodOut.put(
-                                            "summary",
-                                            shortenText(method.path("summary").asText(""), MAX_FILE_TREE_SUMMARY_LENGTH)
-                                    );
-                                    methodOut.put("estimated", method.path("estimated").asBoolean(false));
-                                    methodOut.set("relatedRules", limitTextArray(method.path("relatedRules"), 4));
-                                    methodOut.set("relatedScenarios", limitTextArray(method.path("relatedScenarios"), 3));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if (directoriesOut.size() == 0) {
-            throw new LlmException(LlmErrorCode.RESPONSE_PARSE_FAILED);
-        }
-        return normalized;
-    }
-
-    /**
-     * 공개 API 시드 기준으로 시나리오 evidence 링크를 정리한다.
-     */
-    private JsonNode applyPublicFilterToScenarioSpecs(JsonNode scenarioSpecs, PublicSurfaceIndex index) {
-        if (scenarioSpecs == null || !scenarioSpecs.isObject() || index.isEmpty()) {
-            return scenarioSpecs;
-        }
-        ObjectNode copied = ((ObjectNode) scenarioSpecs).deepCopy();
-        JsonNode scenarios = copied.path("scenarios");
-        if (!scenarios.isArray()) {
-            return copied;
-        }
-        for (JsonNode scenario : scenarios) {
-            if (!scenario.isObject()) {
-                continue;
-            }
-            JsonNode steps = scenario.path("steps");
-            if (!steps.isArray()) {
-                continue;
-            }
-            for (JsonNode step : steps) {
-                if (!step.isObject()) {
-                    continue;
-                }
-                JsonNode evidenceLinks = step.path("evidenceLinks");
-                if (!evidenceLinks.isArray()) {
-                    continue;
-                }
-                ArrayNode filteredLinks = objectMapper.createArrayNode();
-                for (JsonNode link : evidenceLinks) {
-                    if (!link.isObject()) {
-                        continue;
-                    }
-                    String rawPath = link.path("filePath").asText("");
-                    String normalizedPath = normalizeRepoPath(rawPath);
-                    if (normalizedPath.isBlank() || !isPublicMainSourcePath(normalizedPath)) {
-                        continue;
-                    }
-                    if (!index.filePaths().isEmpty() && !index.filePaths().contains(normalizedPath)) {
-                        continue;
-                    }
-                    filteredLinks.add(link);
-                }
-                ((ObjectNode) step).set("evidenceLinks", filteredLinks);
-            }
-        }
-        return copied;
-    }
-
-    /**
-     * API 문서는 공개 API 시드에 매핑되는 항목만 유지한다.
-     */
-    private JsonNode applyPublicFilterToApiDocs(JsonNode apiDocs, PublicSurfaceIndex index) {
-        if (apiDocs == null || !apiDocs.isObject() || index.isEmpty()) {
-            return apiDocs;
-        }
-        JsonNode entries = apiDocs.path("apiEntries");
-        if (!entries.isArray()) {
-            return apiDocs;
-        }
-        ObjectNode filtered = objectMapper.createObjectNode();
-        ArrayNode entriesOut = filtered.putArray("apiEntries");
-        for (JsonNode entry : entries) {
-            if (!entry.isObject()) {
-                continue;
-            }
-            String fqn = entry.path("fqn").asText("");
-            if (!isPublicApiEntry(fqn, index)) {
-                continue;
-            }
-            entriesOut.add(entry);
-        }
-        // 매칭 포맷이 다를 때 전체가 비는 위험을 방지하기 위한 안전 폴백
-        if (entriesOut.isEmpty()) {
-            return apiDocs;
-        }
-        return filtered;
-    }
-
-    /**
-     * file tree 문서는 공개 시드에 존재하는 파일/클래스/메서드만 남긴다.
-     */
-    private JsonNode applyPublicFilterToFileTreeDocs(JsonNode fileTreeDocs, PublicSurfaceIndex index) {
-        if (fileTreeDocs == null || !fileTreeDocs.isObject() || index.isEmpty()) {
-            return fileTreeDocs;
-        }
-        JsonNode directories = fileTreeDocs.path("directories");
-        if (!directories.isArray()) {
-            return fileTreeDocs;
-        }
-
-        ObjectNode filtered = objectMapper.createObjectNode();
-        ArrayNode directoriesOut = filtered.putArray("directories");
-        for (JsonNode directory : directories) {
-            if (!directory.isObject()) {
-                continue;
-            }
-            ArrayNode filesOut = objectMapper.createArrayNode();
-            JsonNode files = directory.path("files");
-            if (files.isArray()) {
-                for (JsonNode file : files) {
-                    if (!file.isObject()) {
-                        continue;
-                    }
-                    String filePath = normalizeRepoPath(file.path("path").asText(""));
-                    if (filePath.isBlank() || !isPublicMainSourcePath(filePath)) {
-                        continue;
-                    }
-                    if (!index.filePaths().isEmpty() && !index.filePaths().contains(filePath)) {
-                        continue;
-                    }
-
-                    ObjectNode fileOut = objectMapper.createObjectNode();
-                    fileOut.put("path", file.path("path").asText(""));
-                    ArrayNode classesOut = fileOut.putArray("classes");
-
-                    JsonNode classes = file.path("classes");
-                    if (classes.isArray()) {
-                        for (JsonNode clazz : classes) {
-                            if (!clazz.isObject() || !isAllowedClassNode(clazz, index)) {
-                                continue;
-                            }
-                            ObjectNode classOut = objectMapper.createObjectNode();
-                            classOut.put("symbolId", clazz.path("symbolId").asText(""));
-                            classOut.put("name", clazz.path("name").asText(""));
-                            classOut.put("summary", clazz.path("summary").asText(""));
-                            classOut.put("estimated", clazz.path("estimated").asBoolean(false));
-
-                            ArrayNode methodsOut = classOut.putArray("methods");
-                            JsonNode methods = clazz.path("methods");
-                            if (methods.isArray()) {
-                                for (JsonNode method : methods) {
-                                    if (!method.isObject() || !isAllowedMethodNode(method, index)) {
-                                        continue;
-                                    }
-                                    methodsOut.add(method);
-                                }
-                            }
-                            classesOut.add(classOut);
-                        }
-                    }
-
-                    if (!classesOut.isEmpty()) {
-                        filesOut.add(fileOut);
-                    }
-                }
-            }
-
-            if (!filesOut.isEmpty()) {
-                ObjectNode dirOut = objectMapper.createObjectNode();
-                dirOut.put("path", directory.path("path").asText(""));
-                dirOut.set("files", filesOut);
-                directoriesOut.add(dirOut);
-            }
-        }
-
-        if (directoriesOut.isEmpty()) {
-            return fileTreeDocs;
-        }
-        return filtered;
-    }
-
-    /**
-     * fileTreeSeed에서 공개 표면(파일/클래스/메서드) 인덱스를 만든다.
-     */
-    private PublicSurfaceIndex buildPublicSurfaceIndex(JsonNode fileTreeStructure) {
-        JsonNode seed = fileTreeStructure.path("pipeline").path("fileTreeSeed");
-        JsonNode directories = seed.path("directories");
-        if (!directories.isArray()) {
-            return PublicSurfaceIndex.empty();
-        }
-
-        Set<String> filePaths = new HashSet<>();
-        Set<String> classSymbolIds = new HashSet<>();
-        Set<String> classQualifiedNames = new HashSet<>();
-        Set<String> classSimpleNames = new HashSet<>();
-        Set<String> methodSymbolIds = new HashSet<>();
-        Set<String> methodQualifiedNames = new HashSet<>();
-        Set<String> methodSimpleNames = new HashSet<>();
-
-        for (JsonNode directory : directories) {
-            JsonNode files = directory.path("files");
-            if (!files.isArray()) {
-                continue;
-            }
-            for (JsonNode file : files) {
-                String filePath = normalizeRepoPath(file.path("path").asText(""));
-                if (!filePath.isBlank() && isPublicMainSourcePath(filePath)) {
-                    filePaths.add(filePath);
-                }
-                JsonNode classes = file.path("classes");
-                if (!classes.isArray()) {
-                    continue;
-                }
-                for (JsonNode clazz : classes) {
-                    addIfNotBlank(classSymbolIds, clazz.path("symbolId").asText(""));
-                    addIfNotBlank(classSimpleNames, clazz.path("name").asText(""));
-                    addIfNotBlank(classQualifiedNames, stripKnownSymbolPrefix(clazz.path("qualifiedName").asText("")));
-
-                    JsonNode methods = clazz.path("methods");
-                    if (!methods.isArray()) {
-                        continue;
-                    }
-                    for (JsonNode method : methods) {
-                        addIfNotBlank(methodSymbolIds, method.path("symbolId").asText(""));
-                        addIfNotBlank(methodSimpleNames, method.path("name").asText(""));
-                        addIfNotBlank(methodQualifiedNames, stripKnownSymbolPrefix(method.path("qualifiedName").asText("")));
-                    }
-                }
-            }
-        }
-
-        return new PublicSurfaceIndex(
-                filePaths,
-                classSymbolIds,
-                classQualifiedNames,
-                classSimpleNames,
-                methodSymbolIds,
-                methodQualifiedNames,
-                methodSimpleNames
-        );
-    }
-
-    private boolean isAllowedClassNode(JsonNode clazz, PublicSurfaceIndex index) {
-        String symbolId = clazz.path("symbolId").asText("");
-        if (!symbolId.isBlank() && index.classSymbolIds().contains(symbolId)) {
-            return true;
-        }
-        String name = clazz.path("name").asText("");
-        return !name.isBlank() && index.classSimpleNames().contains(name);
-    }
-
-    private boolean isAllowedMethodNode(JsonNode method, PublicSurfaceIndex index) {
-        String symbolId = method.path("symbolId").asText("");
-        if (!symbolId.isBlank() && index.methodSymbolIds().contains(symbolId)) {
-            return true;
-        }
-        String name = method.path("name").asText("");
-        return !name.isBlank() && index.methodSimpleNames().contains(name);
-    }
-
-    private boolean isPublicApiEntry(String rawFqn, PublicSurfaceIndex index) {
-        if (rawFqn == null || rawFqn.isBlank()) {
-            return false;
-        }
-        String fqn = stripKnownSymbolPrefix(rawFqn.trim());
-        if (index.classQualifiedNames().contains(fqn) || index.methodQualifiedNames().contains(fqn)) {
-            return true;
-        }
-
-        String className = extractClassNameFromFqn(fqn);
-        if (className.isBlank()) {
-            return false;
-        }
-        if (!index.classQualifiedNames().contains(className)) {
-            return false;
-        }
-        String methodName = extractMethodNameFromFqn(fqn);
-        return methodName.isBlank() || index.methodSimpleNames().contains(methodName);
-    }
-
-    private String extractClassNameFromFqn(String fqn) {
-        if (fqn == null || fqn.isBlank()) {
-            return "";
-        }
-        int hashIdx = fqn.indexOf('#');
-        if (hashIdx > 0) {
-            return fqn.substring(0, hashIdx);
-        }
-        int parenIdx = fqn.indexOf('(');
-        if (parenIdx > 0) {
-            int dotIdx = fqn.lastIndexOf('.', parenIdx);
-            if (dotIdx > 0) {
-                return fqn.substring(0, dotIdx);
-            }
-        }
-        return fqn;
-    }
-
-    private String extractMethodNameFromFqn(String fqn) {
-        if (fqn == null || fqn.isBlank()) {
-            return "";
-        }
-        int hashIdx = fqn.indexOf('#');
-        if (hashIdx >= 0) {
-            String suffix = fqn.substring(hashIdx + 1);
-            int parenIdx = suffix.indexOf('(');
-            return parenIdx >= 0 ? suffix.substring(0, parenIdx) : suffix;
-        }
-        int parenIdx = fqn.indexOf('(');
-        if (parenIdx > 0) {
-            int dotIdx = fqn.lastIndexOf('.', parenIdx);
-            if (dotIdx >= 0 && dotIdx < parenIdx) {
-                return fqn.substring(dotIdx + 1, parenIdx);
-            }
-        }
-        return "";
-    }
-
-    private String stripKnownSymbolPrefix(String raw) {
-        if (raw == null) {
-            return "";
-        }
-        String value = raw.trim();
-        String[] prefixes = {"method:", "ctor:", "type:", "class:"};
-        for (String prefix : prefixes) {
-            if (value.startsWith(prefix)) {
-                return value.substring(prefix.length());
-            }
-        }
-        return value;
-    }
-
-    private String normalizeRepoPath(String rawPath) {
-        if (rawPath == null) {
-            return "";
-        }
-        return rawPath.trim().replace('\\', '/');
-    }
-
-    private boolean isPublicMainSourcePath(String path) {
-        return path != null && path.contains("src/main/java/");
-    }
-
-    private void addIfNotBlank(Set<String> target, String value) {
-        if (value != null && !value.isBlank()) {
-            target.add(value.trim());
-        }
-    }
-
-    private record PublicSurfaceIndex(
-            Set<String> filePaths,
-            Set<String> classSymbolIds,
-            Set<String> classQualifiedNames,
-            Set<String> classSimpleNames,
-            Set<String> methodSymbolIds,
-            Set<String> methodQualifiedNames,
-            Set<String> methodSimpleNames
+    private String buildScenarioContext(
+            JsonNode structure,
+            JsonNode refinedRules,
+            List<LlmRequest.EvidenceSnippet> evidence
     ) {
-        private static PublicSurfaceIndex empty() {
-            return new PublicSurfaceIndex(
-                    Set.of(),
-                    Set.of(),
-                    Set.of(),
-                    Set.of(),
-                    Set.of(),
-                    Set.of(),
-                    Set.of()
-            );
-        }
-
-        private boolean isEmpty() {
-            return filePaths.isEmpty()
-                    && classSymbolIds.isEmpty()
-                    && classQualifiedNames.isEmpty()
-                    && classSimpleNames.isEmpty()
-                    && methodSymbolIds.isEmpty()
-                    && methodQualifiedNames.isEmpty()
-                    && methodSimpleNames.isEmpty();
-        }
+        ObjectNode context = objectMapper.createObjectNode();
+        context.set("overviewSeed", structure.path("overviewSeed"));
+        context.set("coreClassSeed", takeFirst(structure.path("coreClassSeed"), 8));
+        context.set("coreMethodSeed", takeFirst(structure.path("coreMethodSeed"), 14));
+        context.set("methodFlowSeed", takeFirst(structure.path("methodFlowSeed"), 6));
+        context.set("cautions", takeFirst(refinedRules.path("cautions"), 8));
+        context.set("evidence", toEvidenceNode(evidence, 12));
+        return toJson(context);
     }
 
-    private JsonNode extractScenarioArray(JsonNode rawScenarioSpecs) {
-        if (rawScenarioSpecs == null || rawScenarioSpecs.isMissingNode() || rawScenarioSpecs.isNull()) {
-            return null;
+    private ArrayNode takeFirst(JsonNode arrayNode, int limit) {
+        ArrayNode out = objectMapper.createArrayNode();
+        if (arrayNode == null || !arrayNode.isArray()) {
+            return out;
         }
-        JsonNode scenarios = rawScenarioSpecs.path("scenarios");
-        if (scenarios.isArray()) {
-            return scenarios;
+        for (int i = 0; i < arrayNode.size() && i < limit; i++) {
+            out.add(arrayNode.get(i));
         }
+        return out;
+    }
 
-        JsonNode nestedScenarios = rawScenarioSpecs.findValue("scenarios");
-        if (nestedScenarios != null && nestedScenarios.isArray()) {
-            return nestedScenarios;
+    private JsonNode toEvidenceNode(List<LlmRequest.EvidenceSnippet> evidence, int maxCount) {
+        ArrayNode out = objectMapper.createArrayNode();
+        if (evidence == null || evidence.isEmpty()) {
+            return out;
         }
-        return null;
+        for (LlmRequest.EvidenceSnippet item : evidence) {
+            if (out.size() >= maxCount || item == null) {
+                break;
+            }
+            ObjectNode node = out.addObject();
+            if (item.getEvidenceId() != null) {
+                node.put("evidenceId", item.getEvidenceId());
+            }
+            putIfText(node, "filePath", shortenText(item.getFilePath(), 220));
+            if (item.getStartLine() != null) {
+                if (item.getEndLine() != null) {
+                    node.put("lines", item.getStartLine() + "-" + item.getEndLine());
+                } else {
+                    node.put("lines", String.valueOf(item.getStartLine()));
+                }
+            }
+            putIfText(node, "snippet", shortenText(item.getSnippet(), 120));
+            putIfText(node, "evidenceType", shortenText(item.getEvidenceType(), 40));
+        }
+        return out;
+    }
+
+    private ArrayNode limitLongArray(JsonNode source, int maxCount) {
+        ArrayNode out = objectMapper.createArrayNode();
+        if (source == null || !source.isArray()) {
+            return out;
+        }
+        for (int i = 0; i < source.size() && out.size() < maxCount; i++) {
+            JsonNode value = source.get(i);
+            if (value.canConvertToLong()) {
+                out.add(value.asLong());
+            }
+        }
+        return out;
+    }
+
+    private ArrayNode toTextArray(List<String> values) {
+        ArrayNode out = objectMapper.createArrayNode();
+        for (String value : values) {
+            String normalized = shortenText(value, 120);
+            if (!normalized.isBlank()) {
+                out.add(normalized);
+            }
+        }
+        return out;
     }
 
     private JsonNode extractArrayByKey(JsonNode raw, String key) {
         if (raw == null || raw.isMissingNode() || raw.isNull()) {
-            return null;
+            return NullNode.getInstance();
         }
-        JsonNode direct = raw.path(key);
-        if (direct.isArray()) {
-            return direct;
+        if (raw.isArray()) {
+            return raw;
         }
-        JsonNode nested = raw.findValue(key);
-        if (nested != null && nested.isArray()) {
-            return nested;
-        }
-        return null;
+        JsonNode value = raw.path(key);
+        return value.isArray() ? value : NullNode.getInstance();
     }
 
     private boolean isResponseParseFailed(LlmException e) {
         return e != null && LlmErrorCode.RESPONSE_PARSE_FAILED.equals(e.getCode());
     }
 
-    /**
-     * 紐⑤뜽 ?대갚? ?쇱떆 API ?ㅽ뙣/?뚯떛 ?ㅽ뙣???뚮쭔 ?덉슜?쒕떎.
-     */
-    private boolean canFallbackToSonnet(LlmException e, String primaryModel, String fallbackModel) {
-        if (e == null) {
-            return false;
+    private double normalizeConfidence(double value) {
+        if (Double.isNaN(value) || value <= 0.0d) {
+            return 0.70d;
         }
-        boolean fallbackError = LlmErrorCode.RESPONSE_PARSE_FAILED.equals(e.getCode())
-                || LlmErrorCode.CLAUDE_API_CALL_FAILED.equals(e.getCode())
-                || LlmErrorCode.CLAUDE_API_ERROR.equals(e.getCode());
-        if (!fallbackError) {
-            return false;
+        if (value > 1.0d) {
+            return 1.0d;
         }
-        if (fallbackModel == null || fallbackModel.isBlank()) {
-            return false;
-        }
-        return primaryModel == null || !fallbackModel.equalsIgnoreCase(primaryModel.trim());
+        return Math.round(value * 100.0d) / 100.0d;
     }
 
-    /**
-     * Haiku 紐⑤뜽??鍮꾩뼱 ?덉쑝硫?Sonnet 紐⑤뜽濡??덉쟾?섍쾶 ?泥댄븳??
-     */
-    private String resolveHaikuModel() {
+    private String applyLanguagePolicy(String basePrompt) {
+        return basePrompt + "\n\n언어 정책:\n" + KOREAN_POLICY;
+    }
+
+    private String resolvePrimaryModel() {
         String haikuModel = llmConfig.getHaikuModel();
         if (haikuModel == null || haikuModel.isBlank()) {
             return llmConfig.getModel();
@@ -1818,39 +1110,27 @@ public class LlmService {
         return haikuModel.trim();
     }
 
-    private String sanitizeModel(String model) {
-        if (model == null || model.isBlank()) {
-            return llmConfig.getModel();
+    private boolean canFallbackToSonnet(LlmException e, String primaryModel, String fallbackModel) {
+        if (e == null) {
+            return false;
         }
-        return model.trim();
+        boolean retryable = LlmErrorCode.RESPONSE_PARSE_FAILED.equals(e.getCode())
+                || LlmErrorCode.CLAUDE_API_CALL_FAILED.equals(e.getCode())
+                || LlmErrorCode.CLAUDE_API_ERROR.equals(e.getCode());
+        if (!retryable || fallbackModel == null || fallbackModel.isBlank()) {
+            return false;
+        }
+        return primaryModel == null || !fallbackModel.equalsIgnoreCase(primaryModel.trim());
     }
 
-    /**
-     * Claude API瑜??몄텧?섍퀬 JSON ?묐떟???뚯떛?쒕떎.
-     */
-    private JsonNode callClaude(String systemPrompt, String userMessage) {
-        return callClaude(systemPrompt, userMessage, llmConfig.getMaxTokens());
-    }
-
-    /**
-     * ?④퀎蹂?異쒕젰 ?좏겙 ?곹븳???곸슜??Claude瑜??몄텧?쒕떎.
-     */
-    private JsonNode callClaude(String systemPrompt, String userMessage, int maxTokens) {
-        return callClaudeWithModel(systemPrompt, userMessage, maxTokens, llmConfig.getModel());
-    }
-
-    /**
-     * Step2~5?먯꽌??Haiku瑜??곗꽑 ?몄텧?섍퀬 ?ㅽ뙣 ??Sonnet?쇰줈 1???대갚?쒕떎.
-     */
     private JsonNode callClaudeWithHaikuFallback(
             String stepName,
             String systemPrompt,
             String userMessage,
             int maxTokens
     ) {
-        String primaryModel = resolveHaikuModel();
+        String primaryModel = resolvePrimaryModel();
         String fallbackModel = llmConfig.getModel();
-
         try {
             return callClaudeWithModel(systemPrompt, userMessage, maxTokens, primaryModel);
         } catch (LlmException firstFailure) {
@@ -1867,9 +1147,6 @@ public class LlmService {
         }
     }
 
-    /**
-     * 吏?뺥븳 紐⑤뜽濡?Claude API瑜??몄텧?쒕떎.
-     */
     private JsonNode callClaudeWithModel(
             String systemPrompt,
             String userMessage,
@@ -1877,8 +1154,7 @@ public class LlmService {
             String model
     ) {
         int effectiveMaxTokens = Math.max(1, Math.min(maxTokens, llmConfig.getMaxTokens()));
-        String effectiveModel = sanitizeModel(model);
-        String requestBody = buildRequestBody(effectiveModel, systemPrompt, userMessage, effectiveMaxTokens);
+        String requestBody = buildRequestBody(sanitizeModel(model), systemPrompt, userMessage, effectiveMaxTokens);
 
         for (int attempt = 1; attempt <= MAX_CLAUDE_RETRY_ATTEMPTS + 1; attempt++) {
             try {
@@ -1893,51 +1169,40 @@ public class LlmService {
             } catch (RestClientResponseException e) {
                 int status = e.getStatusCode().value();
                 if (!isRetryableStatus(status) || attempt > MAX_CLAUDE_RETRY_ATTEMPTS) {
-                    log.error(
-                            "[LlmService] Claude API call failed. model={}, status={}, message={}",
-                            effectiveModel,
-                            status,
-                            e.getMessage()
-                    );
+                    log.error("[LlmService] Claude API call failed. status={}, message={}", status, e.getMessage());
                     throw new LlmException(LlmErrorCode.CLAUDE_API_CALL_FAILED);
                 }
-                long delayMillis = resolveRetryDelayMillis(e, attempt);
+                long delay = resolveRetryDelayMillis(e, attempt);
                 log.warn(
-                        "[LlmService] Claude API temporary failure. model={}, status={}, attempt={}/{}, retryDelayMs={}",
-                        effectiveModel,
+                        "[LlmService] Claude API temporary failure. status={}, attempt={}/{}, retryDelayMs={}",
                         status,
                         attempt,
                         MAX_CLAUDE_RETRY_ATTEMPTS + 1,
-                        delayMillis
+                        delay
                 );
-                sleepForRetry(delayMillis);
+                sleepForRetry(delay);
             } catch (Exception e) {
                 if (attempt > MAX_CLAUDE_RETRY_ATTEMPTS) {
-                    log.error("[LlmService] Claude API call failed. model={}, message={}", effectiveModel, e.getMessage());
+                    log.error("[LlmService] Claude API call failed. message={}", e.getMessage());
                     throw new LlmException(LlmErrorCode.CLAUDE_API_CALL_FAILED);
                 }
-                long delayMillis = Math.min(
+                long delay = Math.min(
                         BASE_RETRY_DELAY_MILLIS * (1L << Math.min(attempt - 1, 3)),
                         MAX_RETRY_DELAY_MILLIS
                 );
-                log.warn(
-                        "[LlmService] Claude API transient error. model={}, attempt={}/{}, retryDelayMs={}, message={}",
-                        effectiveModel,
-                        attempt,
-                        MAX_CLAUDE_RETRY_ATTEMPTS + 1,
-                        delayMillis,
-                        e.getMessage()
-                );
-                sleepForRetry(delayMillis);
+                sleepForRetry(delay);
             }
         }
-
         throw new LlmException(LlmErrorCode.CLAUDE_API_CALL_FAILED);
     }
 
-    /**
-     * Anthropic API 洹쒓꺽??留욌뒗 ?붿껌 JSON???앹꽦?쒕떎.
-     */
+    private String sanitizeModel(String model) {
+        if (model == null || model.isBlank()) {
+            return llmConfig.getModel();
+        }
+        return model.trim();
+    }
+
     private String buildRequestBody(String model, String systemPrompt, String userMessage, int maxTokens) {
         try {
             ObjectNode root = objectMapper.createObjectNode();
@@ -1946,9 +1211,9 @@ public class LlmService {
             root.put("system", systemPrompt);
 
             ArrayNode messages = root.putArray("messages");
-            ObjectNode userMessageNode = messages.addObject();
-            userMessageNode.put("role", "user");
-            userMessageNode.put("content", userMessage);
+            ObjectNode user = messages.addObject();
+            user.put("role", "user");
+            user.put("content", userMessage);
 
             return objectMapper.writeValueAsString(root);
         } catch (JsonProcessingException e) {
@@ -1956,44 +1221,40 @@ public class LlmService {
         }
     }
 
-    /**
-     * Claude ?묐떟(content[].text)??JSON?쇰줈 ?뚯떛?쒕떎.
-     */
     private JsonNode parseResponse(String raw) {
         try {
             JsonNode root = objectMapper.readTree(raw);
             if (root.has("error")) {
-                String message = root.path("error").path("message").asText("unknown");
-                log.error("[LlmService] Claude API error. message={}", message);
+                log.error("[LlmService] Claude API error. message={}", root.path("error").path("message").asText("unknown"));
                 throw new LlmException(LlmErrorCode.CLAUDE_API_ERROR);
             }
-            String stopReason = root.path("stop_reason").asText("");
 
+            String stopReason = root.path("stop_reason").asText("");
             String textContent = "";
             for (JsonNode block : root.path("content")) {
-                if ("text".equals(block.path("type").asText())) {
+                if ("text".equals(block.path("type").asText(""))) {
                     textContent = block.path("text").asText("");
                     break;
                 }
             }
+
             String jsonPayload = stripFence(textContent.trim());
             if (jsonPayload.isBlank()) {
-                log.error("[LlmService] Claude response content is empty. stop_reason={}", stopReason);
                 throw new LlmException(LlmErrorCode.RESPONSE_PARSE_FAILED);
             }
 
             try {
                 return objectMapper.readTree(jsonPayload);
-            } catch (Exception parseException) {
+            } catch (Exception parseFail) {
                 if ("max_tokens".equalsIgnoreCase(stopReason)) {
                     log.warn("[LlmService] Claude response truncated by max_tokens.");
                 }
                 JsonNode recovered = tryRecoverTruncatedJson(jsonPayload);
                 if (recovered != null) {
-                    log.warn("[LlmService] Recovered truncated Claude JSON response.");
+                    log.warn("[LlmService] Recovered truncated response.");
                     return recovered;
                 }
-                throw parseException;
+                throw parseFail;
             }
         } catch (LlmException e) {
             throw e;
@@ -2003,19 +1264,14 @@ public class LlmService {
         }
     }
 
-    /**
-     * LLM??markdown code fence濡?媛먯? 寃쎌슦 fence瑜??쒓굅?쒕떎.
-     */
     private String stripFence(String text) {
         if (!text.startsWith("```")) {
             return text;
         }
-
         int firstNewline = text.indexOf('\n');
         if (firstNewline < 0) {
             return text.replace("```", "").trim();
         }
-
         String body = text.substring(firstNewline + 1);
         int lastFence = body.lastIndexOf("```");
         if (lastFence >= 0) {
@@ -2024,9 +1280,6 @@ public class LlmService {
         return body.trim();
     }
 
-    /**
-     * 異쒕젰 ?덈떒 ???ロ엳吏 ?딆? 愿꾪샇/諛곗뿴??蹂댁젙???뚯떛???ъ떆?꾪븳??
-     */
     private JsonNode tryRecoverTruncatedJson(String payload) {
         if (payload == null || payload.isBlank()) {
             return null;
@@ -2083,7 +1336,6 @@ public class LlmService {
             if (inString) {
                 continue;
             }
-
             if (ch == '{') {
                 openObject++;
             } else if (ch == '}') {
@@ -2098,338 +1350,16 @@ public class LlmService {
         if (inString) {
             sb.append('"');
         }
-
         for (int i = 0; i < openArray; i++) {
             sb.append(']');
         }
         for (int i = 0; i < openObject; i++) {
             sb.append('}');
         }
-
         return sb.toString()
                 .replaceAll(",\\s*}", "}")
                 .replaceAll(",\\s*]", "]")
                 .trim();
-    }
-
-    /**
-     * 援ъ“ ?붿쭊 寃곌낵 + evidence bundle??LLM ?낅젰 ?띿뒪?몃줈 議고빀?쒕떎.
-     */
-    private String buildContext(
-            Object structureEngineOutput,
-            Iterable<LlmRequest.EvidenceSnippet> evidenceBundle
-    ) {
-        StringBuilder sb = new StringBuilder();
-
-        sb.append("=== Structure ===\n");
-        sb.append(toJson(structureEngineOutput));
-        sb.append("\n\n=== Evidence ===\n");
-
-        if (evidenceBundle != null) {
-            for (LlmRequest.EvidenceSnippet evidence : evidenceBundle) {
-                sb.append("[id=")
-                        .append(evidence.getEvidenceId() == null ? "N/A" : evidence.getEvidenceId())
-                        .append(",type=")
-                        .append(evidence.getEvidenceType() == null ? "UNKNOWN" : evidence.getEvidenceType())
-                        .append(",file=")
-                        .append(evidence.getFilePath() == null ? "UNKNOWN" : evidence.getFilePath())
-                        .append(",lines=")
-                        .append(evidence.getStartLine() == null ? "?" : evidence.getStartLine())
-                        .append("-")
-                        .append(evidence.getEndLine() == null ? "?" : evidence.getEndLine())
-                        .append("] ");
-                sb.append(evidence.getSnippet() == null ? "" : evidence.getSnippet()).append("\n");
-            }
-        }
-
-        return sb.toString();
-    }
-
-    private String appendContextSection(String baseContext, String title, Object content) {
-        return baseContext + "\n\n--- " + title + " ---\n" + toJson(content);
-    }
-
-    /**
-     * Step1? rule candidate ?뺤젣留??섑뻾?섎?濡? 泥?겕留덈떎 諛섎났?섎뒗 ???援ъ“瑜??쒓굅??     * ?꾩넚 ?좏겙??理쒖냼?뷀븳??
-     */
-    private JsonNode buildRuleRefinementStructureContext(JsonNode generalStructure) {
-        if (generalStructure == null || !generalStructure.isObject()) {
-            return generalStructure;
-        }
-
-        ObjectNode context = objectMapper.createObjectNode();
-        copyIfPresent(context, generalStructure, "runId", "language", "qualityGate");
-
-        ObjectNode pipelineOut = context.putObject("pipeline");
-        JsonNode pipelineIn = generalStructure.path("pipeline");
-        if (pipelineIn.isObject()) {
-            JsonNode ruleCandidates = pipelineIn.path("ruleCandidates");
-            if (!ruleCandidates.isMissingNode() && !ruleCandidates.isNull()) {
-                pipelineOut.set("ruleCandidates", ruleCandidates);
-            }
-        }
-
-        JsonNode displayHints = generalStructure.path("displayHints");
-        if (displayHints.isObject()) {
-            ObjectNode hintsOut = objectMapper.createObjectNode();
-            JsonNode ruleDisplayPolicy = displayHints.path("ruleDisplayPolicy");
-            if (!ruleDisplayPolicy.isMissingNode() && !ruleDisplayPolicy.isNull()) {
-                hintsOut.set("ruleDisplayPolicy", ruleDisplayPolicy);
-            }
-            if (hintsOut.size() > 0) {
-                context.set("displayHints", hintsOut);
-            }
-        }
-        return context;
-    }
-
-    private ObjectNode createRuleChunkRoot(JsonNode ruleStructure) {
-        ObjectNode root = objectMapper.createObjectNode();
-        copyIfPresent(root, ruleStructure, "runId", "language", "qualityGate", "displayHints");
-
-        JsonNode pipelineIn = ruleStructure.path("pipeline");
-        ObjectNode pipelineOut = root.putObject("pipeline");
-        if (pipelineIn.isObject()) {
-            JsonNode ruleCandidates = pipelineIn.path("ruleCandidates");
-            if (ruleCandidates.isObject()) {
-                ObjectNode ruleCandidatesOut = objectMapper.createObjectNode();
-                copyIfPresent(ruleCandidatesOut, ruleCandidates, "schemaVersion", "schema_version", "summary", "displayPolicy");
-                pipelineOut.set("ruleCandidates", ruleCandidatesOut);
-            }
-        }
-        return root;
-    }
-
-    private void copyIfPresent(ObjectNode target, JsonNode source, String... keys) {
-        if (target == null || source == null || keys == null) {
-            return;
-        }
-        for (String key : keys) {
-            JsonNode value = source.path(key);
-            if (!value.isMissingNode() && !value.isNull()) {
-                target.set(key, value);
-            }
-        }
-    }
-
-    // Step 1~4?먯꽌??fileTreeSeed瑜??쒖쇅??而⑦뀓?ㅽ듃 以묐났??以꾩씤??
-    private JsonNode buildGeneralStructureContext(JsonNode structureNode) {
-        if (structureNode == null || !structureNode.isObject()) {
-            return structureNode;
-        }
-        ObjectNode copied = ((ObjectNode) structureNode).deepCopy();
-        copied.remove("fileTreeSeed");
-        JsonNode pipeline = copied.path("pipeline");
-        if (pipeline.isObject()) {
-            ((ObjectNode) pipeline).remove("fileTreeSeed");
-        }
-        return copied;
-    }
-
-    // Step 5???뚯씪 ?몃━ 臾몃㎘留??ъ슜???좏겙 鍮꾩슜??以꾩씠怨??꾨떖 ?ㅻ챸 ?앹꽦??吏묒쨷?쒕떎.
-    private JsonNode buildFileTreeOnlyContext(JsonNode structureNode) {
-        ObjectNode context = objectMapper.createObjectNode();
-        if (structureNode == null || !structureNode.isObject()) {
-            return context;
-        }
-
-        if (structureNode.has("runId")) {
-            context.set("runId", structureNode.get("runId"));
-        }
-        if (structureNode.has("generatedAt")) {
-            context.set("generatedAt", structureNode.get("generatedAt"));
-        }
-        if (structureNode.has("language")) {
-            context.set("language", structureNode.get("language"));
-        }
-        if (structureNode.has("qualityGate")) {
-            context.set("qualityGate", structureNode.get("qualityGate"));
-        }
-        if (structureNode.has("displayHints")) {
-            context.set("displayHints", structureNode.get("displayHints"));
-        }
-
-        JsonNode fileTreeSeed = structureNode.path("fileTreeSeed");
-        if ((fileTreeSeed == null || fileTreeSeed.isMissingNode() || fileTreeSeed.isNull())
-                && structureNode.path("pipeline").path("fileTreeSeed") != null) {
-            fileTreeSeed = structureNode.path("pipeline").path("fileTreeSeed");
-        }
-
-        ObjectNode pipeline = context.putObject("pipeline");
-        if (fileTreeSeed != null && !fileTreeSeed.isMissingNode() && !fileTreeSeed.isNull()) {
-            pipeline.set("fileTreeSeed", fileTreeSeed);
-        }
-        return context;
-    }
-
-    /**
-     * Step1 ?댄썑?먮뒗 ??⑸웾 ?먮낯 ?꾨낫/?ｌ? 而⑦뀓?ㅽ듃瑜?嫄룹뼱?댁뼱 Step2~4 ?낅젰??寃쎈웾?뷀븳??
-     */
-    private JsonNode buildPostRefinementStructureContext(JsonNode generalStructure) {
-        if (generalStructure == null || !generalStructure.isObject()) {
-            return generalStructure;
-        }
-        ObjectNode copied = ((ObjectNode) generalStructure).deepCopy();
-        JsonNode pipeline = copied.path("pipeline");
-        if (!pipeline.isObject()) {
-            return copied;
-        }
-
-        ObjectNode pipelineObj = (ObjectNode) pipeline;
-        JsonNode ruleCandidates = pipelineObj.path("ruleCandidates");
-        if (ruleCandidates.isObject()) {
-            ((ObjectNode) ruleCandidates).remove("candidates");
-        }
-        // Step2~4??怨듦컻 ?ъ슜??以묒떖 ?쒖닠??紐⑹쟻?대?濡???⑸웾/?대?援ы쁽 以묒떖 ?낅젰???쒓굅?쒕떎.
-        pipelineObj.remove("facts");
-        pipelineObj.remove("classDiagram");
-        pipelineObj.remove("rankings");
-        return copied;
-    }
-
-    private JsonNode limitRefinedRulesForContext(JsonNode refinedRules) {
-        ObjectNode limited = objectMapper.createObjectNode();
-        JsonNode rules = refinedRules == null ? null : refinedRules.path("rules");
-        limited.set("rules", takeFirst(rules, MAX_REFINED_RULES_FOR_CONTEXT));
-        return limited;
-    }
-
-    private JsonNode limitScenarioSpecsForContext(JsonNode scenarioSpecs) {
-        ObjectNode limited = objectMapper.createObjectNode();
-        ArrayNode scenariosOut = objectMapper.createArrayNode();
-        JsonNode scenarios = scenarioSpecs == null ? null : scenarioSpecs.path("scenarios");
-        if (scenarios != null && scenarios.isArray()) {
-            for (int i = 0; i < scenarios.size() && i < MAX_SCENARIOS_FOR_CONTEXT; i++) {
-                JsonNode scenario = scenarios.get(i);
-                JsonNode copied = scenario.deepCopy();
-                if (copied.isObject()) {
-                    ObjectNode scenarioObj = (ObjectNode) copied;
-                    JsonNode steps = scenarioObj.path("steps");
-                    if (steps.isArray()) {
-                        scenarioObj.set("steps", takeFirst(steps, MAX_STEPS_PER_SCENARIO_FOR_CONTEXT));
-                    }
-                }
-                scenariosOut.add(copied);
-            }
-        }
-        limited.set("scenarios", scenariosOut);
-        return limited;
-    }
-
-    private JsonNode limitSubsystemSummariesForContext(JsonNode subsystemSummaries) {
-        ObjectNode limited = objectMapper.createObjectNode();
-        JsonNode subsystems = subsystemSummaries == null ? null : subsystemSummaries.path("subsystems");
-        limited.set("subsystems", takeFirst(subsystems, MAX_SUBSYSTEMS_FOR_CONTEXT));
-        return limited;
-    }
-
-    private JsonNode limitApiDocsForContext(JsonNode apiDocs) {
-        ObjectNode limited = objectMapper.createObjectNode();
-        JsonNode entries = apiDocs == null ? null : apiDocs.path("apiEntries");
-        limited.set("apiEntries", takeFirst(entries, MAX_API_ENTRIES_FOR_CONTEXT));
-        return limited;
-    }
-
-    /**
-     * Step5?먯꽌??洹쒖튃 ?꾩껜 ????꾨떖 硫뷀?(ruleId/name/classification)留??꾨떖?쒕떎.
-     */
-    private JsonNode compactRefinedRulesForFileTreeContext(JsonNode refinedRules) {
-        ObjectNode limited = objectMapper.createObjectNode();
-        ArrayNode compactRules = objectMapper.createArrayNode();
-        JsonNode rules = refinedRules == null ? null : refinedRules.path("rules");
-        if (rules != null && rules.isArray()) {
-            for (int i = 0; i < rules.size() && i < MAX_FILE_TREE_RULES_FOR_CONTEXT; i++) {
-                JsonNode rule = rules.get(i);
-                if (!rule.isObject()) {
-                    continue;
-                }
-                ObjectNode compactRule = compactRules.addObject();
-                compactRule.put("ruleId", rule.path("ruleId").asText(""));
-                compactRule.put("name", rule.path("name").asText(""));
-                compactRule.put("classification", rule.path("classification").asText(""));
-                if (rule.has("confidence")) {
-                    compactRule.put("confidence", rule.path("confidence").asDouble(0.0d));
-                }
-            }
-        }
-        limited.set("rules", compactRules);
-        return limited;
-    }
-
-    /**
-     * Step5?먯꽌???쒕굹由ъ삤瑜??꾨떖 媛?ν븳 ?붿빟 ?뺥깭濡?以꾩씠怨?evidenceLinks 媛숈? ?λЦ ?꾨뱶瑜??쒓굅?쒕떎.
-     */
-    private JsonNode compactScenarioSpecsForFileTreeContext(JsonNode scenarioSpecs) {
-        ObjectNode limited = objectMapper.createObjectNode();
-        ArrayNode scenariosOut = objectMapper.createArrayNode();
-        JsonNode scenarios = scenarioSpecs == null ? null : scenarioSpecs.path("scenarios");
-        if (scenarios != null && scenarios.isArray()) {
-            for (int i = 0; i < scenarios.size() && i < MAX_FILE_TREE_SCENARIOS_FOR_CONTEXT; i++) {
-                JsonNode scenario = scenarios.get(i);
-                if (!scenario.isObject()) {
-                    continue;
-                }
-
-                ObjectNode scenarioOut = scenariosOut.addObject();
-                scenarioOut.put("scenarioId", scenario.path("scenarioId").asText(""));
-                scenarioOut.put("title", scenario.path("title").asText(""));
-                scenarioOut.put("subsystem", scenario.path("subsystem").asText(""));
-
-                ArrayNode stepsOut = scenarioOut.putArray("steps");
-                JsonNode steps = scenario.path("steps");
-                if (steps.isArray()) {
-                    for (int stepIdx = 0;
-                         stepIdx < steps.size() && stepIdx < MAX_FILE_TREE_STEPS_PER_SCENARIO;
-                         stepIdx++) {
-                        JsonNode step = steps.get(stepIdx);
-                        ObjectNode stepOut = stepsOut.addObject();
-                        stepOut.put("stepNo", step.path("stepNo").asInt(stepIdx + 1));
-                        stepOut.put("description", shortenText(step.path("description").asText(""), 120));
-                    }
-                }
-            }
-        }
-        limited.set("scenarios", scenariosOut);
-        return limited;
-    }
-
-    /**
-     * Step5?먯꽌??public API ?곌껐 紐⑹쟻??理쒖냼 ?꾨뱶留??꾨떖?쒕떎.
-     */
-    private JsonNode compactApiDocsForFileTreeContext(JsonNode apiDocs) {
-        ObjectNode limited = objectMapper.createObjectNode();
-        ArrayNode entriesOut = objectMapper.createArrayNode();
-        JsonNode entries = apiDocs == null ? null : apiDocs.path("apiEntries");
-        if (entries != null && entries.isArray()) {
-            for (int i = 0; i < entries.size() && i < MAX_FILE_TREE_API_ENTRIES_FOR_CONTEXT; i++) {
-                JsonNode entry = entries.get(i);
-                if (!entry.isObject()) {
-                    continue;
-                }
-                ObjectNode entryOut = entriesOut.addObject();
-                entryOut.put("fqn", entry.path("fqn").asText(""));
-                entryOut.put("summary", shortenText(entry.path("summary").asText(""), 140));
-                entryOut.put("subsystem", entry.path("subsystem").asText(""));
-
-                JsonNode relatedScenarios = entry.path("relatedScenarios");
-                if (relatedScenarios.isArray()) {
-                    entryOut.set("relatedScenarios", takeFirst(relatedScenarios, MAX_FILE_TREE_RELATED_SCENARIOS_PER_API));
-                }
-            }
-        }
-        limited.set("apiEntries", entriesOut);
-        return limited;
-    }
-
-    private ArrayNode takeFirst(JsonNode arrayNode, int limit) {
-        ArrayNode out = objectMapper.createArrayNode();
-        if (arrayNode == null || !arrayNode.isArray()) {
-            return out;
-        }
-        for (int i = 0; i < arrayNode.size() && i < limit; i++) {
-            out.add(arrayNode.get(i));
-        }
-        return out;
     }
 
     private boolean isRetryableStatus(int status) {
@@ -2448,7 +1378,7 @@ public class LlmService {
                     return Math.min(seconds * 1000L, MAX_RETRY_DELAY_MILLIS);
                 }
             } catch (NumberFormatException ignored) {
-                // retry-after ?ㅻ뜑媛 珥??⑥쐞 ?レ옄媛 ?꾨땶 寃쎌슦 諛깆삤??湲곕낯媛믪쓣 ?ъ슜
+                // 헤더 값이 비정상이면 기본 백오프로 진행한다.
             }
         }
         return Math.min(
@@ -2466,28 +1396,40 @@ public class LlmService {
         }
     }
 
-    /**
-     * JSON? ?좎??섍퀬 ?먯뿰?대뒗 吏?뺣맂 ?몄뼱濡?異쒕젰?섎룄濡??꾨＼?꾪듃 ?몄뼱 ?뺤콉??遺李⑺븳??
-     */
-    private String applyLanguagePolicy(String basePrompt, String languageInstruction) {
-        return basePrompt + "\n\n언어 정책:\n" + languageInstruction
-                + "\n- 마크다운은 금지하고, 유효한 JSON만 출력한다.";
-    }
-
-    private String buildLanguageInstruction(boolean preferKorean) {
-        if (preferKorean) {
-            return "- JSON 형태는 요청 스키마를 정확히 준수한다.\n"
-                    + "- 자연어 필드(summary/description/title/condition 등)는 모두 한국어로 작성한다.\n"
-                    + "- 불확실한 내용은 추정 표시를 명시한다.";
+    private void putIfText(ObjectNode node, String key, String value) {
+        if (node == null || key == null || value == null) {
+            return;
         }
-        return "- JSON must strictly follow the requested schema.\n"
-                + "- Natural-language fields (summary/description/title/condition) must be written in English.\n"
-                + "- Mark uncertain statements explicitly.";
+        String trimmed = value.trim();
+        if (!trimmed.isBlank()) {
+            node.put(key, trimmed);
+        }
     }
 
-    /**
-     * Object/JsonNode瑜?JSON 臾몄옄?대줈 蹂?섑븳??
-     */
+    private String safeText(String value) {
+        return value == null ? "" : value.trim();
+    }
+
+    private String firstNonBlank(String... values) {
+        for (String value : values) {
+            if (value != null && !value.isBlank()) {
+                return value.trim();
+            }
+        }
+        return "";
+    }
+
+    private String shortenText(String text, int maxLength) {
+        if (text == null) {
+            return "";
+        }
+        String value = text.trim();
+        if (value.length() <= maxLength) {
+            return value;
+        }
+        return value.substring(0, maxLength);
+    }
+
     private String toJson(Object obj) {
         try {
             return objectMapper.writeValueAsString(obj);
@@ -2496,7 +1438,3 @@ public class LlmService {
         }
     }
 }
-
-
-
-
