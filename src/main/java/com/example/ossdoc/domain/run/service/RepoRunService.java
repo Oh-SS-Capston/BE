@@ -4,6 +4,7 @@ import com.example.ossdoc.domain.auth.exception.AuthException;
 import com.example.ossdoc.domain.auth.exception.code.AuthErrorCode;
 import com.example.ossdoc.domain.run.dto.request.RepoRunCreateRequest;
 import com.example.ossdoc.domain.run.dto.response.RepoRunCreateResponse;
+import com.example.ossdoc.domain.run.dto.response.RepoRunRecentResponse;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.example.ossdoc.domain.run.support.GithubClient;
@@ -19,6 +20,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.file.Path;
 import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.UUID;
 
 @Slf4j
@@ -115,6 +117,14 @@ public class RepoRunService {
                 .commitSha(commitSha)
                 .workspaceRoot(wsRoot.toString())
                 .build();
+    }
+
+    @Transactional(readOnly = true)
+    public List<RepoRunRecentResponse> getRecentRuns(Long userId) {
+        return repoRunRepository.findTop10ByOwner_IdOrderByCreatedAtDesc(userId)
+                .stream()
+                .map(RepoRunRecentResponse::from)
+                .toList();
     }
 
     private String abbreviateSha(String sha) {
