@@ -10,17 +10,25 @@ spring:
     username: ${DB_USER:postgres}
     password: ${DB_PW}
     driver-class-name: org.postgresql.Driver
+    hikari:
+      data-source-properties:
+        reWriteBatchedInserts: true
 
   jpa:
     hibernate:
-      ddl-auto: create
+      ddl-auto: update
     properties:
       hibernate:
         dialect: org.hibernate.dialect.PostgreSQLDialect
-        show_sql: true
-        format_sql: true
-        use_sql_comments: true
+        show_sql: false
+        format_sql: false
+        use_sql_comments: false
         default_batch_fetch_size: 50
+        jdbc:
+          batch_size: 50
+          batch_versioned_data: true
+        order_inserts: true
+        order_updates: true
 
   sql:
     init:
@@ -86,7 +94,7 @@ claude:
   model: ${CLAUDE_MODEL:claude-sonnet-4-5}
   # Step2~5는 기본적으로 Haiku를 사용하고, 실패 시 서비스에서 Sonnet 폴백을 수행한다.
   haiku-model: ${CLAUDE_HAIKU_MODEL:claude-haiku-4-5}
-  max-tokens: ${CLAUDE_MAX_TOKENS:4096}
+  max-tokens: ${CLAUDE_MAX_TOKENS:20000}
 
 cloud:
   aws:
@@ -97,3 +105,11 @@ cloud:
       static: ${AWS_REGION:ap-northeast-2}
     s3:
       bucket: ${S3_BUCKET:ossdoc-artifact-storage}
+
+logging:
+  level:
+    com:
+      example:
+        ossdoc:
+          domain:
+            build: DEBUG
