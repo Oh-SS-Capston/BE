@@ -1,6 +1,8 @@
 package com.example.ossdoc.domain.rule.service;
 
 import com.example.ossdoc.domain.artifact.entity.Artifact;
+import com.example.ossdoc.domain.artifact.enums.ArtifactKind;
+import com.example.ossdoc.domain.artifact.repository.ArtifactRepository;
 import com.example.ossdoc.domain.graphstore.entity.Edge;
 import com.example.ossdoc.domain.graphstore.entity.Evidence;
 import com.example.ossdoc.domain.graphstore.entity.SymbolEntity;
@@ -25,6 +27,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.LocalDateTime;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Optional;
 
 @Slf4j
 @Service
@@ -40,6 +43,7 @@ public class RuleCandidateMiningService {
     private final EdgeRepository edgeRepository;
     private final SymbolRepository symbolRepository;
     private final EvidenceRepository evidenceRepository;
+    private final ArtifactRepository artifactRepository;
 
     @Transactional
     public RuleCandidateMineResponse mine(RuleCandidateMineRequest request, Long userId) {
@@ -52,6 +56,23 @@ public class RuleCandidateMiningService {
 
         boolean forceRebuildApplied = determineForceRebuild(run.getRunId(), request);
 
+        Optional<Artifact> reusableArtifact = findReusableArtifact(run.getRunId(), forceRebuildApplied);
+        if (reusableArtifact.isPresent()) {
+            Artifact artifact = reusableArtifact.get();
+
+            log.info(
+                    "[RULE-MINING] reused existing result. runId={}, artifactId={}",
+                    run.getRunId(),
+                    artifact.getArtifactId()
+            );
+
+            return buildResponse(
+                    run,
+                    artifact.getArtifactId(),
+                    false
+            );
+        }
+
         RuleMiningSignalIngestService.RuleMiningSignalIngestResult ingestResult =
                 ruleMiningSignalIngestService.ingest(
                         request.runId(),
@@ -62,30 +83,11 @@ public class RuleCandidateMiningService {
 
         Artifact artifact = ruleCandidateArtifactPublisher.publish(run);
 
-        RuleCandidateMineResponse response = RuleCandidateMineResponse.builder()
-                .runId(run.getRunId())
-                .ruleCandidatesArtifactId(artifact.getArtifactId())
-                .totalCandidates(Math.toIntExact(ruleCandidateRepository.countByRun_RunId(run.getRunId())))
-                .highConfidenceCount(Math.toIntExact(
-                        ruleCandidateRepository.countByRun_RunIdAndConfidence(
-                                run.getRunId(),
-                                RuleCandidateConfidence.HIGH
-                        )
-                ))
-                .mediumConfidenceCount(Math.toIntExact(
-                        ruleCandidateRepository.countByRun_RunIdAndConfidence(
-                                run.getRunId(),
-                                RuleCandidateConfidence.MEDIUM
-                        )
-                ))
-                .lowConfidenceCount(Math.toIntExact(
-                        ruleCandidateRepository.countByRun_RunIdAndConfidence(
-                                run.getRunId(),
-                                RuleCandidateConfidence.LOW
-                        )
-                ))
-                .forceRebuildApplied(forceRebuildApplied)
-                .build();
+        RuleCandidateMineResponse response = buildResponse(
+                run,
+                artifact.getArtifactId(),
+                forceRebuildApplied
+        );
 
         log.info(
                 "[RULE-MINING] mining completed. runId={}, forceRebuildApplied={}, skippedSignalIngest={}, signals={}, minedCandidates={}, artifactId={}",
@@ -111,11 +113,56 @@ public class RuleCandidateMiningService {
                 .sum();
     }
 
-    /**
-     * forceRebuild 적용값을 결정한다.
-     * 1) 요청에 명시값이 있으면 사용자 의도를 우선한다.
-     * 2) 명시값이 없으면 그래프 최신성 비교 결과로 자동 결정한다.
-     */
+    private Optional<Artifact> findReusableArtifact(String runId, boolean forceRebuildApplied) {
+        if (forceRebuildApplied) {
+            return Optional.empty();
+        }
+
+        if (!ruleMiningSignalRepository.existsByRun_RunId(runId)) {
+            return Optional.empty();
+        }
+
+        if (!ruleCandidateRepository.existsByRun_RunId(runId)) {
+            return Optional.empty();
+        }
+
+        return artifactRepository.findTopByRun_RunIdAndKindOrderByCreatedAtDesc(
+                runId,
+                ArtifactKind.RULE_CANDIDATES_JSON
+        );
+    }
+
+    private RuleCandidateMineResponse buildResponse(
+            RepoRun run,
+            Long artifactId,
+            boolean forceRebuildApplied
+    ) {
+        return RuleCandidateMineResponse.builder()
+                .runId(run.getRunId())
+                .ruleCandidatesArtifactId(artifactId)
+                .totalCandidates(Math.toIntExact(ruleCandidateRepository.countByRun_RunId(run.getRunId())))
+                .highConfidenceCount(Math.toIntExact(
+                        ruleCandidateRepository.countByRun_RunIdAndConfidence(
+                                run.getRunId(),
+                                RuleCandidateConfidence.HIGH
+                        )
+                ))
+                .mediumConfidenceCount(Math.toIntExact(
+                        ruleCandidateRepository.countByRun_RunIdAndConfidence(
+                                run.getRunId(),
+                                RuleCandidateConfidence.MEDIUM
+                        )
+                ))
+                .lowConfidenceCount(Math.toIntExact(
+                        ruleCandidateRepository.countByRun_RunIdAndConfidence(
+                                run.getRunId(),
+                                RuleCandidateConfidence.LOW
+                        )
+                ))
+                .forceRebuildApplied(forceRebuildApplied)
+                .build();
+    }
+
     private boolean determineForceRebuild(String runId, RuleCandidateMineRequest request) {
         if (request.hasForceRebuildFlag()) {
             return request.isForceRebuild();
@@ -123,10 +170,6 @@ public class RuleCandidateMiningService {
         return isGraphDataFresherThanSignals(runId);
     }
 
-    /**
-     * 그래프 데이터(Edge/Symbol/Evidence)가 기존 룰 신호보다 최신이면
-     * 신호를 다시 구성하도록 true를 반환한다.
-     */
     private boolean isGraphDataFresherThanSignals(String runId) {
         LocalDateTime lastSignalCreatedAt = ruleMiningSignalRepository
                 .findTopByRun_RunIdOrderByCreatedAtDesc(runId)
@@ -145,9 +188,6 @@ public class RuleCandidateMiningService {
         return lastGraphUpdatedAt.isAfter(lastSignalCreatedAt);
     }
 
-    /**
-     * run 기준으로 그래프 관련 데이터의 최신 시각을 계산한다.
-     */
     private LocalDateTime latestGraphDataTimestamp(String runId) {
         LocalDateTime edgeUpdatedAt = edgeRepository.findTopByRun_RunIdOrderByUpdatedAtDesc(runId)
                 .map(this::edgeUpdatedAt)
@@ -164,9 +204,6 @@ public class RuleCandidateMiningService {
         return maxTimestamp(edgeUpdatedAt, symbolUpdatedAt, evidenceCreatedAt);
     }
 
-    /**
-     * Edge는 updatedAt이 비어 있을 수 있어 createdAt으로 안전 폴백한다.
-     */
     private LocalDateTime edgeUpdatedAt(Edge edge) {
         if (edge == null) {
             return null;
