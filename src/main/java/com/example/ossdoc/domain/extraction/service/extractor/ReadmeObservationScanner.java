@@ -50,6 +50,10 @@ public class ReadmeObservationScanner {
             Pattern.compile("(?i)^#{1,3}\\s+(quick\\s+start|getting\\s+started|usage|example|tutorial)",
                     Pattern.MULTILINE);
 
+    // 섹션 끝 경계 산출용 — 모든 h1~h3 헤더 위치를 수집한다
+    private static final Pattern ANY_HEADER =
+            Pattern.compile("^#{1,3}\\s+\\S", Pattern.MULTILINE);
+
     private static final Set<String> EXCLUDED = Set.of(
             "String", "Integer", "Long", "Double", "Float", "Boolean", "Object",
             "List", "Map", "Set", "Optional", "Stream", "Collection", "Iterable",
@@ -144,12 +148,27 @@ public class ReadmeObservationScanner {
     }
 
     private String scopeToTargetSections(String content) {
-        Matcher header = SECTION_HEADER.matcher(content);
-        if (!header.find()) {
-            return content;
+        // 모든 헤더 위치 수집 → 각 타깃 섹션의 끝 경계 산출에 사용
+        List<Integer> allHeaderStarts = new ArrayList<>();
+        Matcher anyHeader = ANY_HEADER.matcher(content);
+        while (anyHeader.find()) {
+            allHeaderStarts.add(anyHeader.start());
         }
-        // 첫 번째 매칭 헤더 이후 내용만 반환
-        return content.substring(header.start());
+
+        // 타깃 섹션(Quick Start / Usage 등)마다 [sectionStart, 다음 헤더) 구간만 추출
+        Matcher target = SECTION_HEADER.matcher(content);
+        StringBuilder result = new StringBuilder();
+        while (target.find()) {
+            int sectionStart = target.start();
+            int sectionEnd = allHeaderStarts.stream()
+                    .filter(pos -> pos > sectionStart)
+                    .findFirst()
+                    .orElse(content.length());
+            result.append(content, sectionStart, sectionEnd);
+        }
+
+        // 타깃 섹션이 없으면 전체 README 사용 (기존 동작 유지)
+        return result.isEmpty() ? content : result.toString();
     }
 
     private Path findReadme(Path repoRoot) {

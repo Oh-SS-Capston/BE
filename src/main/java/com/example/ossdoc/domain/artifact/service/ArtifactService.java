@@ -4,6 +4,7 @@ import com.example.ossdoc.domain.artifact.entity.Artifact;
 import com.example.ossdoc.domain.artifact.enums.ArtifactKind;
 import com.example.ossdoc.domain.artifact.repository.ArtifactRepository;
 import com.example.ossdoc.domain.run.entity.RepoRun;
+import com.example.ossdoc.domain.run.support.WorkspaceManager;
 import com.example.ossdoc.global.s3.exception.S3Exception;
 import com.example.ossdoc.global.s3.exception.code.S3ErrorCode;
 import com.example.ossdoc.global.s3.util.S3Util;
@@ -14,6 +15,9 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 /**
  * Artifact 저장 서비스.
@@ -48,6 +52,7 @@ public class ArtifactService {
     private final ArtifactRepository artifactRepository;
     private final S3Util             s3Util;
     private final ObjectMapper       objectMapper;
+    private final WorkspaceManager   workspaceManager;
 
     /**
      * JSON Artifact를 S3에 업로드하고 DB에 URL 경로를 저장한다.
@@ -77,7 +82,10 @@ public class ArtifactService {
 
         log.info("[ArtifactService] S3 업로드 완료 — kind: {}, url: {}", kind, s3Url);
 
-        // 3. DB 저장 (path = S3 URL)
+        // 3. 로컬 저장 ({baseDir}/{runId}/artifacts/{relativePath})
+        saveToLocal(run.getRunId(), relativePath, jsonBody);
+
+        // 4. DB 저장 (path = S3 URL)
         return artifactRepository.findByRun_RunIdAndKindAndPath(run.getRunId(), kind, s3Url)
                 .map(existing -> {
                     existing.overwriteJsonContent(schemaVersion, "application/json", s3Url, content);
@@ -95,6 +103,18 @@ public class ArtifactService {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private void saveToLocal(String runId, String relativePath, String jsonBody) {
+        try {
+            Path out = workspaceManager.artifactsDir(workspaceManager.workspaceRoot(runId))
+                    .resolve(relativePath);
+            Files.createDirectories(out.getParent());
+            Files.writeString(out, jsonBody);
+            log.info("[ArtifactService] 로컬 저장 완료 — {}", out);
+        } catch (Exception e) {
+            log.warn("[ArtifactService] 로컬 저장 실패 (S3 저장은 완료): {}", e.getMessage());
+        }
+    }
 
     /**
      * S3 객체 키 조립.

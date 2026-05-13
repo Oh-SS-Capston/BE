@@ -49,7 +49,7 @@ public enum RunStage {
     ),
 
     CLASSMAP(
-            86,
+            90,
             false,
             "클래스 다이어그램을 생성 중입니다."
     ),

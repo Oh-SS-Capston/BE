@@ -84,6 +84,7 @@ public class EntryPointDetectService {
         FactsSignals factsSignals = loadFactsSignals(runId);
         SubsystemMaps subsystemMaps = loadSubsystemMaps(runId);
         Set<String> exportedPackages = loadExportedPackages(allSymbols);
+        Set<String> implementorSymbolIds = loadSymbolsWithOutboundInheritance(runId);
 
         List<EntryPointCandidate> candidates = new ArrayList<>();
 
@@ -93,7 +94,7 @@ public class EntryPointDetectService {
             if (shouldExclude(symbol, exportedPackages, childMaps)) continue;
 
             PhaseResult result = evaluatePhases(
-                    symbol, childMaps, returnedByPublicApi, factsSignals);
+                    symbol, childMaps, returnedByPublicApi, factsSignals, implementorSymbolIds);
             if ("NONE".equals(result.confidence())) continue;
 
             String subsystemId    = subsystemMaps.memberToSubsystem().get(symbol.getSymbolId());
@@ -272,6 +273,18 @@ public class EntryPointDetectService {
         return Set.of();
     }
 
+    private Set<String> loadSymbolsWithOutboundInheritance(String runId) {
+        List<Edge> edges = edgeRepository.findAllByRun_RunIdAndEdgeTypeIn(
+                runId, List.of(EdgeType.IMPLEMENTS, EdgeType.EXTENDS));
+        Set<String> result = new HashSet<>(edges.size());
+        for (Edge e : edges) {
+            if (e.getFromSymbol() != null) {
+                result.add(e.getFromSymbol().getSymbolId());
+            }
+        }
+        return Set.copyOf(result);
+    }
+
     // ─── 필터 ────────────────────────────────────────────────────────────────
 
     /**
@@ -299,7 +312,16 @@ public class EntryPointDetectService {
 
         String typeKind = resolveTypeKind(symbol);
 
-        if ("class".equals(typeKind) && hasAbstractModifier(symbol.getModifiers())) return true;
+        if ("class".equals(typeKind) && hasAbstractModifier(symbol.getModifiers())) {
+            // abstract class는 static factory가 있을 때만 후보 유지 (예: HttpClient.newBuilder())
+            List<SymbolEntity> methods =
+                    childMaps.methodsByOwner().getOrDefault(symbol.getSymbolId(), List.of());
+            boolean hasStaticFactory = methods.stream()
+                    .anyMatch(m -> m.getAccess() == AccessLevel.PUBLIC
+                            && isStaticMethod(m)
+                            && isFactoryMethodName(m.getSimpleName()));
+            if (!hasStaticFactory) return true;
+        }
 
         if (("class".equals(typeKind) || "record".equals(typeKind))) {
             List<SymbolEntity> constructors =
@@ -317,7 +339,8 @@ public class EntryPointDetectService {
     private PhaseResult evaluatePhases(SymbolEntity symbol,
                                         ChildMaps childMaps,
                                         Map<String, Integer> returnedByPublicApi,
-                                        FactsSignals factsSignals) {
+                                        FactsSignals factsSignals,
+                                        Set<String> implementorSymbolIds) {
         List<String> signals  = new ArrayList<>();
         String simpleName     = symbol.getSimpleName();
         String symbolId       = symbol.getSymbolId();
@@ -348,7 +371,17 @@ public class EntryPointDetectService {
         if (score == 0) return new PhaseResult("NONE", null, signals, 0);
 
         String confidence = score >= MED_MIN_SCORE ? "MED" : "LOW";
-        String role       = determineRole(symbolId, signals, returnedByPublicApi);
+
+        // 내부 구현체 제외:
+        // PUBLIC_CONSTRUCTOR 신호만 있고(LOW 확정) + IMPLEMENTS/EXTENDS 아웃바운드 엣지 존재
+        // → 사용자가 직접 생성하는 타입이 아니라 인터페이스 내부 구현체로 판단
+        if ("LOW".equals(confidence)
+                && signals.size() == 1 && signals.contains("PUBLIC_CONSTRUCTOR")
+                && implementorSymbolIds.contains(symbolId)) {
+            return new PhaseResult("NONE", null, signals, 0);
+        }
+
+        String role = determineRole(symbolId, signals, returnedByPublicApi);
         return new PhaseResult(confidence, role, signals, score);
     }
 
@@ -427,16 +460,24 @@ public class EntryPointDetectService {
     }
 
     /**
-     * Secondary 조건: 다른 public API가 반환하고, 직접 생성 경로 신호가 없는 경우.
+     * Secondary 조건: 다른 public API가 반환하고, 강한 직접 진입 신호가 없는 경우.
+     *
+     * PUBLIC_CONSTRUCTOR만으로는 PRIMARY 확정 불가.
+     * "사용자가 여기서 시작한다"는 의도 신호(README·Javadoc·네이밍·facade·static factory)가
+     * 있어야 RETURNED_BY_PUBLIC_API를 이겨 PRIMARY 유지.
      */
     private String determineRole(String symbolId,
                                   List<String> signals,
                                   Map<String, Integer> returnedByPublicApi) {
-        boolean returnedByApi    = returnedByPublicApi.getOrDefault(symbolId, 0) >= 1;
-        boolean hasDirectCreate  = signals.contains("PUBLIC_CONSTRUCTOR")
-                || signals.contains("STATIC_FACTORY")
-                || signals.contains("README_MENTION");
-        return (returnedByApi && !hasDirectCreate) ? "SECONDARY" : "PRIMARY";
+        boolean returnedByApi = returnedByPublicApi.getOrDefault(symbolId, 0) >= 1;
+        if (!returnedByApi) return "PRIMARY";
+
+        boolean hasStrongEntrySignal = signals.contains("README_MENTION")
+                || signals.contains("JAVADOC_ENTRY_POINT")
+                || signals.contains("NAMING_HIGH")
+                || signals.contains("FACADE_STRUCTURE")
+                || signals.contains("STATIC_FACTORY");
+        return hasStrongEntrySignal ? "PRIMARY" : "SECONDARY";
     }
 
     // ─── 유틸 ────────────────────────────────────────────────────────────────

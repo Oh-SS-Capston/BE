@@ -32,5 +32,7 @@ public interface EdgeRepository extends JpaRepository<Edge, Long> {
 
     List<Edge> findAllByRun_RunIdAndEdgeTypeAndToSymbolIsNotNull(String runId, EdgeType edgeType);
 
+    List<Edge> findAllByRun_RunIdAndEdgeTypeIn(String runId, List<EdgeType> edgeTypes);
+
     Optional<Edge> findTopByRun_RunIdOrderByUpdatedAtDesc(String runId);
 }

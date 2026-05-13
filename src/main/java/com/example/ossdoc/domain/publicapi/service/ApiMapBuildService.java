@@ -20,6 +20,8 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -47,13 +49,17 @@ public class ApiMapBuildService {
         List<EntryPointCandidate>   entryPoints     = entryPointDetectService.detect(runId);
         List<ExtensionPointCandidate> extensionPoints = extensionPointDetectService.detect(runId);
 
-        log.info("[PUBLICAPI] runId={}, entryPoints={}, extensionPoints={}",
-                runId, entryPoints.size(), extensionPoints.size());
+        // Extension Point 우선 원칙: 동일 symbolId가 양쪽에 존재하면 entry_points에서 제거
+        // HIGH confidence entry point는 예외 유지 (직접 진입점 신호가 충분히 강한 경우)
+        List<EntryPointCandidate> dedupedEntryPoints = deduplicateEntryPoints(entryPoints, extensionPoints);
+
+        log.info("[PUBLICAPI] runId={}, entryPoints={} (deduped from {}), extensionPoints={}",
+                runId, dedupedEntryPoints.size(), entryPoints.size(), extensionPoints.size());
 
         String generatedAt = Instant.now().toString();
 
-        ObjectNode apiSurfaceJson = buildApiSurfaceJson(entryPoints, extensionPoints, runId, generatedAt);
-        ObjectNode apiMapJson     = buildApiMapJson(entryPoints, extensionPoints, runId, generatedAt);
+        ObjectNode apiSurfaceJson = buildApiSurfaceJson(dedupedEntryPoints, extensionPoints, runId, generatedAt);
+        ObjectNode apiMapJson     = buildApiMapJson(dedupedEntryPoints, extensionPoints, runId, generatedAt);
 
         Artifact surfaceArtifact = artifactService.saveJsonArtifact(
                 run, ArtifactKind.API_SURFACE_JSON, SCHEMA_VERSION, API_SURFACE_FILE, apiSurfaceJson);
@@ -61,13 +67,13 @@ public class ApiMapBuildService {
                 run, ArtifactKind.API_MAP_JSON, SCHEMA_VERSION, API_MAP_FILE, apiMapJson);
 
         return ApiMapBuildResponse.builder()
-                .entryPointTotal(entryPoints.size())
+                .entryPointTotal(dedupedEntryPoints.size())
                 .extensionPointTotal(extensionPoints.size())
-                .primaryCount((int) entryPoints.stream().filter(e -> "PRIMARY".equals(e.getRole())).count())
-                .secondaryCount((int) entryPoints.stream().filter(e -> "SECONDARY".equals(e.getRole())).count())
-                .highConfidenceCount((int) countConfidence(entryPoints, extensionPoints, "HIGH"))
-                .medConfidenceCount((int) countConfidence(entryPoints, extensionPoints, "MED"))
-                .lowConfidenceCount((int) countConfidence(entryPoints, extensionPoints, "LOW"))
+                .primaryCount((int) dedupedEntryPoints.stream().filter(e -> "PRIMARY".equals(e.getRole())).count())
+                .secondaryCount((int) dedupedEntryPoints.stream().filter(e -> "SECONDARY".equals(e.getRole())).count())
+                .highConfidenceCount((int) countConfidence(dedupedEntryPoints, extensionPoints, "HIGH"))
+                .medConfidenceCount((int) countConfidence(dedupedEntryPoints, extensionPoints, "MED"))
+                .lowConfidenceCount((int) countConfidence(dedupedEntryPoints, extensionPoints, "LOW"))
                 .apiSurfaceArtifactUrl(surfaceArtifact.getPath())
                 .apiMapArtifactUrl(mapArtifact.getPath())
                 .build();
@@ -173,6 +179,24 @@ public class ApiMapBuildService {
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
+
+    /**
+     * Extension Point 우선 원칙: 동일 symbolId가 entry_points와 extension_points 양쪽에 존재할 때
+     * entry_points에서 제거한다. HIGH confidence entry point는 직접 진입점 신호가 충분하므로 예외 유지.
+     */
+    private List<EntryPointCandidate> deduplicateEntryPoints(
+            List<EntryPointCandidate> entryPoints,
+            List<ExtensionPointCandidate> extensionPoints) {
+
+        Set<String> extensionSymbolIds = extensionPoints.stream()
+                .map(ExtensionPointCandidate::getSymbolId)
+                .collect(Collectors.toSet());
+
+        return entryPoints.stream()
+                .filter(ep -> !extensionSymbolIds.contains(ep.getSymbolId())
+                           || "HIGH".equals(ep.getConfidence()))
+                .collect(Collectors.toList());
+    }
 
     private long countConfidence(
             List<EntryPointCandidate> entryPoints,
