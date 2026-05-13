@@ -80,20 +80,29 @@ public class RuleMiningSignalIngestService {
             deletePreviousMiningResults(runId);
         }
 
-        List<Edge> edges = edgeRepository.findAllByRun_RunId(runId);
-        List<Evidence> evidences = evidenceRepository.findAllByRun_RunId(runId);
-        List<SymbolEntity> symbols = symbolRepository.findAllByRun_RunId(runId);
+        List<Edge> signalSourceEdges = edgeRepository.findAllByRun_RunId(runId)
+                .stream()
+                .filter(this::isSignalSourceEdge)
+                .toList();
 
-        if (edges.isEmpty() && evidences.isEmpty() && symbols.isEmpty()) {
+        List<Evidence> evidences = evidenceRepository.findAllByRun_RunId(runId);
+
+        List<SymbolEntity> methodSymbols = symbolRepository.findAllByRun_RunId(runId)
+                .stream()
+                .filter(this::isMethodLikeSymbol)
+                .filter(this::hasSourceLocation)
+                .toList();
+
+        if (signalSourceEdges.isEmpty() && evidences.isEmpty() && methodSymbols.isEmpty()) {
             throw new RuleCandidateException(RuleCandidateErrorCode.GRAPHSTORE_DATA_NOT_FOUND);
         }
 
-        Map<Long, List<Evidence>> evidenceByEdgeId = loadEvidenceByEdgeId(edges);
+        Map<Long, List<Evidence>> evidenceByEdgeId = loadEvidenceByEdgeId(signalSourceEdges);
         List<RuleMiningSignal> signals = new ArrayList<>();
         Set<String> signalKeys = new HashSet<>();
 
-        ingestEdgeSignals(run, edges, evidenceByEdgeId, signals, signalKeys);
-        ingestSnippetSignals(run, evidences, symbols, signals, signalKeys);
+        ingestEdgeSignals(run, signalSourceEdges, evidenceByEdgeId, signals, signalKeys);
+        ingestSnippetSignals(run, evidences, methodSymbols, signals, signalKeys);
 
         if (!signals.isEmpty()) {
             ruleMiningSignalRepository.saveAll(signals);
@@ -124,14 +133,35 @@ public class RuleMiningSignalIngestService {
         );
     }
 
-    /**
-     * forceRebuild 시 FK 충돌을 피하기 위해
-     * candidate evidence → candidate → signal 순서로 삭제한다.
-     */
     private void deletePreviousMiningResults(String runId) {
         ruleCandidateEvidenceRepository.deleteAllByCandidate_Run_RunId(runId);
         ruleCandidateRepository.deleteAllByRun_RunId(runId);
         ruleMiningSignalRepository.deleteAllByRun_RunId(runId);
+    }
+
+    private boolean isSignalSourceEdge(Edge edge) {
+        if (edge == null || edge.getEdgeType() == null) {
+            return false;
+        }
+
+        return edge.getEdgeType() == EdgeType.CALLS
+                || edge.getEdgeType() == EdgeType.THROWS
+                || edge.getEdgeType() == EdgeType.ACCESSES_FIELD
+                || edge.getEdgeType() == EdgeType.ANNOTATED_WITH;
+    }
+
+    private boolean isMethodLikeSymbol(SymbolEntity symbol) {
+        return symbol != null
+                && (symbol.getSymbolKind() == SymbolKind.METHOD
+                || symbol.getSymbolKind() == SymbolKind.CONSTRUCTOR);
+    }
+
+    private boolean hasSourceLocation(SymbolEntity symbol) {
+        return symbol != null
+                && symbol.getSourceFile() != null
+                && symbol.getSourceFile().getFileId() != null
+                && symbol.getSourceStartLine() != null
+                && symbol.getSourceEndLine() != null;
     }
 
     private Map<Long, List<Evidence>> loadEvidenceByEdgeId(List<Edge> edges) {
@@ -145,6 +175,7 @@ public class RuleMiningSignalIngestService {
         }
 
         List<EdgeEvidence> links = edgeEvidenceRepository.findAllByEdge_EdgeIdIn(edgeIds);
+
         Map<Long, List<Evidence>> result = new HashMap<>();
 
         for (EdgeEvidence link : links) {
@@ -324,19 +355,31 @@ public class RuleMiningSignalIngestService {
     private void ingestSnippetSignals(
             RepoRun run,
             List<Evidence> evidences,
-            List<SymbolEntity> symbols,
+            List<SymbolEntity> methodSymbols,
             List<RuleMiningSignal> signals,
             Set<String> signalKeys
     ) {
+        Map<Long, List<SymbolEntity>> methodSymbolsByFileId = buildMethodSymbolsByFileId(methodSymbols);
+
         for (Evidence evidence : evidences) {
             if (evidence == null || evidence.getSnippet() == null || evidence.getSnippet().isBlank()) {
                 continue;
             }
 
             String snippet = evidence.getSnippet();
-            SymbolEntity ownerMethod = resolveOwnerMethodSymbol(evidence, symbols);
 
-            if (IF_PATTERN.matcher(snippet).find()) {
+            boolean hasIf = IF_PATTERN.matcher(snippet).find();
+            boolean hasThrow = THROW_PATTERN.matcher(snippet).find();
+            boolean hasReturn = RETURN_PATTERN.matcher(snippet).find();
+            boolean hasErrorResponse = ERROR_RESPONSE_PATTERN.matcher(snippet).find();
+
+            if (!hasIf && !hasThrow && !hasReturn && !hasErrorResponse) {
+                continue;
+            }
+
+            SymbolEntity ownerMethod = resolveOwnerMethodSymbol(evidence, methodSymbolsByFileId);
+
+            if (hasIf) {
                 addSnippetSignal(
                         run,
                         RuleMiningSignalType.IF_CONDITION,
@@ -348,7 +391,7 @@ public class RuleMiningSignalIngestService {
                 );
             }
 
-            if (THROW_PATTERN.matcher(snippet).find()) {
+            if (hasThrow) {
                 addSnippetSignal(
                         run,
                         RuleMiningSignalType.THROW_STATEMENT,
@@ -360,7 +403,7 @@ public class RuleMiningSignalIngestService {
                 );
             }
 
-            if (RETURN_PATTERN.matcher(snippet).find()) {
+            if (hasReturn) {
                 addSnippetSignal(
                         run,
                         RuleMiningSignalType.RETURN_STATEMENT,
@@ -372,7 +415,7 @@ public class RuleMiningSignalIngestService {
                 );
             }
 
-            if (ERROR_RESPONSE_PATTERN.matcher(snippet).find()) {
+            if (hasErrorResponse) {
                 addSnippetSignal(
                         run,
                         RuleMiningSignalType.ERROR_RESPONSE,
@@ -384,6 +427,94 @@ public class RuleMiningSignalIngestService {
                 );
             }
         }
+    }
+
+    private Map<Long, List<SymbolEntity>> buildMethodSymbolsByFileId(List<SymbolEntity> methodSymbols) {
+        Map<Long, List<SymbolEntity>> result = new HashMap<>();
+
+        if (methodSymbols == null || methodSymbols.isEmpty()) {
+            return result;
+        }
+
+        for (SymbolEntity symbol : methodSymbols) {
+            if (!hasSourceLocation(symbol)) {
+                continue;
+            }
+
+            Long fileId = symbol.getSourceFile().getFileId();
+            result.computeIfAbsent(fileId, ignored -> new ArrayList<>()).add(symbol);
+        }
+
+        for (List<SymbolEntity> fileSymbols : result.values()) {
+            fileSymbols.sort(
+                    Comparator.comparing(
+                                    SymbolEntity::getSourceStartLine,
+                                    Comparator.nullsLast(Integer::compareTo)
+                            )
+                            .thenComparingInt(this::symbolSpanSize)
+                            .thenComparing(SymbolEntity::getSymbolId)
+            );
+        }
+
+        return result;
+    }
+
+    private SymbolEntity resolveOwnerMethodSymbol(
+            Evidence evidence,
+            Map<Long, List<SymbolEntity>> methodSymbolsByFileId
+    ) {
+        if (evidence == null || evidence.getFile() == null || evidence.getFile().getFileId() == null) {
+            return null;
+        }
+
+        if (evidence.getStartLine() == null) {
+            return null;
+        }
+
+        Long fileId = evidence.getFile().getFileId();
+        Integer evidenceLine = evidence.getStartLine();
+
+        List<SymbolEntity> candidates = methodSymbolsByFileId.getOrDefault(fileId, List.of());
+        if (candidates.isEmpty()) {
+            return null;
+        }
+
+        SymbolEntity best = null;
+        int bestSpan = Integer.MAX_VALUE;
+
+        for (SymbolEntity candidate : candidates) {
+            if (!containsLine(candidate, evidenceLine)) {
+                continue;
+            }
+
+            int span = symbolSpanSize(candidate);
+            if (span < bestSpan) {
+                best = candidate;
+                bestSpan = span;
+            }
+        }
+
+        return best;
+    }
+
+    private boolean containsLine(SymbolEntity symbol, Integer line) {
+        if (symbol == null || line == null) {
+            return false;
+        }
+
+        if (symbol.getSourceStartLine() == null || symbol.getSourceEndLine() == null) {
+            return false;
+        }
+
+        return symbol.getSourceStartLine() <= line && line <= symbol.getSourceEndLine();
+    }
+
+    private int symbolSpanSize(SymbolEntity symbol) {
+        if (symbol == null || symbol.getSourceStartLine() == null || symbol.getSourceEndLine() == null) {
+            return Integer.MAX_VALUE;
+        }
+
+        return Math.max(0, symbol.getSourceEndLine() - symbol.getSourceStartLine());
     }
 
     private void addSnippetSignal(
@@ -464,34 +595,14 @@ public class RuleMiningSignalIngestService {
                 + normalizeText(normalizedText);
     }
 
-    private SymbolEntity resolveOwnerMethodSymbol(Evidence evidence, List<SymbolEntity> symbols) {
-        if (evidence.getFile() == null || evidence.getFile().getFileId() == null || evidence.getStartLine() == null) {
+    private RuleMiningSignalType classifyMethodCall(String targetText) {
+        String text = normalizeText(targetText);
+        if (text == null) {
             return null;
         }
 
-        Long fileId = evidence.getFile().getFileId();
-        Integer evidenceLine = evidence.getStartLine();
-
-        return symbols.stream()
-                .filter(symbol -> symbol.getSourceFile() != null)
-                .filter(symbol -> Objects.equals(symbol.getSourceFile().getFileId(), fileId))
-                .filter(symbol -> symbol.getSourceStartLine() != null && symbol.getSourceEndLine() != null)
-                .filter(symbol -> symbol.getSourceStartLine() <= evidenceLine && evidenceLine <= symbol.getSourceEndLine())
-                .filter(symbol -> symbol.getSymbolKind() == SymbolKind.METHOD || symbol.getSymbolKind() == SymbolKind.CONSTRUCTOR)
-                .min(Comparator.comparingInt(this::symbolSpanSize))
-                .orElse(null);
-    }
-
-    private int symbolSpanSize(SymbolEntity symbol) {
-        if (symbol.getSourceStartLine() == null || symbol.getSourceEndLine() == null) {
-            return Integer.MAX_VALUE;
-        }
-        return Math.max(0, symbol.getSourceEndLine() - symbol.getSourceStartLine());
-    }
-
-    private RuleMiningSignalType classifyMethodCall(String targetText) {
-        String text = normalizeText(targetText).toLowerCase(Locale.ROOT);
-        String name = simpleCallName(text);
+        String lower = text.toLowerCase(Locale.ROOT);
+        String name = simpleCallName(lower);
 
         if (isRepositorySaveCall(name)) {
             return RuleMiningSignalType.REPOSITORY_SAVE;
@@ -505,11 +616,11 @@ public class RuleMiningSignalIngestService {
             return RuleMiningSignalType.REPOSITORY_DELETE;
         }
 
-        if (isRequireCall(text, name)) {
+        if (isRequireCall(lower, name)) {
             return RuleMiningSignalType.REQUIRE_CALL;
         }
 
-        if (isAssertionCall(text, name)) {
+        if (isAssertionCall(lower, name)) {
             return RuleMiningSignalType.ASSERTION_CALL;
         }
 
@@ -544,7 +655,8 @@ public class RuleMiningSignalIngestService {
     }
 
     private boolean isObjectCreation(String targetText) {
-        return normalizeText(targetText).toLowerCase(Locale.ROOT).startsWith("new ");
+        String text = normalizeText(targetText);
+        return text != null && text.toLowerCase(Locale.ROOT).startsWith("new ");
     }
 
     private String edgeTargetText(Edge edge) {
@@ -580,7 +692,9 @@ public class RuleMiningSignalIngestService {
             return meta;
         }
 
-        meta.put("edgeId", edge.getEdgeId());
+        if (edge.getEdgeId() != null) {
+            meta.put("edgeId", edge.getEdgeId());
+        }
         meta.put("edgeType", edge.getEdgeType() == null ? null : edge.getEdgeType().name());
         meta.put("fromSymbolId", edge.getFromSymbol() == null ? null : edge.getFromSymbol().getSymbolId());
         meta.put("toSymbolId", edge.getToSymbol() == null ? null : edge.getToSymbol().getSymbolId());
