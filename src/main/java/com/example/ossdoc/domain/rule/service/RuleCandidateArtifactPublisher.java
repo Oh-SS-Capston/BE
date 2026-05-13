@@ -40,6 +40,7 @@ public class RuleCandidateArtifactPublisher {
     private static final String SCHEMA_VERSION = "1.2";
     private static final String RELATIVE_PATH = "rule/rule_candidates.json";
     private static final BigDecimal LOW_SCORE_THRESHOLD = new BigDecimal("0.6000");
+
     private static final Set<String> PRIMARY_EVIDENCE_ROLES = Set.of(
             "IF_CONDITION",
             "THROW_STATEMENT",
@@ -61,7 +62,7 @@ public class RuleCandidateArtifactPublisher {
     @Transactional
     public Artifact publish(RepoRun run) {
         List<RuleCandidate> candidates =
-                ruleCandidateRepository.findAllByRun_RunIdOrderByScoreDesc(run.getRunId());
+                ruleCandidateRepository.findAllWithSubjectByRunIdOrderByScoreDesc(run.getRunId());
 
         List<Long> candidateIds = candidates.stream()
                 .map(RuleCandidate::getCandidateId)
@@ -70,7 +71,7 @@ public class RuleCandidateArtifactPublisher {
         Map<Long, List<RuleCandidateEvidence>> evidencesByCandidateId =
                 loadEvidencesByCandidateId(candidateIds);
 
-        RuleCandidateSummaryJson summary = buildSummary(run.getRunId());
+        RuleCandidateSummaryJson summary = buildSummary(candidates);
 
         List<RuleCandidateItem> items = new ArrayList<>();
         for (RuleCandidate candidate : candidates) {
@@ -119,32 +120,40 @@ public class RuleCandidateArtifactPublisher {
             return Map.of();
         }
 
-        return ruleCandidateEvidenceRepository.findAllByCandidate_CandidateIdIn(candidateIds)
+        return ruleCandidateEvidenceRepository.findAllWithRelationsByCandidateIdIn(candidateIds)
                 .stream()
                 .collect(Collectors.groupingBy(evidence -> evidence.getCandidate().getCandidateId()));
     }
 
-    private RuleCandidateSummaryJson buildSummary(String runId) {
+    private RuleCandidateSummaryJson buildSummary(List<RuleCandidate> candidates) {
+        if (candidates == null || candidates.isEmpty()) {
+            return RuleCandidateSummaryJson.builder()
+                    .totalCandidates(0)
+                    .highConfidenceCount(0)
+                    .mediumConfidenceCount(0)
+                    .lowConfidenceCount(0)
+                    .build();
+        }
+
+        int high = 0;
+        int medium = 0;
+        int low = 0;
+
+        for (RuleCandidate candidate : candidates) {
+            if (candidate.getConfidence() == RuleCandidateConfidence.HIGH) {
+                high++;
+            } else if (candidate.getConfidence() == RuleCandidateConfidence.MEDIUM) {
+                medium++;
+            } else if (candidate.getConfidence() == RuleCandidateConfidence.LOW) {
+                low++;
+            }
+        }
+
         return RuleCandidateSummaryJson.builder()
-                .totalCandidates(Math.toIntExact(ruleCandidateRepository.countByRun_RunId(runId)))
-                .highConfidenceCount(Math.toIntExact(
-                        ruleCandidateRepository.countByRun_RunIdAndConfidence(
-                                runId,
-                                RuleCandidateConfidence.HIGH
-                        )
-                ))
-                .mediumConfidenceCount(Math.toIntExact(
-                        ruleCandidateRepository.countByRun_RunIdAndConfidence(
-                                runId,
-                                RuleCandidateConfidence.MEDIUM
-                        )
-                ))
-                .lowConfidenceCount(Math.toIntExact(
-                        ruleCandidateRepository.countByRun_RunIdAndConfidence(
-                                runId,
-                                RuleCandidateConfidence.LOW
-                        )
-                ))
+                .totalCandidates(candidates.size())
+                .highConfidenceCount(high)
+                .mediumConfidenceCount(medium)
+                .lowConfidenceCount(low)
                 .build();
     }
 
@@ -183,10 +192,6 @@ public class RuleCandidateArtifactPublisher {
                 .build();
     }
 
-    /**
-     * 근거가 약한 후보를 추정(ESTIMATED)으로 분리해,
-     * UI에서 사용자에게 신뢰도 상태를 명확히 보여주기 위한 판단 로직.
-     */
     private CandidateQuality evaluateQuality(RuleCandidate candidate, List<RuleCandidateEvidence> evidences) {
         int evidenceCount = evidences == null ? 0 : evidences.size();
         int primaryEvidenceCount = countPrimaryEvidence(evidences);
@@ -213,15 +218,13 @@ public class RuleCandidateArtifactPublisher {
         if (evidences == null || evidences.isEmpty()) {
             return 0;
         }
+
         return (int) evidences.stream()
                 .map(RuleCandidateEvidence::getRole)
                 .filter(role -> role != null && PRIMARY_EVIDENCE_ROLES.contains(role))
                 .count();
     }
 
-    /**
-     * 후보 노출량이 너무 많거나 적지 않도록 1차 화면 표시 정책을 계산한다.
-     */
     private RuleCandidateDisplayPolicyJson buildDisplayPolicy(List<Long> orderedCandidateIds, long edgeCount) {
         int total = orderedCandidateIds.size();
         DisplayTier tier = resolveDisplayTier(total, edgeCount);

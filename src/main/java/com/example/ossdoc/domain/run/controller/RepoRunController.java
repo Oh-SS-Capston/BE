@@ -5,6 +5,7 @@ import com.example.ossdoc.domain.auth.exception.code.AuthErrorCode;
 import com.example.ossdoc.domain.run.dto.request.RepoRunCreateRequest;
 import com.example.ossdoc.domain.run.dto.response.RepoRunCreateResponse;
 import com.example.ossdoc.domain.run.dto.response.RepoRunProgressResponse;
+import com.example.ossdoc.domain.run.dto.response.RepoRunRecentResponse;
 import com.example.ossdoc.domain.run.service.RepoRunService;
 import com.example.ossdoc.domain.run.service.RunProgressQueryService;
 import com.example.ossdoc.global.apiPayload.ApiResponse;
@@ -14,6 +15,8 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
+
 @RestController
 @RequiredArgsConstructor
 @RequestMapping("/api/v1/runs")
@@ -22,6 +25,23 @@ public class RepoRunController {
     private final RepoRunService repoRunService;
     private final RunProgressQueryService runProgressQueryService;
 
+    /*
+     * 로그인한 사용자 기준 최근 분석 기록 조회 API입니다.
+     *
+     * GET /api/v1/runs/recent
+     */
+    @GetMapping("/recent")
+    public ApiResponse<List<RepoRunRecentResponse>> recent(
+            @AuthenticationPrincipal AuthenticatedUser authenticatedUser
+    ) {
+        if (authenticatedUser == null) {
+            throw new AuthException(AuthErrorCode.UNAUTHORIZED_USER);
+        }
+
+        return ApiResponse.onSuccess(
+                repoRunService.getRecentRuns(authenticatedUser.getUserId())
+        );
+    }
     /*
      * 프론트는 이 API만 호출해서 분석을 요청합니다.
      * 이후 전체 pipeline은 백엔드 worker가 자동으로 처리합니다.
