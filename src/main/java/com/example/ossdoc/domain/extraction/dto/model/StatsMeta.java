@@ -19,30 +19,6 @@ public record StatsMeta(
         @JsonProperty("files_skipped")
         long filesSkipped,
 
-        @JsonProperty("ast_files_scanned")
-        long astFilesScanned,
-
-        @JsonProperty("class_files_scanned")
-        long classFilesScanned,
-
-        @JsonProperty("ast_files_parsed")
-        long astFilesParsed,
-
-        @JsonProperty("class_files_parsed")
-        long classFilesParsed,
-
-        @JsonProperty("chunks_total")
-        long chunksTotal,
-
-        @JsonProperty("chunks_succeeded")
-        long chunksSucceeded,
-
-        @JsonProperty("chunks_failed")
-        long chunksFailed,
-
-        @JsonProperty("chunks_partial")
-        long chunksPartial,
-
         @JsonProperty("types")
         long types,
 
@@ -55,9 +31,6 @@ public record StatsMeta(
         @JsonProperty("fields")
         long fields,
 
-        @JsonProperty("edges_candidates")
-        long edgeCandidates,
-
         @JsonProperty("relations")
         long relations,
 
@@ -67,8 +40,14 @@ public record StatsMeta(
         @JsonProperty("evidence")
         long evidence,
 
-        @JsonProperty("unresolved_type_refs")
-        long unresolvedTypeRefs,
+        @JsonProperty("unresolved_type_ratio")
+        double unresolvedTypeRatio,
+
+        @JsonProperty("unresolved_type_refs_total")
+        long unresolvedTypeRefsTotal,
+
+        @JsonProperty("total_type_refs_total")
+        long totalTypeRefsTotal,
 
         @JsonProperty("errors")
         long errors

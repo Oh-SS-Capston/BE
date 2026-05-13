@@ -6,10 +6,10 @@ import com.fasterxml.jackson.annotation.JsonValue;
  * symbol 자체의 생성 출처
  */
 public enum SymbolOriginKind {
-    SOURCE("source"),
+    AST("ast"),
     BYTECODE("bytecode"),
     GENERATED("generated"),
-    MERGED("merged");
+    AST_AND_BYTECODE("ast_and_bytecode");
 
     private final String code;
 

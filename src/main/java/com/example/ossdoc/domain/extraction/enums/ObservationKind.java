@@ -9,10 +9,17 @@ public enum ObservationKind {
     DI_INJECTION_SITE("di_injection_site"),
     DI_PROVIDER("di_provider"),
     SPI_PROVIDER("spi_provider"),
-    EVENT_PUBLISH("event_publish"),
-    EVENT_SUBSCRIBE("event_subscribe"),
-    REFLECTION_USE("reflection_use"),
-    CONFIG_WIRING("config_wiring");
+    EVENT_PUBLICATION("event_publication"),
+    EVENT_SUBSCRIPTION("event_subscription"),
+    REFLECTION_SITE("reflection_site"),
+    HTTP_ENDPOINT("http_endpoint"),
+    SCHEDULED_TASK("scheduled_task"),
+    ASYNC_METHOD("async_method"),
+    CONFIG_WIRING("config_wiring"),
+    README_MENTION("readme_mention"),
+    MODULE_EXPORTS("module_exports"),
+    MODULE_USES("module_uses"),
+    MODULE_PROVIDES("module_provides");
 
     private final String code;
 

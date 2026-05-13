@@ -13,7 +13,10 @@ import com.example.ossdoc.domain.graphstore.entity.Edge;
 import com.example.ossdoc.domain.graphstore.entity.EdgeEvidence;
 import com.example.ossdoc.domain.graphstore.entity.EdgeEvidenceId;
 import com.example.ossdoc.domain.graphstore.entity.Evidence;
+import com.example.ossdoc.domain.graphstore.entity.Observation;
 import com.example.ossdoc.domain.graphstore.entity.SymbolEntity;
+import com.example.ossdoc.domain.graphstore.entity.SymbolEvidence;
+import com.example.ossdoc.domain.graphstore.entity.SymbolEvidenceId;
 import com.example.ossdoc.domain.graphstore.enums.EdgeType;
 import com.example.ossdoc.domain.graphstore.enums.EvidenceType;
 import com.example.ossdoc.domain.graphstore.enums.SymbolKind;
@@ -21,11 +24,14 @@ import com.example.ossdoc.domain.graphstore.exception.GraphStoreException;
 import com.example.ossdoc.domain.graphstore.exception.code.GraphStoreErrorCode;
 import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedEvidenceFact;
 import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedFactsDocument;
+import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedObservationFact;
 import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedRelationFact;
 import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedSymbolFact;
 import com.example.ossdoc.domain.graphstore.repository.EdgeEvidenceRepository;
 import com.example.ossdoc.domain.graphstore.repository.EdgeRepository;
 import com.example.ossdoc.domain.graphstore.repository.EvidenceRepository;
+import com.example.ossdoc.domain.graphstore.repository.ObservationRepository;
+import com.example.ossdoc.domain.graphstore.repository.SymbolEvidenceRepository;
 import com.example.ossdoc.domain.graphstore.repository.SymbolRepository;
 import com.example.ossdoc.domain.module.entity.FileIndex;
 import com.example.ossdoc.domain.module.repository.FileIndexRepository;
@@ -64,6 +70,8 @@ public class GraphStoreIngestService {
     private final EdgeRepository edgeRepository;
     private final EvidenceRepository evidenceRepository;
     private final EdgeEvidenceRepository edgeEvidenceRepository;
+    private final ObservationRepository observationRepository;
+    private final SymbolEvidenceRepository symbolEvidenceRepository;
     private final FileIndexRepository fileIndexRepository;
 
     private final FactsEvidenceConverter factsEvidenceConverter;
@@ -94,22 +102,17 @@ public class GraphStoreIngestService {
         try {
             rawFacts = objectMapper.treeToValue(root, RawFactsDocumentDto.class);
         } catch (Exception e) {
+            log.error("[GRAPHSTORE] facts.json deserialization failed. runId={}", run.getRunId(), e);
             throw new GraphStoreException(GraphStoreErrorCode.INVALID_FACTS_SCHEMA);
         }
 
         NormalizedFactsDocument facts = graphStoreFactsNormalizer.normalize(rawFacts);
         validateFacts(facts);
-        if (facts.observationCount() > 0) {
-            log.warn(
-                    "[GRAPHSTORE] observations are currently ignored by ingest. count={}, runId={}",
-                    facts.observationCount(),
-                    run.getRunId()
-            );
-        }
 
         EvidenceSaveResult evidenceSaveResult = saveEvidence(run, facts);
         SymbolSaveResult symbolSaveResult = saveSymbols(run, facts, evidenceSaveResult.evidenceMap());
         EdgeSaveResult edgeSaveResult = saveEdges(run, facts, symbolSaveResult.symbolMap(), evidenceSaveResult.evidenceMap());
+        int observationsSaved = saveObservations(run, facts);
 
         return GraphStoreIngestResponse.builder()
                 .runId(run.getRunId())
@@ -119,8 +122,9 @@ public class GraphStoreIngestService {
                 .edgesSaved(edgeSaveResult.edgesSaved())
                 .edgeEvidenceSaved(edgeSaveResult.edgeEvidenceSaved())
                 .skippedRelations(edgeSaveResult.skippedRelations())
-                .observationsDetected(facts.observationCount())
-                .observationsIgnored(facts.observationCount())
+                .symbolEvidenceSaved(symbolSaveResult.symbolEvidenceSaved())
+                .observationsDetected(facts.observations().size())
+                .observationsSaved(observationsSaved)
                 .build();
     }
 
@@ -136,8 +140,11 @@ public class GraphStoreIngestService {
     }
 
     private void validateFacts(NormalizedFactsDocument facts) {
-        if (facts == null || facts.schemaVersion() == null || facts.symbols() == null || facts.relations() == null) {
+        if (facts == null || facts.symbols() == null || facts.relations() == null) {
             throw new GraphStoreException(GraphStoreErrorCode.INVALID_FACTS_SCHEMA);
+        }
+        if (facts.schemaVersion() == null) {
+            log.warn("[GRAPHSTORE] facts artifact has no schema_version field.");
         }
     }
 
@@ -364,6 +371,10 @@ public class GraphStoreIngestService {
             symbolMap.put(dto.symbol(), symbol);
         }
 
+        Set<String> existingSymbolEvidenceKeys = loadExistingSymbolEvidenceKeys(run.getRunId());
+        Set<String> newSymbolEvidenceKeys = new HashSet<>();
+        List<PendingSymbolEvidence> pendingSymbolEvidence = new ArrayList<>();
+
         for (NormalizedSymbolFact dto : facts.symbols()) {
             SymbolEntity current = symbolMap.get(dto.symbol());
             if (current == null) {
@@ -378,12 +389,33 @@ public class GraphStoreIngestService {
             }
 
             if (dto.evidenceIds() != null && !dto.evidenceIds().isEmpty()) {
-                Evidence sourceEvidence = evidenceMap.get(dto.evidenceIds().get(0));
+                Evidence sourceEvidence = selectSourceSpanEvidence(dto.evidenceIds(), evidenceMap);
                 if (sourceEvidence != null && shouldAssignSourceSpan(current, sourceEvidence)) {
                     current.assignSourceSpan(sourceEvidence.getStartLine(), sourceEvidence.getEndLine());
                 }
+
+                for (String factEvidenceId : dto.evidenceIds()) {
+                    Evidence evidence = evidenceMap.get(factEvidenceId);
+                    if (evidence == null || evidence.getEvidenceId() == null) {
+                        continue;
+                    }
+                    String linkKey = current.getSymbolId() + ":" + evidence.getEvidenceId();
+                    if (!existingSymbolEvidenceKeys.contains(linkKey) && newSymbolEvidenceKeys.add(linkKey)) {
+                        pendingSymbolEvidence.add(new PendingSymbolEvidence(current, evidence));
+                    }
+                }
             }
         }
+
+        List<SymbolEvidence> symbolEvidenceLinks = new ArrayList<>(pendingSymbolEvidence.size());
+        for (PendingSymbolEvidence pending : pendingSymbolEvidence) {
+            SymbolEvidenceId seId = new SymbolEvidenceId(
+                    pending.symbol().getSymbolId(),
+                    pending.evidence().getEvidenceId()
+            );
+            symbolEvidenceLinks.add(new SymbolEvidence(seId, pending.symbol(), pending.evidence()));
+        }
+        saveAllInBatches(symbolEvidenceLinks, BATCH_SIZE, symbolEvidenceRepository::saveAll);
 
         log.info(
                 "[GRAPHSTORE] symbol source file linking summary. runId={}, linkedCount={}",
@@ -391,7 +423,7 @@ public class GraphStoreIngestService {
                 sourceFileLinkedCount
         );
 
-        return new SymbolSaveResult(symbolMap, savedCount);
+        return new SymbolSaveResult(symbolMap, savedCount, symbolEvidenceLinks.size());
     }
 
     /**
@@ -430,6 +462,114 @@ public class GraphStoreIngestService {
                 || !Objects.equals(symbol.getSourceEndLine(), sourceEvidence.getEndLine());
     }
 
+    /**
+     * evidenceIds 중 AST 타입이면서 startLine이 있는 evidence를 우선 선택한다.
+     * 해당하는 것이 없으면 첫 번째로 조회된 evidence를 반환한다.
+     */
+    private Evidence selectSourceSpanEvidence(List<String> evidenceIds, Map<String, Evidence> evidenceMap) {
+        Evidence fallback = null;
+        for (String id : evidenceIds) {
+            Evidence ev = evidenceMap.get(id);
+            if (ev == null) {
+                continue;
+            }
+            if (fallback == null) {
+                fallback = ev;
+            }
+            if (ev.getEvidenceType() == EvidenceType.AST && ev.getStartLine() != null) {
+                return ev;
+            }
+        }
+        return fallback;
+    }
+
+    /**
+     * run 범위 기존 symbol-evidence 연결 키를 메모리 Set으로 로드한다.
+     */
+    private Set<String> loadExistingSymbolEvidenceKeys(String runId) {
+        List<SymbolEvidence> existing = symbolEvidenceRepository.findAllBySymbol_Run_RunId(runId);
+        Set<String> keys = new HashSet<>(Math.max(16, existing.size() * 2));
+        for (SymbolEvidence se : existing) {
+            if (se.getId() != null) {
+                keys.add(se.getId().getSymbolId() + ":" + se.getId().getEvidenceId());
+            }
+        }
+        return keys;
+    }
+
+    /**
+     * run 범위 symbol-evidence에서 심볼 ID별 AST evidence를 한 건씩 추출한다.
+     * startLine이 있는 AST evidence를 우선하여 저장한다.
+     */
+    private Map<String, Evidence> loadSymbolAstEvidenceMap(String runId) {
+        List<SymbolEvidence> links = symbolEvidenceRepository.findAllWithEvidenceByRunId(runId);
+        Map<String, Evidence> result = new HashMap<>();
+        for (SymbolEvidence se : links) {
+            String symbolId = se.getId().getSymbolId();
+            Evidence ev = se.getEvidence();
+            if (ev.getEvidenceType() != EvidenceType.AST) {
+                continue;
+            }
+            Evidence existing = result.get(symbolId);
+            if (existing == null) {
+                result.put(symbolId, ev);
+            } else if (ev.getStartLine() != null && existing.getStartLine() == null) {
+                result.put(symbolId, ev);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * 멤버 심볼(method/field/constructor)의 ownerType을 역조회하는 맵을 구성한다.
+     */
+    private Map<String, String> buildSymbolToOwnerMap(List<NormalizedSymbolFact> symbols) {
+        Map<String, String> result = new HashMap<>();
+        for (NormalizedSymbolFact sym : symbols) {
+            if (sym.symbol() == null || sym.ownerTypeSymbol() == null) {
+                continue;
+            }
+            String kind = sym.kind() == null ? "" : sym.kind().toLowerCase();
+            if ("method".equals(kind) || "field".equals(kind) || "constructor".equals(kind)) {
+                result.put(sym.symbol(), sym.ownerTypeSymbol());
+            }
+        }
+        return result;
+    }
+
+    /**
+     * DERIVED 엣지에 연결할 evidence를 3단계 fallback으로 선택한다.
+     * 1) from 심볼 직접 AST evidence
+     * 2-A) CONTAINS(package→type): to 심볼 AST evidence
+     * 2-B) 멤버(method/field/constructor): ownerType 심볼 AST evidence
+     */
+    private Evidence selectDerivedEdgeEvidence(
+            NormalizedRelationFact dto,
+            SymbolEntity from,
+            SymbolEntity to,
+            Map<String, Evidence> symbolAstEvidenceMap,
+            Map<String, String> symbolToOwnerMap,
+            Map<String, SymbolEntity> symbolMap
+    ) {
+        Evidence ev = symbolAstEvidenceMap.get(from.getSymbolId());
+        if (ev != null) {
+            return ev;
+        }
+        if ("CONTAINS".equalsIgnoreCase(dto.kind())
+                && from.getSymbolKind() == SymbolKind.PACKAGE
+                && to != null) {
+            return symbolAstEvidenceMap.get(to.getSymbolId());
+        }
+        String ownerSymbol = symbolToOwnerMap.get(dto.srcSymbol());
+        if (ownerSymbol != null) {
+            SymbolEntity ownerEntity = symbolMap.get(ownerSymbol);
+            if (ownerEntity != null) {
+                return symbolAstEvidenceMap.get(ownerEntity.getSymbolId());
+            }
+        }
+        return null;
+    }
+
     private FileIndex resolveSymbolSourceFile(
             RepoRun run,
             NormalizedSymbolFact symbolFact,
@@ -462,6 +602,8 @@ public class GraphStoreIngestService {
         int resolvedByRawRef = 0;
 
         Map<String, SymbolEntity> typeLookupIndex = buildTypeLookupIndex(symbolMap);
+        Map<String, Evidence> symbolAstEvidenceMap = loadSymbolAstEvidenceMap(run.getRunId());
+        Map<String, String> symbolToOwnerMap = buildSymbolToOwnerMap(facts.symbols());
 
         List<Edge> existingEdges = edgeRepository.findAllByRun_RunId(run.getRunId());
         Map<EdgeKey, Edge> edgeLookup = new HashMap<>(Math.max(16, existingEdges.size() * 2));
@@ -513,6 +655,16 @@ public class GraphStoreIngestService {
                     pendingEdgeEvidence.add(new PendingEdgeEvidence(edge, evidence));
                 }
             }
+
+            // DERIVED 엣지는 3단계 fallback으로 evidence를 연결한다.
+            if ("derived".equals(dto.origin())
+                    && (dto.evidenceIds() == null || dto.evidenceIds().isEmpty())) {
+                Evidence derivedEvidence = selectDerivedEdgeEvidence(
+                        dto, from, to, symbolAstEvidenceMap, symbolToOwnerMap, symbolMap);
+                if (derivedEvidence != null && derivedEvidence.getEvidenceId() != null) {
+                    pendingEdgeEvidence.add(new PendingEdgeEvidence(edge, derivedEvidence));
+                }
+            }
         }
 
         saveAllInBatches(newEdges, BATCH_SIZE, edgeRepository::saveAll);
@@ -547,6 +699,44 @@ public class GraphStoreIngestService {
         );
 
         return new EdgeSaveResult(edgesSaved, edgeEvidenceSaved, skippedRelations);
+    }
+
+    /**
+     * Observation을 저장한다.
+     * 동일 run에 대한 재적재 시 기존 데이터를 삭제 후 재삽입한다.
+     */
+    private int saveObservations(RepoRun run, NormalizedFactsDocument facts) {
+        List<NormalizedObservationFact> observations = facts.observations();
+        if (observations == null || observations.isEmpty()) {
+            return 0;
+        }
+
+        observationRepository.deleteAllByRunId(run.getRunId());
+
+        List<Observation> toSave = new ArrayList<>(observations.size());
+        for (NormalizedObservationFact dto : observations) {
+            toSave.add(new Observation(
+                    null,
+                    run,
+                    dto.kind(),
+                    dto.siteSymbol(),
+                    dto.targetSymbol(),
+                    dto.targetTypeRef(),
+                    dto.note(),
+                    dto.confidenceHint(),
+                    dto.attrs()
+            ));
+        }
+
+        saveAllInBatches(toSave, BATCH_SIZE, observationRepository::saveAll);
+
+        log.info(
+                "[GRAPHSTORE] observations saved. runId={}, count={}",
+                run.getRunId(),
+                toSave.size()
+        );
+
+        return toSave.size();
     }
 
     /**
@@ -767,7 +957,7 @@ public class GraphStoreIngestService {
     private record EvidenceSaveResult(Map<String, Evidence> evidenceMap, int savedCount) {
     }
 
-    private record SymbolSaveResult(Map<String, SymbolEntity> symbolMap, int savedCount) {
+    private record SymbolSaveResult(Map<String, SymbolEntity> symbolMap, int savedCount, int symbolEvidenceSaved) {
     }
 
     private record EdgeSaveResult(int edgesSaved, int edgeEvidenceSaved, int skippedRelations) {
@@ -798,5 +988,8 @@ public class GraphStoreIngestService {
     }
 
     private record PendingEdgeEvidence(Edge edge, Evidence evidence) {
+    }
+
+    private record PendingSymbolEvidence(SymbolEntity symbol, Evidence evidence) {
     }
 }

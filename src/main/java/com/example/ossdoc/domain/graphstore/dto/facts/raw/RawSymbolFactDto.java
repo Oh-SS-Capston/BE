@@ -11,6 +11,7 @@ import lombok.Setter;
 import java.util.ArrayList;
 import java.util.List;
 
+
 @Getter
 @Setter
 @NoArgsConstructor
@@ -26,7 +27,7 @@ public class RawSymbolFactDto {
     @JsonProperty("qualified_name")
     private String qualifiedName;
 
-    @JsonAlias({"owner_type_symbol", "ownerSymbol"})
+    @JsonAlias({"owner_type_symbol", "ownerSymbol", "owner_symbol"})
     @JsonProperty("owner_type_symbol")
     private String ownerTypeSymbol;
 
@@ -44,4 +45,22 @@ public class RawSymbolFactDto {
     private List<String> modifiers = new ArrayList<>();
 
     private JsonNode signature;
+
+    @JsonProperty("type_kind")
+    private String typeKind;
+
+    @JsonProperty("source_root")
+    private String sourceRoot;
+
+    @JsonProperty("doc_comment")
+    private String docComment;
+
+    @JsonProperty("annotations")
+    private JsonNode annotations;
+
+    @JsonProperty("super_type_ref")
+    private JsonNode superTypeRef;
+
+    @JsonProperty("interface_type_refs")
+    private List<JsonNode> interfaceTypeRefs = new ArrayList<>();
 }

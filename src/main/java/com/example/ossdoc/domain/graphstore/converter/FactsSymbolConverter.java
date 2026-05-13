@@ -31,7 +31,11 @@ public class FactsSymbolConverter {
                 null, // sourceFile은 FileIndex 타입이라 현재는 null
                 null,
                 null,
-                toOriginKind(dto.origin())
+                toOriginKind(dto.origin()),
+                dto.typeKind(),
+                dto.sourceRoot(),
+                dto.docComment(),
+                dto.annotations() != null ? dto.annotations() : JsonNodeFactory.instance.arrayNode()
         );
     }
 
@@ -77,7 +81,7 @@ public class FactsSymbolConverter {
         return switch (value.trim().toLowerCase()) {
             case "public" -> AccessLevel.PUBLIC;
             case "protected" -> AccessLevel.PROTECTED;
-            case "package" -> AccessLevel.PACKAGE;
+            case "package", "package_private" -> AccessLevel.PACKAGE;
             case "private" -> AccessLevel.PRIVATE;
             default -> null;
         };
@@ -89,6 +93,7 @@ public class FactsSymbolConverter {
             case "BYTECODE" -> OriginKind.BYTECODE;
             case "MERGED" -> OriginKind.MERGED;
             case "CONTRACT" -> OriginKind.CONTRACT;
+            case "DERIVED" -> OriginKind.DERIVED;
             default -> OriginKind.AST;
         };
     }

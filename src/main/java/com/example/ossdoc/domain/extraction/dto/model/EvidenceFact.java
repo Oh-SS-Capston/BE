@@ -1,6 +1,6 @@
 package com.example.ossdoc.domain.extraction.dto.model;
 
-import com.example.ossdoc.domain.extraction.enums.EvidenceKind;
+import com.example.ossdoc.domain.extraction.enums.EvidenceType;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Builder;
@@ -17,7 +17,7 @@ public record EvidenceFact(
         String id,
 
         @JsonProperty("type")
-        EvidenceKind type,
+        EvidenceType type,
 
         /**
          * repo 상대경로 권장
@@ -25,8 +25,17 @@ public record EvidenceFact(
         @JsonProperty("path")
         String path,
 
-        @JsonProperty("span")
-        SourceSpan span,
+        @JsonProperty("start_line")
+        Integer startLine,
+
+        @JsonProperty("end_line")
+        Integer endLine,
+
+        @JsonProperty("start_col")
+        Integer startCol,
+
+        @JsonProperty("end_col")
+        Integer endCol,
 
         /**
          * 관련 심볼이 있으면 연결

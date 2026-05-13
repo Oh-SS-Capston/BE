@@ -10,25 +10,17 @@ spring:
     username: ${DB_USER:postgres}
     password: ${DB_PW}
     driver-class-name: org.postgresql.Driver
-    hikari:
-      data-source-properties:
-        reWriteBatchedInserts: true
 
   jpa:
     hibernate:
-      ddl-auto: update
+      ddl-auto: create
     properties:
       hibernate:
         dialect: org.hibernate.dialect.PostgreSQLDialect
-        show_sql: false
-        format_sql: false
-        use_sql_comments: false
+        show_sql: true
+        format_sql: true
+        use_sql_comments: true
         default_batch_fetch_size: 50
-        jdbc:
-          batch_size: 50
-          batch_versioned_data: true
-        order_inserts: true
-        order_updates: true
 
   sql:
     init:
@@ -105,11 +97,3 @@ cloud:
       static: ${AWS_REGION:ap-northeast-2}
     s3:
       bucket: ${S3_BUCKET:ossdoc-artifact-storage}
-
-logging:
-  level:
-    com:
-      example:
-        ossdoc:
-          domain:
-            build: DEBUG

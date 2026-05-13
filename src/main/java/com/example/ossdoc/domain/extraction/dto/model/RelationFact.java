@@ -36,6 +36,9 @@ public record RelationFact(
         @JsonProperty("origin")
         FactOriginKind origin,
 
+        @JsonProperty("call_site_line")
+        Integer callSiteLine,
+
         @JsonProperty("confidence_hint")
         Double confidenceHint,
 
@@ -49,8 +52,6 @@ public record RelationFact(
         if (!hasDstSymbol && !hasDstRaw) {
             throw new IllegalArgumentException("Either dstSymbol or dstRawRef must be provided.");
         }
-        if (hasDstSymbol && hasDstRaw) {
-            throw new IllegalArgumentException("Only one of dstSymbol or dstRawRef should be provided.");
-        }
+        // PARTIAL resolution은 둘 다 가질 수 있음 (§11-5)
     }
 }

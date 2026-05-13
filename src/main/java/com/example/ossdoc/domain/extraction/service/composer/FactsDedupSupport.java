@@ -2,10 +2,10 @@ package com.example.ossdoc.domain.extraction.service.composer;
 
 import com.example.ossdoc.domain.extraction.dto.model.EvidenceFact;
 import com.example.ossdoc.domain.extraction.dto.model.ObservationFact;
+import com.example.ossdoc.domain.extraction.dto.model.ParamFact;
 import com.example.ossdoc.domain.extraction.dto.model.RelationFact;
 import com.example.ossdoc.domain.extraction.dto.model.RelationResolution;
 import com.example.ossdoc.domain.extraction.dto.model.SignatureFact;
-import com.example.ossdoc.domain.extraction.dto.model.SourceSpan;
 import com.example.ossdoc.domain.extraction.dto.model.SymbolFact;
 import com.example.ossdoc.domain.extraction.dto.model.TypeRef;
 import com.example.ossdoc.domain.extraction.enums.ResolutionStatus;
@@ -40,7 +40,10 @@ final class FactsDedupSupport {
                 .id(firstNonBlank(left.id(), right.id()))
                 .type(firstNonNull(left.type(), right.type()))
                 .path(firstNonBlank(left.path(), right.path()))
-                .span(mergeSpan(left.span(), right.span()))
+                .startLine(firstNonNull(left.startLine(), right.startLine()))
+                .endLine(firstNonNull(left.endLine(), right.endLine()))
+                .startCol(firstNonNull(left.startCol(), right.startCol()))
+                .endCol(firstNonNull(left.endCol(), right.endCol()))
                 .symbol(firstNonBlank(left.symbol(), right.symbol()))
                 .snippet(preferLonger(left.snippet(), right.snippet()))
                 .hash(firstNonBlank(left.hash(), right.hash()))
@@ -62,7 +65,7 @@ final class FactsDedupSupport {
                 .typeKind(firstNonNull(left.typeKind(), right.typeKind()))
                 .name(firstNonBlank(left.name(), right.name()))
                 .qualifiedName(firstNonBlank(left.qualifiedName(), right.qualifiedName()))
-                .ownerTypeSymbol(firstNonBlank(left.ownerTypeSymbol(), right.ownerTypeSymbol()))
+                .ownerSymbol(firstNonBlank(left.ownerSymbol(), right.ownerSymbol()))
                 .packageSymbol(firstNonBlank(left.packageSymbol(), right.packageSymbol()))
                 .module(firstNonBlank(left.module(), right.module()))
                 .sourceRoot(firstNonBlank(left.sourceRoot(), right.sourceRoot()))
@@ -78,10 +81,12 @@ final class FactsDedupSupport {
                 .superTypeRef(mergeTypeRef(left.superTypeRef(), right.superTypeRef()))
                 .interfaceTypeRefs(mergeDistinct(left.interfaceTypeRefs(), right.interfaceTypeRefs(), FactsDedupSupport::typeRefKey))
                 .sourceFile(firstNonBlank(left.sourceFile(), right.sourceFile()))
-                .isBridge(firstNonNull(left.isBridge(), right.isBridge()))
-                .isSynthetic(firstNonNull(left.isSynthetic(), right.isSynthetic()))
-                .bytecodeDescriptor(firstNonBlank(left.bytecodeDescriptor(), right.bytecodeDescriptor()))
-                .localCalls(mergeDistinct(left.localCalls(), right.localCalls(), Function.identity()))
+                .docComment(firstNonBlank(left.docComment(), right.docComment()))
+                .typeParams(firstNonNull(left.typeParams(), right.typeParams()))
+                .testCoverageHint(firstNonNull(left.testCoverageHint(), right.testCoverageHint()))
+                .throwsUnchecked(firstNonNull(left.throwsUnchecked(), right.throwsUnchecked()))
+                .hasConditionalThrow(firstNonNull(left.hasConditionalThrow(), right.hasConditionalThrow()))
+                .stateMutations(firstNonNull(left.stateMutations(), right.stateMutations()))
                 .build();
     }
 
@@ -101,6 +106,7 @@ final class FactsDedupSupport {
                 .evidenceIds(mergeDistinct(left.evidenceIds(), right.evidenceIds(), Function.identity()))
                 .resolution(mergeResolution(left.resolution(), right.resolution()))
                 .origin(firstNonNull(left.origin(), right.origin()))
+                .callSiteLine(firstNonNull(left.callSiteLine(), right.callSiteLine()))
                 .confidenceHint(max(left.confidenceHint(), right.confidenceHint()))
                 .attrs(mergeMaps(left.attrs(), right.attrs()))
                 .build();
@@ -119,10 +125,10 @@ final class FactsDedupSupport {
                 .siteSymbol(firstNonBlank(left.siteSymbol(), right.siteSymbol()))
                 .targetSymbol(firstNonBlank(left.targetSymbol(), right.targetSymbol()))
                 .targetTypeRef(mergeTypeRef(left.targetTypeRef(), right.targetTypeRef()))
-                .serviceInterfaceSymbol(firstNonBlank(left.serviceInterfaceSymbol(), right.serviceInterfaceSymbol()))
                 .note(preferLonger(left.note(), right.note()))
                 .evidenceIds(mergeDistinct(left.evidenceIds(), right.evidenceIds(), Function.identity()))
                 .origin(firstNonNull(left.origin(), right.origin()))
+                .confidenceHint(max(left.confidenceHint(), right.confidenceHint()))
                 .attrs(mergeMaps(left.attrs(), right.attrs()))
                 .build();
     }
@@ -155,10 +161,12 @@ final class FactsDedupSupport {
         }
 
         return SignatureFact.builder()
-                .params(mergeDistinct(left.params(), right.params(), FactsDedupSupport::typeRefKey))
+                .params(mergeDistinct(left.params(), right.params(), FactsDedupSupport::paramFactKey))
                 .returns(mergeTypeRef(left.returns(), right.returns()))
                 .throwsTypes(mergeDistinct(left.throwsTypes(), right.throwsTypes(), FactsDedupSupport::typeRefKey))
                 .fieldType(mergeTypeRef(left.fieldType(), right.fieldType()))
+                .javadoc(firstNonBlank(left.javadoc(), right.javadoc()))
+                .sealed(firstNonNull(left.sealed(), right.sealed()))
                 .build();
     }
 
@@ -177,22 +185,7 @@ final class FactsDedupSupport {
                 .primitive(firstNonNull(left.primitive(), right.primitive()))
                 .unresolved(firstNonNull(left.unresolved(), right.unresolved()))
                 .sourceText(firstNonBlank(left.sourceText(), right.sourceText()))
-                .build();
-    }
-
-    static SourceSpan mergeSpan(SourceSpan left, SourceSpan right) {
-        if (left == null) {
-            return right;
-        }
-        if (right == null) {
-            return left;
-        }
-
-        return SourceSpan.builder()
-                .startLine(firstNonNull(left.startLine(), right.startLine()))
-                .startCol(firstNonNull(left.startCol(), right.startCol()))
-                .endLine(firstNonNull(left.endLine(), right.endLine()))
-                .endCol(firstNonNull(left.endCol(), right.endCol()))
+                .wildcard(firstNonNull(left.wildcard(), right.wildcard()))
                 .build();
     }
 
@@ -245,8 +238,7 @@ final class FactsDedupSupport {
                 safe(observation.kind() == null ? null : observation.kind().code()),
                 safe(observation.siteSymbol()),
                 safe(observation.targetSymbol()),
-                safe(typeRefKey(observation.targetTypeRef())),
-                safe(observation.serviceInterfaceSymbol())
+                safe(typeRefKey(observation.targetTypeRef()))
         );
     }
 
@@ -261,7 +253,7 @@ final class FactsDedupSupport {
         return String.join("|",
                 safe(symbolFact.kind() == null ? null : symbolFact.kind().code()),
                 safe(symbolFact.qualifiedName()),
-                safe(symbolFact.ownerTypeSymbol()),
+                safe(symbolFact.ownerSymbol()),
                 safe(symbolFact.name())
         );
     }
@@ -284,7 +276,18 @@ final class FactsDedupSupport {
                 safe(typeRef.arrayDim() == null ? null : String.valueOf(typeRef.arrayDim())),
                 safe(typeRef.primitive() == null ? null : String.valueOf(typeRef.primitive())),
                 safe(typeRef.unresolved() == null ? null : String.valueOf(typeRef.unresolved())),
-                safe(typeRef.sourceText())
+                safe(typeRef.sourceText()),
+                safe(typeRef.wildcard() == null ? null : typeRef.wildcard().code())
+        );
+    }
+
+    static String paramFactKey(ParamFact paramFact) {
+        if (paramFact == null) {
+            return "";
+        }
+        return String.join("|",
+                safe(paramFact.name()),
+                typeRefKey(paramFact.typeRef())
         );
     }
 

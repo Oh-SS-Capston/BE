@@ -52,4 +52,11 @@ workspace/
 *.md
 !**/README.md
 
+### Markdown output directory ###
+MarkDownFile/
+
+### Application config ###
 src/main/resources/application.yml
+
+### claude file
+.claude/

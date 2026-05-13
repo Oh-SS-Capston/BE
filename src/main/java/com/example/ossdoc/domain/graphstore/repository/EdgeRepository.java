@@ -30,8 +30,7 @@ public interface EdgeRepository extends JpaRepository<Edge, Long> {
      */
     long countByRun_RunId(String runId);
 
-    /**
-     * run 범위에서 마지막으로 갱신된 edge 1건을 조회한다.
-     */
+    List<Edge> findAllByRun_RunIdAndEdgeTypeAndToSymbolIsNotNull(String runId, EdgeType edgeType);
+
     Optional<Edge> findTopByRun_RunIdOrderByUpdatedAtDesc(String runId);
 }

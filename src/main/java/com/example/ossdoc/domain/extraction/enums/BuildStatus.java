@@ -10,9 +10,7 @@ import com.fasterxml.jackson.annotation.JsonValue;
 public enum BuildStatus {
     SUCCESS("success"),
     FAILED("failed"),
-    PARTIAL("partial"),
-    SKIPPED("skipped"),
-    UNKNOWN("unknown");
+    PARTIAL("partial");
 
     private final String code;
 

@@ -42,6 +42,12 @@ public enum RunStage {
             "주요 모듈과 군집을 분석 중입니다."
     ),
 
+    PUBLICAPI(
+            87,
+            false,
+            "공개 API 진입점·확장 포인트를 분석 중입니다."
+    ),
+
     CLASSMAP(
             86,
             false,

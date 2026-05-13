@@ -52,10 +52,10 @@ public class PublicApiEntrySyncService {
      *   실제 서비스 로직 전체가 군집화 대상에서 사라질 수 있습니다.
      */
     private static final List<String> NON_PRODUCTION_PATH_MARKERS = List.of(
-            "/src/test/",
-            "/src/it/",
-            "/src/integrationtest/",
-            "/src/integration-test/"
+            "src/test/",
+            "src/it/",
+            "src/integrationtest/",
+            "src/integration-test/"
     );
 
     /*

@@ -12,7 +12,7 @@ import java.util.Map;
 /**
  * 최종 facts.json에 기록할 stats를 실제 조립 결과 기준으로 계산한다.
  *
- * file/chunk 실행 통계는 aggregate에서 받은 값을 유지하고,
+ * file 실행 통계는 aggregate에서 받은 값을 유지하고,
  * symbol/relation/observation/evidence 카운트는 최종 문서 기준으로 다시 맞춘다.
  */
 final class FactsStatsCalculator {
@@ -26,59 +26,48 @@ final class FactsStatsCalculator {
     ) {
         StatsMeta base = rawStats == null ? StatsMeta.builder().build() : rawStats;
 
-        long relationCount = size(relations.contains())
-                + size(relations.extendsRelations())
-                + size(relations.implementsRelations())
+        long relationCount = size(relations.calls())
                 + size(relations.overrides())
-                + size(relations.calls())
-                + size(relations.accessesField())
-                + size(relations.fieldType())
-                + size(relations.paramType())
-                + size(relations.returnType())
-                + size(relations.throwsType())
-                + size(relations.annotatedBy());
+                + size(relations.accessesField());
 
         long observationCount = size(observations.diInjectionSites())
                 + size(observations.diProviders())
                 + size(observations.spiProviders())
-                + size(observations.eventPublish())
-                + size(observations.eventSubscribe())
-                + size(observations.reflectionUses())
-                + size(observations.configWiring());
+                + size(observations.eventPublications())
+                + size(observations.eventSubscriptions())
+                + size(observations.reflectionSites())
+                + size(observations.httpEndpoints())
+                + size(observations.scheduling())
+                + size(observations.asyncMethods())
+                + size(observations.configWiring())
+                + size(observations.readmeMentions())
+                + size(observations.moduleExports())
+                + size(observations.moduleUses())
+                + size(observations.moduleProvides());
 
-        long derivedFilesScanned = base.astFilesScanned() + base.classFilesScanned();
-        long derivedFilesParsed = base.astFilesParsed() + base.classFilesParsed();
+        long unresolvedTotal = base.unresolvedTypeRefsTotal();
+        long totalTypeRefs = base.totalTypeRefsTotal();
+        double ratio = totalTypeRefs > 0 ? (double) unresolvedTotal / totalTypeRefs : 0.0;
 
         return StatsMeta.builder()
-                .filesScanned(preferExplicitOrDerived(base.filesScanned(), derivedFilesScanned))
-                .filesParsed(preferExplicitOrDerived(base.filesParsed(), derivedFilesParsed))
+                .filesScanned(base.filesScanned())
+                .filesParsed(base.filesParsed())
                 .filesSkipped(base.filesSkipped())
-                .astFilesScanned(base.astFilesScanned())
-                .classFilesScanned(base.classFilesScanned())
-                .astFilesParsed(base.astFilesParsed())
-                .classFilesParsed(base.classFilesParsed())
-                .chunksTotal(base.chunksTotal())
-                .chunksSucceeded(base.chunksSucceeded())
-                .chunksFailed(base.chunksFailed())
-                .chunksPartial(base.chunksPartial())
                 .types(size(symbols.types()))
                 .constructors(size(symbols.constructors()))
                 .methods(size(symbols.methods()))
                 .fields(size(symbols.fields()))
-                .edgeCandidates(base.edgeCandidates() > 0 ? base.edgeCandidates() : relationCount)
                 .relations(relationCount)
                 .observations(observationCount)
                 .evidence(evidence == null ? 0L : evidence.size())
-                .unresolvedTypeRefs(base.unresolvedTypeRefs())
+                .unresolvedTypeRatio(ratio)
+                .unresolvedTypeRefsTotal(unresolvedTotal)
+                .totalTypeRefsTotal(totalTypeRefs)
                 .errors(base.errors())
                 .build();
     }
 
     private long size(List<?> list) {
         return list == null ? 0L : list.size();
-    }
-
-    private long preferExplicitOrDerived(long explicitValue, long derivedValue) {
-        return explicitValue > 0 ? explicitValue : derivedValue;
     }
 }

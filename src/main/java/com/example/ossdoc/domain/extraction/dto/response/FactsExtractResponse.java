@@ -1,8 +1,6 @@
 package com.example.ossdoc.domain.extraction.dto.response;
 
 import com.example.ossdoc.domain.extraction.dto.model.StatsMeta;
-import com.example.ossdoc.domain.extraction.enums.BytecodeAvailability;
-import com.example.ossdoc.domain.extraction.enums.ExtractionMode;
 import lombok.Builder;
 
 import java.util.List;
@@ -13,17 +11,14 @@ import java.util.List;
 @Builder
 public record FactsExtractResponse(
         String runId,
-        ExtractionMode mode,
-        BytecodeAvailability bytecodeAvailability,
+        String mode,
 
         String schemaVersion,
 
-        List<String> scannedModules,
         StatsMeta stats,
         List<String> warnings
 ) {
     public FactsExtractResponse {
-        scannedModules = scannedModules == null ? List.of() : List.copyOf(scannedModules);
         warnings = warnings == null ? List.of() : List.copyOf(warnings);
     }
 }

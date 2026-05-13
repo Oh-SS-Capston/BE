@@ -13,13 +13,10 @@ import com.example.ossdoc.domain.extraction.service.support.util.FactsSchema;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.TreeMap;
 
 /**
  * merge가 끝난 aggregate를 facts.json 루트 구조로 조립하는 기본 구현.
@@ -51,7 +48,7 @@ public class DefaultFactsComposer implements FactsComposer {
         ExtractionAggregate aggregate = context.aggregate();
 
         Map<String, EvidenceFact> evidence = sectionFactory.composeEvidence(aggregate.evidence());
-        SymbolTable symbols = sectionFactory.composeSymbols(aggregate.symbols());
+        SymbolTable symbols = sectionFactory.composeSymbols(aggregate.symbols(), evidence);
         RelationTable relations = sectionFactory.composeRelations(aggregate.relations());
         ObservationTable observations = context.includeObservations()
                 ? sectionFactory.composeObservations(aggregate.observations())
@@ -60,15 +57,10 @@ public class DefaultFactsComposer implements FactsComposer {
         List<String> warnings = mergeWarnings(context.warnings(), aggregate.warnings());
 
         ExtractionMeta extractionMeta = ExtractionMeta.builder()
-                .mode(context.mode())
-                .bytecodeAvailability(context.bytecodeAvailability())
+                .mode(context.mode() == null ? null : context.mode().outputCode())
                 .startedAt(context.startedAt())
                 .finishedAt(context.finishedAt())
                 .warnings(warnings)
-                .scannedModules(context.scannedModules())
-                .scannedSourceRoots(context.scannedSourceRoots())
-                .scannedBytecodeRoots(context.scannedBytecodeRoots())
-                .engineVersions(normalizeEngineVersions(context.engineVersions()))
                 .build();
 
         StatsMeta stats = statsCalculator.compose(
@@ -85,7 +77,7 @@ public class DefaultFactsComposer implements FactsComposer {
                 .build(sectionFactory.normalizeBuild(context.build()))
                 .extraction(extractionMeta)
                 .stats(stats)
-                .evidence(evidence)
+                .evidenceMap(evidence)
                 .symbols(symbols)
                 .relations(relations)
                 .observations(observations)
@@ -97,24 +89,6 @@ public class DefaultFactsComposer implements FactsComposer {
             return FactsSchema.SCHEMA_VERSION;
         }
         return schemaVersion;
-    }
-
-    private Map<String, String> normalizeEngineVersions(Map<String, String> raw) {
-        if (raw == null || raw.isEmpty()) {
-            return Map.of();
-        }
-
-        Map<String, String> sorted = new TreeMap<>();
-        for (Map.Entry<String, String> entry : raw.entrySet()) {
-            if (entry.getKey() == null || entry.getKey().isBlank()) {
-                continue;
-            }
-            if (entry.getValue() == null || entry.getValue().isBlank()) {
-                continue;
-            }
-            sorted.put(entry.getKey(), entry.getValue());
-        }
-        return Collections.unmodifiableMap(new LinkedHashMap<>(sorted));
     }
 
     private List<String> mergeWarnings(List<String> left, List<String> right) {

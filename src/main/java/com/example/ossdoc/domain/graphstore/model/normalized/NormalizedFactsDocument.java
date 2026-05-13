@@ -8,6 +8,6 @@ public record NormalizedFactsDocument(
         Map<String, NormalizedEvidenceFact> evidence,
         List<NormalizedSymbolFact> symbols,
         List<NormalizedRelationFact> relations,
-        int observationCount
+        List<NormalizedObservationFact> observations
 ) {
 }

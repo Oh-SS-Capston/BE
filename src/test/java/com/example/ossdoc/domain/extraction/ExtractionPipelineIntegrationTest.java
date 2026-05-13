@@ -6,7 +6,6 @@ import com.example.ossdoc.domain.artifact.service.ArtifactService;
 import com.example.ossdoc.domain.build.support.RepoRootResolver;
 import com.example.ossdoc.domain.extraction.dto.request.FactsExtractRequest;
 import com.example.ossdoc.domain.extraction.dto.response.FactsExtractResponse;
-import com.example.ossdoc.domain.extraction.enums.BytecodeAvailability;
 import com.example.ossdoc.domain.extraction.enums.ExtractionMode;
 import com.example.ossdoc.domain.extraction.service.composer.DefaultFactsComposer;
 import com.example.ossdoc.domain.extraction.service.extractor.AsmBytecodeFactsExtractor;
@@ -132,10 +131,8 @@ class ExtractionPipelineIntegrationTest {
         when(mockRun.getCommitSha()).thenReturn("f5514b125c4f4b58e92beb0979a40ddce48d5be1");
         when(mockRun.getWorkspaceRoot()).thenReturn("C:/data/ossdoc/" + TEST_RUN_ID);
 
-        // 첫 호출(facade.prepareFacadeContext) → empty → TEST_RUN_ID bypass 사용
-        // 두 번째 호출(writer.uploadToS3) → mockRun 반환
+        // facade.prepareFacadeContext + writer.uploadToS3 양쪽에서 사용
         when(repoRunRepository.findById(TEST_RUN_ID))
-                .thenReturn(Optional.empty())
                 .thenReturn(Optional.of(mockRun));
 
         // ArtifactService: S3 업로드 우회
@@ -188,7 +185,7 @@ class ExtractionPipelineIntegrationTest {
 
         assertNotNull(response);
         assertEquals(TEST_RUN_ID, response.runId());
-        assertEquals(ExtractionMode.AST_ONLY, response.mode());
+        assertEquals("ast_only", response.mode());
         assertTrue(response.stats().filesScanned() > 0, "AST 스캔 파일이 0보다 커야 함");
         assertTrue(response.stats().types() > 0, "추출된 타입이 0보다 커야 함");
 
@@ -210,12 +207,9 @@ class ExtractionPipelineIntegrationTest {
 
         assertNotNull(response);
         assertEquals(TEST_RUN_ID, response.runId());
-        assertEquals(ExtractionMode.AST_PLUS_BYTECODE, response.mode());
-        assertNotNull(response.bytecodeAvailability());
-        assertNotEquals(BytecodeAvailability.NONE, response.bytecodeAvailability(),
-                "바이트코드가 존재하므로 NONE이면 안 됨");
-        assertTrue(response.stats().classFilesScanned() > 0,
-                "바이트코드 모드에서 class 파일 스캔이 0보다 커야 함");
+        assertEquals("ast_and_bytecode", response.mode());
+        assertTrue(response.stats().filesScanned() > 0,
+                "바이트코드 모드에서 파일 스캔이 0보다 커야 함");
 
         printSummary("AST_PLUS_BYTECODE", response);
     }
@@ -225,12 +219,8 @@ class ExtractionPipelineIntegrationTest {
         System.out.println("=== " + label + " 결과 요약 ===");
         System.out.println("runId:                " + response.runId());
         System.out.println("mode:                 " + response.mode());
-        System.out.println("bytecodeAvailability: " + response.bytecodeAvailability());
         System.out.println("schemaVersion:        " + response.schemaVersion());
-        System.out.println("scannedModules:       " + response.scannedModules());
         System.out.println("filesScanned:         " + response.stats().filesScanned());
-        System.out.println("astFilesScanned:      " + response.stats().astFilesScanned());
-        System.out.println("classFilesScanned:    " + response.stats().classFilesScanned());
         System.out.println("types:                " + response.stats().types());
         System.out.println("methods:              " + response.stats().methods());
         System.out.println("fields:               " + response.stats().fields());

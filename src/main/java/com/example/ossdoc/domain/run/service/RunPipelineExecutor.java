@@ -8,6 +8,7 @@ import com.example.ossdoc.domain.cluster.dto.response.ClusterParameterRecommendR
 import com.example.ossdoc.domain.cluster.service.ClusterBuildService;
 import com.example.ossdoc.domain.cluster.service.ClusterParameterRecommendService;
 import com.example.ossdoc.domain.extraction.dto.request.FactsExtractRequest;
+import com.example.ossdoc.domain.publicapi.service.ApiMapBuildService;
 import com.example.ossdoc.domain.extraction.facade.FactsExtractionFacade;
 import com.example.ossdoc.domain.graphstore.dto.request.GraphStoreIngestRequest;
 import com.example.ossdoc.domain.graphstore.service.GraphStoreIngestService;
@@ -54,6 +55,7 @@ public class RunPipelineExecutor {
 
     private final ClusterParameterRecommendService clusterParameterRecommendService;
     private final ClusterBuildService clusterBuildService;
+    private final ApiMapBuildService apiMapBuildService;
     private final ClassMapBuildService classMapBuildService;
 
     private final RuleCandidateMiningService ruleCandidateMiningService;
@@ -138,6 +140,15 @@ public class RunPipelineExecutor {
                                     .topK(parameters.topK())
                                     .build()
                     )
+            );
+
+            executeOptional(
+                    jobId,
+                    RunStage.PUBLICAPI,
+                    "공개 API 진입점·확장 포인트를 분석 중입니다.",
+                    "API map 생성에 실패했습니다.",
+                    optionalFailures,
+                    () -> apiMapBuildService.build(runId)
             );
 
             executeOptional(
