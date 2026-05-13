@@ -36,7 +36,7 @@ public class LlmConfig {
     /**
      * 응답 최대 토큰 수
      */
-    private int maxTokens = 8192;
+    private int maxTokens = 20000;
 
     /**
      * Claude API 호출용 RestClient Bean.

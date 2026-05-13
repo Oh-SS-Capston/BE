@@ -66,7 +66,7 @@ public class LlmService {
     private static final long MAX_RETRY_DELAY_MILLIS = 12000L;
 
     private static final int MAX_CAUTIONS = 12;
-    private static final int MAX_SCENARIOS = 4;
+    private static final int MAX_SCENARIOS = 2;
     private static final int MAX_STEPS_PER_SCENARIO = 4;
     private static final int MAX_CORE_CLASSES = 10;
     private static final int MAX_CORE_METHODS = 18;
@@ -74,10 +74,15 @@ public class LlmService {
     private static final int MAX_EVIDENCE_LINKS = 3;
     private static final int MAX_API_ENTRY_OUTPUT = 14;
 
-    private static final int TOKENS_CAUTIONS = 1400;
-    private static final int TOKENS_SCENARIOS = 1800;
-    private static final int CONTEXT_LIMIT_CAUTIONS_COMPACT = 9000;
-    private static final int CONTEXT_LIMIT_SCENARIOS_COMPACT = 11000;
+    private static final int TOKENS_CAUTIONS = 4000;
+    private static final int TOKENS_SCENARIOS = 10000;
+    private static final int CONTEXT_LIMIT_CAUTIONS_COMPACT = 14000;
+    private static final int CONTEXT_LIMIT_SCENARIOS_COMPACT = 22000;
+
+    private static final String MAIN_JAVA_MARKER = "/src/main/java/";
+    private static final String MAIN_KOTLIN_MARKER = "/src/main/kotlin/";
+    private static final String TEST_MARKER = "/src/test/";
+    private static final String TARGET_MARKER = "/target/";
 
     private static final String KOREAN_POLICY = """
             - 자연어 출력은 반드시 한국어로 작성한다.
@@ -421,6 +426,10 @@ public class LlmService {
         ObjectNode out = objectMapper.createObjectNode();
         out.set("overview", normalizeOverview(raw.path("overview"), structure));
         out.set("methodFlow", normalizeMethodFlow(raw.path("methodFlow"), structure.path("methodFlowSeed")));
+        Map<String, JsonNode> methodSeedByFqn = indexMethodSeedByFqn(structure.path("coreMethodSeed"));
+        ArrayNode flowSeed = out.path("methodFlow").isArray()
+                ? (ArrayNode) out.path("methodFlow")
+                : objectMapper.createArrayNode();
 
         ArrayNode scenarios = out.putArray("scenarios");
         for (int i = 0; i < scenariosRaw.size() && scenarios.size() < MAX_SCENARIOS; i++) {
@@ -442,12 +451,30 @@ public class LlmService {
                     if (!rawStep.isObject()) {
                         continue;
                     }
+                    JsonNode flowStep = s < flowSeed.size() ? flowSeed.get(s) : NullNode.getInstance();
                     ObjectNode step = steps.addObject();
                     step.put("stepNo", rawStep.path("stepNo").asInt(s + 1));
                     step.put("description", shortenText(rawStep.path("description").asText("핵심 메서드를 호출한다."), 160));
-                    putIfText(step, "classFqn", rawStep.path("classFqn").asText(""));
-                    putIfText(step, "methodFqn", rawStep.path("methodFqn").asText(""));
-                    step.set("evidenceLinks", normalizeEvidenceLinks(rawStep.path("evidenceLinks"), MAX_EVIDENCE_LINKS));
+                    String methodFqn = firstNonBlank(
+                            rawStep.path("methodFqn").asText(""),
+                            flowStep.path("methodFqn").asText("")
+                    );
+                    String classFqn = firstNonBlank(
+                            rawStep.path("classFqn").asText(""),
+                            flowStep.path("classFqn").asText(""),
+                            ownerFromMethodFqn(methodFqn)
+                    );
+                    putIfText(step, "classFqn", classFqn);
+                    putIfText(step, "methodFqn", methodFqn);
+
+                    ArrayNode evidenceLinks = normalizeEvidenceLinks(rawStep.path("evidenceLinks"), MAX_EVIDENCE_LINKS);
+                    if (evidenceLinks.isEmpty()) {
+                        evidenceLinks = evidenceLinksFromSeed(flowStep);
+                    }
+                    if (evidenceLinks.isEmpty() && !methodFqn.isBlank()) {
+                        evidenceLinks = evidenceLinksFromSeed(methodSeedByFqn.getOrDefault(methodFqn, NullNode.getInstance()));
+                    }
+                    step.set("evidenceLinks", evidenceLinks);
                 }
             }
 
@@ -455,7 +482,11 @@ public class LlmService {
                 ObjectNode step = steps.addObject();
                 step.put("stepNo", 1);
                 step.put("description", "핵심 API 호출 순서를 따라 실행한다.");
-                step.putArray("evidenceLinks");
+                JsonNode firstFlow = flowSeed.isEmpty() ? NullNode.getInstance() : flowSeed.get(0);
+                String methodFqn = firstFlow.path("methodFqn").asText("");
+                putIfText(step, "methodFqn", methodFqn);
+                putIfText(step, "classFqn", firstFlow.path("classFqn").asText(""));
+                step.set("evidenceLinks", evidenceLinksFromSeed(firstFlow));
             }
         }
 
@@ -517,10 +548,7 @@ public class LlmService {
             step.put("description", shortenText(flowStep.path("description").asText("핵심 메서드를 순서대로 호출한다."), 160));
             putIfText(step, "classFqn", flowStep.path("classFqn").asText(""));
             putIfText(step, "methodFqn", flowStep.path("methodFqn").asText(""));
-            ArrayNode evidenceLinks = step.putArray("evidenceLinks");
-            ObjectNode link = evidenceLinks.addObject();
-            putIfText(link, "filePath", flowStep.path("filePath").asText(""));
-            putIfText(link, "lines", formatLines(flowStep.path("startLine"), flowStep.path("endLine")));
+            step.set("evidenceLinks", evidenceLinksFromSeed(flowStep));
         }
 
         if (steps.isEmpty()) {
@@ -592,9 +620,14 @@ public class LlmService {
             node.put("order", raw.path("order").asInt(i + 1));
             node.put("title", shortenText(raw.path("title").asText("단계"), 50));
             node.put("description", shortenText(raw.path("description").asText("핵심 메서드를 호출한다."), 120));
-            putIfText(node, "classFqn", raw.path("classFqn").asText(""));
-            putIfText(node, "methodFqn", raw.path("methodFqn").asText(""));
-            putIfText(node, "filePath", raw.path("filePath").asText(""));
+            String methodFqn = firstNonBlank(raw.path("methodFqn").asText(""), raw.path("fqn").asText(""));
+            String classFqn = firstNonBlank(raw.path("classFqn").asText(""), ownerFromMethodFqn(methodFqn));
+            putIfText(node, "classFqn", classFqn);
+            putIfText(node, "methodFqn", methodFqn);
+            String filePath = raw.path("filePath").asText("");
+            if (isUserFacingSourcePath(filePath)) {
+                putIfText(node, "filePath", filePath);
+            }
             if (raw.path("startLine").canConvertToInt()) {
                 node.put("startLine", raw.path("startLine").asInt());
             }
@@ -960,17 +993,86 @@ public class LlmService {
             if (!link.isObject()) {
                 continue;
             }
-            ObjectNode item = out.addObject();
+            ObjectNode item = objectMapper.createObjectNode();
             if (link.path("evidenceId").canConvertToLong()) {
                 item.put("evidenceId", link.path("evidenceId").asLong());
             }
-            putIfText(item, "filePath", link.path("filePath").asText(""));
+            String filePath = safeText(link.path("filePath").asText(""));
+            if (!filePath.isBlank() && !isUserFacingSourcePath(filePath)) {
+                continue;
+            }
+            putIfText(item, "filePath", filePath);
             putIfText(item, "lines", firstNonBlank(
                     link.path("lines").asText(""),
                     formatLines(link.path("startLine"), link.path("endLine"))
             ));
+            if (!item.isEmpty()) {
+                out.add(item);
+            }
         }
         return out;
+    }
+
+    private ArrayNode evidenceLinksFromSeed(JsonNode seed) {
+        ArrayNode out = objectMapper.createArrayNode();
+        if (seed == null || seed.isMissingNode() || seed.isNull()) {
+            return out;
+        }
+        String filePath = safeText(seed.path("filePath").asText(""));
+        if (!isUserFacingSourcePath(filePath)) {
+            return out;
+        }
+        ObjectNode link = out.addObject();
+        putIfText(link, "filePath", filePath);
+        putIfText(link, "lines", firstNonBlank(
+                seed.path("lines").asText(""),
+                formatLines(seed.path("startLine"), seed.path("endLine"))
+        ));
+        return out;
+    }
+
+    private Map<String, JsonNode> indexMethodSeedByFqn(JsonNode methodSeed) {
+        Map<String, JsonNode> out = new HashMap<>();
+        if (methodSeed == null || !methodSeed.isArray()) {
+            return out;
+        }
+        for (JsonNode seed : methodSeed) {
+            String fqn = safeText(seed.path("fqn").asText(""));
+            if (!fqn.isBlank()) {
+                out.putIfAbsent(fqn, seed);
+            }
+        }
+        return out;
+    }
+
+    private String ownerFromMethodFqn(String methodFqn) {
+        String value = safeText(methodFqn);
+        if (value.isBlank()) {
+            return "";
+        }
+        if (value.contains("#")) {
+            return value.substring(0, value.indexOf('#'));
+        }
+        int idx = value.lastIndexOf('.');
+        if (idx <= 0) {
+            return "";
+        }
+        return value.substring(0, idx);
+    }
+
+    private boolean isUserFacingSourcePath(String filePath) {
+        String normalized = normalizePath(filePath);
+        if (normalized.isBlank()) {
+            return false;
+        }
+        if (normalized.contains(TEST_MARKER) || normalized.contains(TARGET_MARKER)) {
+            return false;
+        }
+        return normalized.contains(MAIN_JAVA_MARKER) || normalized.contains(MAIN_KOTLIN_MARKER);
+    }
+
+    private String normalizePath(String path) {
+        return safeText(path).replace('\\', '/').toLowerCase(Locale.ROOT);
     }
 
     private String formatLines(JsonNode startLine, JsonNode endLine) {
@@ -1131,6 +1233,16 @@ public class LlmService {
     ) {
         String primaryModel = resolvePrimaryModel();
         String fallbackModel = llmConfig.getModel();
+        int effectiveMaxTokens = Math.max(1, Math.min(maxTokens, llmConfig.getMaxTokens()));
+        // 실제 호출에 적용된 토큰 상한을 남겨 런타임 설정 불일치를 빠르게 확인한다.
+        log.info(
+                "[LlmService] {} token config. requestedMaxTokens={}, globalMaxTokens={}, effectiveMaxTokens={}, primaryModel={}",
+                stepName,
+                maxTokens,
+                llmConfig.getMaxTokens(),
+                effectiveMaxTokens,
+                primaryModel
+        );
         try {
             return callClaudeWithModel(systemPrompt, userMessage, maxTokens, primaryModel);
         } catch (LlmException firstFailure) {
