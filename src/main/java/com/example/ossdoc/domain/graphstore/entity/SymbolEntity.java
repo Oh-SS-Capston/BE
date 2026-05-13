@@ -77,6 +77,19 @@ public class SymbolEntity extends BaseAuditedEntity {
     @Column(name = "origin", nullable = false)
     private OriginKind origin = OriginKind.AST;
 
+    @Column(name = "type_kind")
+    private String typeKind;
+
+    @Column(name = "source_root")
+    private String sourceRoot;
+
+    @Column(name = "doc_comment", columnDefinition = "text")
+    private String docComment;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "annotations", columnDefinition = "jsonb")
+    private JsonNode annotations = JsonNodeFactory.instance.arrayNode();
+
     public void assignOwner(SymbolEntity owner) {
         this.owner = owner;
     }

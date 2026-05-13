@@ -22,7 +22,8 @@ public class FactsEvidenceConverter {
                 dto.startLine(),
                 dto.endLine(),
                 dto.snippet(),
-                dto.hash()
+                dto.hash(),
+                dto.id()
         );
     }
 

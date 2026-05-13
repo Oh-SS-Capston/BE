@@ -8,6 +8,8 @@ public record NormalizedSymbolFact(
         String symbol,
         String name,
         String kind,
+        String typeKind,
+        String sourceRoot,
         String access,
         List<String> modifiers,
         String origin,
@@ -17,6 +19,14 @@ public record NormalizedSymbolFact(
         String module,
         String sourceFile,
         List<String> evidenceIds,
-        JsonNode signature
+        JsonNode signature,
+        String superclassTypeRef,
+        List<String> interfaceTypeRefs,
+        String returnTypeRef,
+        List<String> paramTypeRefs,
+        List<String> throwsTypeRefs,
+        String fieldTypeRef,
+        String docComment,
+        JsonNode annotations
 ) {
 }

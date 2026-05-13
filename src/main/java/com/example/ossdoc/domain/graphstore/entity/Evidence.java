@@ -8,7 +8,10 @@ import jakarta.persistence.*;
 import lombok.*;
 
 @Entity
-@Table(name = "evidence")
+@Table(
+        name = "evidence",
+        uniqueConstraints = @UniqueConstraint(name = "ux_evidence_run_raw", columnNames = {"run_id", "raw_id"})
+)
 @Getter
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 @AllArgsConstructor
@@ -47,4 +50,7 @@ public class Evidence extends BaseCreatedEntity {
 
     @Column(name = "hash")
     private String hash;
+
+    @Column(name = "raw_id")
+    private String rawId;
 }

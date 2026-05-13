@@ -87,6 +87,7 @@ public class FactsEdgeConverter {
             case "BYTECODE" -> OriginKind.BYTECODE;
             case "MERGED" -> OriginKind.MERGED;
             case "CONTRACT" -> OriginKind.CONTRACT;
+            case "DERIVED" -> OriginKind.DERIVED;
             default -> OriginKind.AST;
         };
     }
