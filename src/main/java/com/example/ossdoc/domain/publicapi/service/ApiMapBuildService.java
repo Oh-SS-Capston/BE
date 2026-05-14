@@ -97,6 +97,15 @@ public class ApiMapBuildService {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("symbol_id",      ep.getSymbolId());
             node.put("qualified_name", ep.getQualifiedName());
+            /**
+             * LLM 앵커 필드:
+             * - owner_type_fqn: 클래스/메서드 설명 트리 병합 기준 키
+             * - source_file/start_line/end_line: 코드 위치 기반 설명 생성의 최소 단위
+             */
+            putNullable(node, "owner_type_fqn", ep.getOwnerTypeFqn());
+            putNullable(node, "source_file", ep.getSourceFile());
+            putNullableInt(node, "start_line", ep.getStartLine());
+            putNullableInt(node, "end_line", ep.getEndLine());
             node.put("simple_name",    ep.getSimpleName());
             node.put("type_kind",      ep.getTypeKind());
             node.put("role",           ep.getRole());
@@ -114,6 +123,10 @@ public class ApiMapBuildService {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("symbol_id",               xp.getSymbolId());
             node.put("qualified_name",           xp.getQualifiedName());
+            putNullable(node, "owner_type_fqn", xp.getOwnerTypeFqn());
+            putNullable(node, "source_file", xp.getSourceFile());
+            putNullableInt(node, "start_line", xp.getStartLine());
+            putNullableInt(node, "end_line", xp.getEndLine());
             node.put("simple_name",              xp.getSimpleName());
             node.put("type_kind",                xp.getTypeKind());
             node.put("confidence",               xp.getConfidence());
@@ -154,6 +167,11 @@ public class ApiMapBuildService {
         for (EntryPointCandidate ep : entryPoints) {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("symbol_id",  ep.getSymbolId());
+            node.put("qualified_name", ep.getQualifiedName());
+            putNullable(node, "owner_type_fqn", ep.getOwnerTypeFqn());
+            putNullable(node, "source_file", ep.getSourceFile());
+            putNullableInt(node, "start_line", ep.getStartLine());
+            putNullableInt(node, "end_line", ep.getEndLine());
             node.put("simple_name", ep.getSimpleName());
             node.put("type_kind",  ep.getTypeKind());
             node.put("role",       ep.getRole());
@@ -167,6 +185,11 @@ public class ApiMapBuildService {
         for (ExtensionPointCandidate xp : extensionPoints) {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("symbol_id",  xp.getSymbolId());
+            node.put("qualified_name", xp.getQualifiedName());
+            putNullable(node, "owner_type_fqn", xp.getOwnerTypeFqn());
+            putNullable(node, "source_file", xp.getSourceFile());
+            putNullableInt(node, "start_line", xp.getStartLine());
+            putNullableInt(node, "end_line", xp.getEndLine());
             node.put("simple_name", xp.getSimpleName());
             node.put("type_kind",  xp.getTypeKind());
             node.put("confidence", xp.getConfidence());
@@ -208,6 +231,14 @@ public class ApiMapBuildService {
     }
 
     private void putNullable(ObjectNode node, String key, String value) {
+        if (value == null || value.isBlank()) {
+            node.putNull(key);
+            return;
+        }
+        node.put(key, value);
+    }
+
+    private void putNullableInt(ObjectNode node, String key, Integer value) {
         if (value != null) {
             node.put(key, value);
         } else {
