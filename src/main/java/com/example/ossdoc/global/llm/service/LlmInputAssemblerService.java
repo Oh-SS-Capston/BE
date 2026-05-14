@@ -305,6 +305,8 @@ public class LlmInputAssemblerService {
                     firstNonBlank(
                             item.path("filePath").asText(""),
                             item.path("file_path").asText(""),
+                            item.path("sourceFile").asText(""),
+                            item.path("source_file").asText(""),
                             prev == null ? "" : prev.filePath()
                     ),
                     role,
@@ -404,8 +406,14 @@ public class LlmInputAssemblerService {
         }
 
         if (byFqn.isEmpty()) {
+            // rule_candidates의 method_cards를 먼저 반영해 "규칙 후보가 없는 메서드"도 코어 메서드 씨앗으로 포함한다.
+            appendMethodsFromApiMap(byFqn, ruleCandidates.path("methodCards"), coreTypeFqns, 9);
+            appendMethodsFromApiMap(byFqn, ruleCandidates.path("method_cards"), coreTypeFqns, 9);
             appendMethodsFromRuleCandidates(byFqn, ruleCandidates, coreTypeFqns, 8, publicApiTypeBySymbolId);
         } else {
+            // 이미 seed가 있더라도 method_cards를 낮은 가중치로 합쳐 coverage를 넓힌다.
+            appendMethodsFromApiMap(byFqn, ruleCandidates.path("methodCards"), coreTypeFqns, 7);
+            appendMethodsFromApiMap(byFqn, ruleCandidates.path("method_cards"), coreTypeFqns, 7);
             appendMethodsFromRuleCandidates(byFqn, ruleCandidates, coreTypeFqns, 6, publicApiTypeBySymbolId);
         }
 
@@ -480,6 +488,8 @@ public class LlmInputAssemblerService {
             String signatureHint = firstNonBlank(item.path("signatureHint").asText(""), item.path("signature").asText(""));
             String summarySeed = firstNonBlank(
                     item.path("summary").asText(""),
+                    item.path("summaryHint").asText(""),
+                    item.path("summary_hint").asText(""),
                     inferMethodUsage(methodName, className, signatureHint)
             );
             int importance = Math.max(baseImportance, item.path("importance").asInt(baseImportance) + methodHeuristicBonus(methodName));
@@ -489,6 +499,8 @@ public class LlmInputAssemblerService {
                     firstNonBlank(
                             item.path("symbolId").asText(""),
                             item.path("symbol_id").asText(""),
+                            item.path("methodSymbolId").asText(""),
+                            item.path("method_symbol_id").asText(""),
                             prev == null ? "" : prev.symbolId()
                     ),
                     firstNonBlank(
@@ -508,7 +520,11 @@ public class LlmInputAssemblerService {
                     importance,
                     signatureHint,
                     shortenText(summarySeed, 140),
-                    firstNonBlank(item.path("scenarioHint").asText(""), inferScenarioHint(methodName)),
+                    firstNonBlank(
+                            item.path("scenarioHint").asText(""),
+                            item.path("scenario_hint").asText(""),
+                            inferScenarioHint(methodName)
+                    ),
                     firstNonNullInt(asNullableInt(item.path("startLine")), asNullableInt(item.path("start_line"))),
                     firstNonNullInt(asNullableInt(item.path("endLine")), asNullableInt(item.path("end_line")))
             );
