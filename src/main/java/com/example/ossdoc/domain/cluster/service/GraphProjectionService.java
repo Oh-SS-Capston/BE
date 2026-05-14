@@ -70,6 +70,12 @@ public class GraphProjectionService {
                     .packageName(packageName)
                     .moduleId(symbol.getModule() == null ? null : symbol.getModule().getModuleId())
                     .publicApi(publicApiSymbolIds.contains(symbol.getSymbolId()))
+                    // rankings.json에서 "설명 가능한 위치"를 만들기 위한 메타데이터를 함께 투영한다.
+                    .symbolKind(symbol.getSymbolKind() == null ? null : symbol.getSymbolKind().name())
+                    .ownerSymbol(symbol.getOwner() == null ? null : symbol.getOwner().getQualifiedName())
+                    .sourceFile(symbol.getSourceFile() == null ? null : symbol.getSourceFile().getPath())
+                    .sourceStartLine(symbol.getSourceStartLine())
+                    .sourceEndLine(symbol.getSourceEndLine())
                     .build());
 
             nodeIndexMap.put(symbol.getSymbolId(), i);

@@ -63,6 +63,11 @@ public class SymbolScoringService {
                     .apiScore(api)
                     .evidenceScore(evidence)
                     .subsystemCentralityScore(subsystemCentrality)
+                    // rankings.json에 위치 기반 설명 앵커를 실어준다.
+                    .symbolKind(node.getSymbolKind())
+                    .ownerSymbol(node.getOwnerSymbol())
+                    .sourceFile(node.getSourceFile())
+                    .lineRange(buildLineRange(node.getSourceStartLine(), node.getSourceEndLine()))
                     .build());
         }
 
@@ -89,9 +94,23 @@ public class SymbolScoringService {
                     .apiScore(item.getApiScore())
                     .evidenceScore(item.getEvidenceScore())
                     .subsystemCentralityScore(item.getSubsystemCentralityScore())
+                    .symbolKind(item.getSymbolKind())
+                    .ownerSymbol(item.getOwnerSymbol())
+                    .sourceFile(item.getSourceFile())
+                    .lineRange(item.getLineRange())
                     .build());
         }
         return ranked;
+    }
+
+    private SymbolRankingItem.LineRange buildLineRange(Integer startLine, Integer endLine) {
+        if (startLine == null && endLine == null) {
+            return null;
+        }
+        return SymbolRankingItem.LineRange.builder()
+                .startLine(startLine)
+                .endLine(endLine)
+                .build();
     }
 
     /**
