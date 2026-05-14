@@ -106,13 +106,17 @@ public class LlmInputAssemblerService {
     private ObjectNode buildAutoStructure(String runId, boolean forceKorean) {
         JsonNode apiMap = loadOptionalArtifactMeta(runId, ArtifactKind.API_MAP_JSON);
         JsonNode apiSurface = loadOptionalArtifactMeta(runId, ArtifactKind.API_SURFACE_JSON);
+        JsonNode symbolSourceIndex = loadOptionalArtifactMeta(runId, ArtifactKind.SYMBOL_SOURCE_INDEX_JSON);
         JsonNode ruleCandidates = requireArtifactMeta(runId, ArtifactKind.RULE_CANDIDATES_JSON);
         JsonNode rankings = requireArtifactMeta(runId, ArtifactKind.RANKINGS_JSON);
         JsonNode subsystems = requireArtifactMeta(runId, ArtifactKind.SUBSYSTEMS_JSON);
 
         Map<String, String> publicApiTypeBySymbolId = indexPublicApiTypeBySymbolId(apiMap, apiSurface);
+        Map<String, SourceAnchor> sourceAnchorBySymbolId = indexSourceAnchorBySymbolId(symbolSourceIndex);
+        Map<String, SourceAnchor> sourceAnchorByFqn = indexSourceAnchorByFqn(symbolSourceIndex);
 
         List<CoreTypeSeed> coreTypes = extractCoreTypes(apiMap, rankings, subsystems, publicApiTypeBySymbolId);
+        coreTypes = applyTypeSourceAnchors(coreTypes, sourceAnchorBySymbolId, sourceAnchorByFqn);
         List<CoreMethodSeed> coreMethods = extractCoreMethods(
                 apiMap,
                 rankings,
@@ -120,6 +124,7 @@ public class LlmInputAssemblerService {
                 ruleCandidates,
                 publicApiTypeBySymbolId
         );
+        coreMethods = applyMethodSourceAnchors(coreMethods, sourceAnchorBySymbolId, sourceAnchorByFqn);
 
         ObjectNode root = objectMapper.createObjectNode();
         root.put("runId", runId);
@@ -134,7 +139,7 @@ public class LlmInputAssemblerService {
         root.set("extensionSeed", buildExtensionSeed(apiMap, coreTypes, subsystems));
         root.set("directories", buildDirectories(apiMap, coreTypes, coreMethods));
         root.set("evidenceIndex", buildEvidenceIndex(coreTypes, coreMethods, ruleCandidates));
-        root.set("qualityGate", buildQualityGate(apiMap, ruleCandidates, rankings, subsystems));
+        root.set("qualityGate", buildQualityGate(apiMap, ruleCandidates, rankings, subsystems, symbolSourceIndex));
 
         // 하위 호환을 위한 집계 필드
         ObjectNode publicSurface = root.putObject("publicSurface");
@@ -145,6 +150,156 @@ public class LlmInputAssemblerService {
         publicSurface.set("apiEntries", buildApiEntries(coreMethods));
 
         return root;
+    }
+
+    /**
+     * symbol_source_index.json을 symbol_id 기준으로 인덱싱한다.
+     * - 기존 산출물에 누락된 source_file/start_line/end_line을 보강하기 위해 사용한다.
+     */
+    private Map<String, SourceAnchor> indexSourceAnchorBySymbolId(JsonNode symbolSourceIndex) {
+        Map<String, SourceAnchor> out = new HashMap<>();
+        JsonNode symbols = symbolSourceIndex.path("symbols");
+        if (!symbols.isArray()) {
+            return out;
+        }
+        for (JsonNode item : symbols) {
+            String symbolId = safeText(item.path("symbol_id").asText(""));
+            if (symbolId.isBlank()) {
+                continue;
+            }
+            String fqn = sanitizeQualifiedName(item.path("fqn").asText(""));
+            String sourceFile = safeText(item.path("source_file").asText(""));
+            Integer startLine = asNullableInt(item.path("start_line"));
+            Integer endLine = asNullableInt(item.path("end_line"));
+            double confidence = item.path("confidence").isNumber() ? item.path("confidence").asDouble(0.0d) : 0.0d;
+
+            out.put(symbolId, new SourceAnchor(symbolId, fqn, sourceFile, startLine, endLine, confidence));
+        }
+        return out;
+    }
+
+    /**
+     * symbol_source_index.json을 fqn 기준으로 인덱싱한다.
+     * - 동일 fqn 충돌 시 confidence가 더 높은 항목을 채택한다.
+     */
+    private Map<String, SourceAnchor> indexSourceAnchorByFqn(JsonNode symbolSourceIndex) {
+        Map<String, SourceAnchor> out = new HashMap<>();
+        JsonNode symbols = symbolSourceIndex.path("symbols");
+        if (!symbols.isArray()) {
+            return out;
+        }
+        for (JsonNode item : symbols) {
+            String fqn = sanitizeQualifiedName(item.path("fqn").asText(""));
+            if (fqn.isBlank()) {
+                continue;
+            }
+            String symbolId = safeText(item.path("symbol_id").asText(""));
+            String sourceFile = safeText(item.path("source_file").asText(""));
+            Integer startLine = asNullableInt(item.path("start_line"));
+            Integer endLine = asNullableInt(item.path("end_line"));
+            double confidence = item.path("confidence").isNumber() ? item.path("confidence").asDouble(0.0d) : 0.0d;
+
+            SourceAnchor next = new SourceAnchor(symbolId, fqn, sourceFile, startLine, endLine, confidence);
+            SourceAnchor prev = out.get(fqn);
+            if (prev == null || next.confidence() > prev.confidence()) {
+                out.put(fqn, next);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * core class seed에 소스 앵커를 보강한다.
+     */
+    private List<CoreTypeSeed> applyTypeSourceAnchors(
+            List<CoreTypeSeed> coreTypes,
+            Map<String, SourceAnchor> sourceAnchorBySymbolId,
+            Map<String, SourceAnchor> sourceAnchorByFqn
+    ) {
+        if (coreTypes == null || coreTypes.isEmpty()) {
+            return List.of();
+        }
+        List<CoreTypeSeed> out = new ArrayList<>(coreTypes.size());
+        for (CoreTypeSeed seed : coreTypes) {
+            SourceAnchor anchor = resolveBestAnchor(
+                    seed.symbolId(),
+                    seed.fqn(),
+                    sourceAnchorBySymbolId,
+                    sourceAnchorByFqn
+            );
+            if (anchor == null) {
+                out.add(seed);
+                continue;
+            }
+            out.add(new CoreTypeSeed(
+                    seed.symbolId(),
+                    seed.fqn(),
+                    seed.packageName(),
+                    seed.className(),
+                    firstNonBlank(seed.filePath(), anchor.sourceFile()),
+                    seed.role(),
+                    seed.usage(),
+                    seed.importance(),
+                    firstNonNullInt(seed.startLine(), anchor.startLine()),
+                    firstNonNullInt(seed.endLine(), anchor.endLine())
+            ));
+        }
+        return List.copyOf(out);
+    }
+
+    /**
+     * core method seed에 소스 앵커를 보강한다.
+     */
+    private List<CoreMethodSeed> applyMethodSourceAnchors(
+            List<CoreMethodSeed> coreMethods,
+            Map<String, SourceAnchor> sourceAnchorBySymbolId,
+            Map<String, SourceAnchor> sourceAnchorByFqn
+    ) {
+        if (coreMethods == null || coreMethods.isEmpty()) {
+            return List.of();
+        }
+        List<CoreMethodSeed> out = new ArrayList<>(coreMethods.size());
+        for (CoreMethodSeed seed : coreMethods) {
+            SourceAnchor anchor = resolveBestAnchor(
+                    seed.symbolId(),
+                    seed.fqn(),
+                    sourceAnchorBySymbolId,
+                    sourceAnchorByFqn
+            );
+            if (anchor == null) {
+                out.add(seed);
+                continue;
+            }
+            out.add(new CoreMethodSeed(
+                    seed.symbolId(),
+                    seed.classSymbolId(),
+                    seed.classFqn(),
+                    seed.className(),
+                    seed.methodName(),
+                    seed.fqn(),
+                    firstNonBlank(seed.filePath(), anchor.sourceFile()),
+                    seed.importance(),
+                    seed.signatureHint(),
+                    seed.summarySeed(),
+                    seed.scenarioHint(),
+                    firstNonNullInt(seed.startLine(), anchor.startLine()),
+                    firstNonNullInt(seed.endLine(), anchor.endLine())
+            ));
+        }
+        return List.copyOf(out);
+    }
+
+    private SourceAnchor resolveBestAnchor(
+            String symbolId,
+            String fqn,
+            Map<String, SourceAnchor> sourceAnchorBySymbolId,
+            Map<String, SourceAnchor> sourceAnchorByFqn
+    ) {
+        SourceAnchor byId = sourceAnchorBySymbolId.get(safeText(symbolId));
+        if (byId != null) {
+            return byId;
+        }
+        return sourceAnchorByFqn.get(sanitizeQualifiedName(fqn));
     }
 
     /**
@@ -1113,13 +1268,20 @@ public class LlmInputAssemblerService {
     /**
      * 품질 게이트 요약.
      */
-    private JsonNode buildQualityGate(JsonNode apiMap, JsonNode ruleCandidates, JsonNode rankings, JsonNode subsystems) {
+    private JsonNode buildQualityGate(
+            JsonNode apiMap,
+            JsonNode ruleCandidates,
+            JsonNode rankings,
+            JsonNode subsystems,
+            JsonNode symbolSourceIndex
+    ) {
         ObjectNode out = objectMapper.createObjectNode();
         out.put("apiMapPresent", !apiMap.isMissingNode() && !apiMap.isNull() && !apiMap.isEmpty());
         out.put("ruleCandidateCount", countArray(ruleCandidates.path("candidates")));
         out.put("rankingCount", countArray(rankings.path("symbolRankings")));
         out.put("subsystemCount", countArray(subsystems.path("subsystems")));
-        out.put("inputSourcePolicy", "api_map + rule_candidates + rankings + subsystems");
+        out.put("symbolSourceAnchorCount", countArray(symbolSourceIndex.path("symbols")));
+        out.put("inputSourcePolicy", "api_map + rule_candidates + rankings + subsystems + optional(symbol_source_index)");
         return out;
     }
 
@@ -1662,6 +1824,16 @@ public class LlmInputAssemblerService {
     public record LlmContextBundle(
             Map<String, Object> structureEngineOutput,
             List<LlmRequest.EvidenceSnippet> evidenceBundle
+    ) {
+    }
+
+    private record SourceAnchor(
+            String symbolId,
+            String fqn,
+            String sourceFile,
+            Integer startLine,
+            Integer endLine,
+            double confidence
     ) {
     }
 

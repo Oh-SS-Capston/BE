@@ -6,16 +6,21 @@ import com.example.ossdoc.domain.artifact.service.ArtifactService;
 import com.example.ossdoc.domain.graphstore.entity.SymbolEntity;
 import com.example.ossdoc.domain.graphstore.enums.SymbolKind;
 import com.example.ossdoc.domain.graphstore.repository.EdgeRepository;
+import com.example.ossdoc.domain.graphstore.repository.SymbolEvidenceRepository;
+import com.example.ossdoc.domain.graphstore.repository.SymbolRepository;
 import com.example.ossdoc.domain.rule.dto.json.RuleCandidateDisplayPolicyJson;
 import com.example.ossdoc.domain.rule.dto.json.RuleCandidateEvidenceJson;
 import com.example.ossdoc.domain.rule.dto.json.RuleCandidateItem;
 import com.example.ossdoc.domain.rule.dto.json.RuleMethodCardJson;
 import com.example.ossdoc.domain.rule.dto.json.RuleCandidateSummaryJson;
 import com.example.ossdoc.domain.rule.dto.json.RuleCandidatesJson;
+import com.example.ossdoc.domain.rule.dto.json.SymbolSourceIndexItemJson;
+import com.example.ossdoc.domain.rule.dto.json.SymbolSourceIndexJson;
 import com.example.ossdoc.domain.rule.entity.RuleCandidate;
 import com.example.ossdoc.domain.rule.entity.RuleCandidateEvidence;
 import com.example.ossdoc.domain.rule.entity.RuleMiningSignal;
 import com.example.ossdoc.domain.rule.enums.RuleCandidateConfidence;
+import com.example.ossdoc.domain.rule.enums.RuleMiningSignalType;
 import com.example.ossdoc.domain.rule.repository.RuleCandidateEvidenceRepository;
 import com.example.ossdoc.domain.rule.repository.RuleCandidateRepository;
 import com.example.ossdoc.domain.rule.repository.RuleMiningSignalRepository;
@@ -46,6 +51,8 @@ public class RuleCandidateArtifactPublisher {
 
     private static final String SCHEMA_VERSION = "1.3";
     private static final String RELATIVE_PATH = "rule/rule_candidates.json";
+    private static final String SOURCE_INDEX_SCHEMA_VERSION = "1.0";
+    private static final String SOURCE_INDEX_RELATIVE_PATH = "analysis/symbol_source_index.json";
     private static final BigDecimal LOW_SCORE_THRESHOLD = new BigDecimal("0.6000");
     private static final int MAX_METHOD_CARDS = 80;
 
@@ -64,6 +71,8 @@ public class RuleCandidateArtifactPublisher {
     private final RuleCandidateRepository ruleCandidateRepository;
     private final RuleCandidateEvidenceRepository ruleCandidateEvidenceRepository;
     private final RuleMiningSignalRepository ruleMiningSignalRepository;
+    private final SymbolRepository symbolRepository;
+    private final SymbolEvidenceRepository symbolEvidenceRepository;
     private final EdgeRepository edgeRepository;
     private final ArtifactService artifactService;
     private final ObjectMapper objectMapper;
@@ -120,6 +129,20 @@ public class RuleCandidateArtifactPublisher {
                 content
         );
 
+        /*
+         * 우선순위 4: 심볼-소스 브릿지 인덱스를 함께 발행한다.
+         * - 실패해도 RULE 산출물 자체는 유지해 파이프라인 안정성을 지킨다.
+         */
+        try {
+            publishSymbolSourceIndex(run);
+        } catch (Exception e) {
+            log.warn(
+                    "[RULE-MINING] symbol_source_index publish failed. runId={}",
+                    run.getRunId(),
+                    e
+            );
+        }
+
         log.info(
                 "[RULE-MINING] rule_candidates.json published. runId={}, artifactId={}, candidates={}, methodCards={}, primary={}",
                 run.getRunId(),
@@ -130,6 +153,155 @@ public class RuleCandidateArtifactPublisher {
         );
 
         return artifact;
+    }
+
+    /**
+     * 우선순위 4 브릿지 산출물(symbol_source_index.json)을 생성/저장한다.
+     *
+     * - symbol_id 기준으로 fqn/소스 위치/근거 ID/evidence confidence를 한 번에 조회 가능하게 만든다.
+     * - LLM 입력 조립에서 api_map/rankings 누락 앵커를 보강하는 기반 데이터로 사용된다.
+     */
+    private void publishSymbolSourceIndex(RepoRun run) {
+        String runId = run.getRunId();
+        List<SymbolEntity> symbols = symbolRepository.findAllWithOwnerAndSourceByRunId(runId);
+        if (symbols == null || symbols.isEmpty()) {
+            return;
+        }
+
+        Map<String, SymbolCoverageAggregate> aggregateBySymbolId = new HashMap<>();
+        for (SymbolEntity symbol : symbols) {
+            if (symbol == null || symbol.getSymbolId() == null || symbol.getSymbolId().isBlank()) {
+                continue;
+            }
+            aggregateBySymbolId.put(symbol.getSymbolId(), new SymbolCoverageAggregate(symbol));
+        }
+        if (aggregateBySymbolId.isEmpty()) {
+            return;
+        }
+
+        // 1) symbol_evidence 기준으로 evidence id와 라인 범위를 누적한다.
+        List<com.example.ossdoc.domain.graphstore.entity.SymbolEvidence> symbolEvidences =
+                symbolEvidenceRepository.findAllWithEvidenceByRunId(runId);
+        for (com.example.ossdoc.domain.graphstore.entity.SymbolEvidence symbolEvidence : symbolEvidences) {
+            if (symbolEvidence == null || symbolEvidence.getSymbol() == null) {
+                continue;
+            }
+            SymbolCoverageAggregate aggregate =
+                    aggregateBySymbolId.get(symbolEvidence.getSymbol().getSymbolId());
+            if (aggregate == null || symbolEvidence.getEvidence() == null) {
+                continue;
+            }
+            aggregate.addEvidenceId(symbolEvidence.getEvidence().getEvidenceId());
+            aggregate.addLineRange(
+                    symbolEvidence.getEvidence().getStartLine(),
+                    symbolEvidence.getEvidence().getEndLine()
+            );
+        }
+
+        // 2) signal 기준으로 confidence 힌트와 보조 라인 범위를 누적한다.
+        List<RuleMiningSignal> signals = ruleMiningSignalRepository.findAllWithSymbolAndSourceByRunId(runId);
+        for (RuleMiningSignal signal : signals) {
+            if (signal == null || signal.getSymbol() == null) {
+                continue;
+            }
+            SymbolCoverageAggregate aggregate = aggregateBySymbolId.get(signal.getSymbol().getSymbolId());
+            if (aggregate == null) {
+                continue;
+            }
+            aggregate.addSignalType(signal.getSignalType());
+            aggregate.addSignalConfidence(signal.getConfidenceHint());
+            aggregate.addLineRange(signal.getStartLine(), signal.getEndLine());
+
+            if (signal.getEvidence() != null) {
+                aggregate.addEvidenceId(signal.getEvidence().getEvidenceId());
+                aggregate.addLineRange(
+                        signal.getEvidence().getStartLine(),
+                        signal.getEvidence().getEndLine()
+                );
+            }
+        }
+
+        List<SymbolSourceIndexItemJson> items = new ArrayList<>();
+        for (SymbolCoverageAggregate aggregate : aggregateBySymbolId.values()) {
+            SymbolEntity symbol = aggregate.symbol();
+            String fqn = safeText(symbol.getQualifiedName());
+            if (fqn.isBlank()) {
+                continue;
+            }
+
+            String sourceFile = symbol.getSourceFile() == null ? "" : safeText(symbol.getSourceFile().getPath());
+            Integer startLine = firstNonNull(symbol.getSourceStartLine(), aggregate.minStartLine());
+            Integer endLine = firstNonNull(symbol.getSourceEndLine(), aggregate.maxEndLine());
+
+            items.add(SymbolSourceIndexItemJson.builder()
+                    .symbolId(symbol.getSymbolId())
+                    .fqn(fqn)
+                    .symbolKind(symbol.getSymbolKind() == null ? "" : symbol.getSymbolKind().name())
+                    .ownerTypeFqn(resolveOwnerTypeFqn(symbol))
+                    .sourceFile(sourceFile)
+                    .startLine(startLine)
+                    .endLine(endLine)
+                    .evidenceIds(aggregate.sortedEvidenceIds())
+                    .confidence(aggregate.toConfidenceScore(sourceFile, startLine, endLine))
+                    .build());
+        }
+
+        items.sort(Comparator
+                .comparing(SymbolSourceIndexItemJson::fqn, Comparator.nullsLast(String::compareTo))
+                .thenComparing(SymbolSourceIndexItemJson::symbolId, Comparator.nullsLast(String::compareTo)));
+
+        SymbolSourceIndexJson output = SymbolSourceIndexJson.builder()
+                .schemaVersion(SOURCE_INDEX_SCHEMA_VERSION)
+                .runId(runId)
+                .generatedAt(OffsetDateTime.now().toString())
+                .symbolCount(items.size())
+                .symbols(List.copyOf(items))
+                .build();
+
+        artifactService.saveJsonArtifact(
+                run,
+                ArtifactKind.SYMBOL_SOURCE_INDEX_JSON,
+                SOURCE_INDEX_SCHEMA_VERSION,
+                SOURCE_INDEX_RELATIVE_PATH,
+                objectMapper.valueToTree(output)
+        );
+    }
+
+    /**
+     * owner 체인을 따라가며 가장 가까운 TYPE 심볼 FQN을 찾는다.
+     */
+    private String resolveOwnerTypeFqn(SymbolEntity symbol) {
+        if (symbol == null) {
+            return "";
+        }
+        if (symbol.getSymbolKind() == SymbolKind.TYPE) {
+            return safeText(symbol.getQualifiedName());
+        }
+
+        SymbolEntity cursor = symbol.getOwner();
+        while (cursor != null) {
+            if (cursor.getSymbolKind() == SymbolKind.TYPE) {
+                return safeText(cursor.getQualifiedName());
+            }
+            cursor = cursor.getOwner();
+        }
+        return "";
+    }
+
+    private String safeText(String value) {
+        return value == null ? "" : value.trim();
+    }
+
+    private Integer firstNonNull(Integer... values) {
+        if (values == null) {
+            return null;
+        }
+        for (Integer value : values) {
+            if (value != null) {
+                return value;
+            }
+        }
+        return null;
     }
 
     /**
@@ -698,6 +870,107 @@ public class RuleCandidateArtifactPublisher {
                 return null;
             }
             return confidenceSum.divide(BigDecimal.valueOf(confidenceCount), 4, RoundingMode.HALF_UP);
+        }
+    }
+
+    /**
+     * symbol_source_index 한 행을 만들기 위한 중간 집계 객체.
+     */
+    private static class SymbolCoverageAggregate {
+        private final SymbolEntity symbol;
+        private final Set<Long> evidenceIds = new HashSet<>();
+        private final Set<RuleMiningSignalType> signalTypes = new HashSet<>();
+        private BigDecimal confidenceHintSum = BigDecimal.ZERO;
+        private int confidenceHintCount = 0;
+        private Integer minStartLine;
+        private Integer maxEndLine;
+
+        private SymbolCoverageAggregate(SymbolEntity symbol) {
+            this.symbol = symbol;
+        }
+
+        private SymbolEntity symbol() {
+            return symbol;
+        }
+
+        private void addEvidenceId(Long evidenceId) {
+            if (evidenceId != null) {
+                evidenceIds.add(evidenceId);
+            }
+        }
+
+        private void addSignalType(RuleMiningSignalType signalType) {
+            if (signalType != null) {
+                signalTypes.add(signalType);
+            }
+        }
+
+        private void addSignalConfidence(BigDecimal hint) {
+            if (hint == null) {
+                return;
+            }
+            confidenceHintSum = confidenceHintSum.add(hint);
+            confidenceHintCount++;
+        }
+
+        private void addLineRange(Integer startLine, Integer endLine) {
+            if (startLine != null) {
+                minStartLine = minStartLine == null ? startLine : Math.min(minStartLine, startLine);
+            }
+            if (endLine != null) {
+                maxEndLine = maxEndLine == null ? endLine : Math.max(maxEndLine, endLine);
+            }
+        }
+
+        private Integer minStartLine() {
+            return minStartLine;
+        }
+
+        private Integer maxEndLine() {
+            return maxEndLine;
+        }
+
+        private List<Long> sortedEvidenceIds() {
+            return evidenceIds.stream().sorted().toList();
+        }
+
+        /**
+         * 근거 커버리지 + signal confidence를 결합해 0~1 confidence를 계산한다.
+         */
+        private BigDecimal toConfidenceScore(String sourceFile, Integer startLine, Integer endLine) {
+            BigDecimal score = new BigDecimal("0.10");
+
+            boolean hasFile = sourceFile != null && !sourceFile.isBlank();
+            boolean hasSpan = startLine != null && endLine != null;
+            if (hasFile && hasSpan) {
+                score = score.add(new BigDecimal("0.35"));
+            } else if (hasFile) {
+                score = score.add(new BigDecimal("0.20"));
+            }
+
+            int evidenceCount = evidenceIds.size();
+            if (evidenceCount > 0) {
+                score = score.add(new BigDecimal(Math.min(0.30d, evidenceCount * 0.03d)));
+            }
+
+            if (confidenceHintCount > 0) {
+                BigDecimal avgHint = confidenceHintSum.divide(
+                        BigDecimal.valueOf(confidenceHintCount),
+                        4,
+                        RoundingMode.HALF_UP
+                );
+                score = score.add(avgHint.multiply(new BigDecimal("0.30")));
+            } else if (!signalTypes.isEmpty()) {
+                score = score.add(new BigDecimal("0.10"));
+            }
+
+            if (score.compareTo(BigDecimal.ONE) > 0) {
+                score = BigDecimal.ONE;
+            }
+            if (score.compareTo(new BigDecimal("0.05")) < 0) {
+                score = new BigDecimal("0.05");
+            }
+            return score.setScale(4, RoundingMode.HALF_UP);
         }
     }
 

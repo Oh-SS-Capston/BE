@@ -20,6 +20,7 @@ public class RunArtifactIdsResponse {
      * Rule 단계 산출물
      */
     private Long ruleCandidatesArtifactId;
+    private Long symbolSourceIndexArtifactId;
 
     /*
      * LLM 단계 산출물

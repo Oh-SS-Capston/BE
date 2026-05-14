@@ -3,6 +3,8 @@ package com.example.ossdoc.domain.graphstore.repository;
 import com.example.ossdoc.domain.graphstore.entity.SymbolEntity;
 import com.example.ossdoc.domain.graphstore.enums.SymbolKind;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 
 import java.util.List;
 import java.util.Optional;
@@ -17,6 +19,18 @@ public interface SymbolRepository extends JpaRepository<SymbolEntity, String> {
     List<SymbolEntity> findAllByRun_RunId(String runId);
 
     List<SymbolEntity> findAllByRun_RunIdAndSymbolKind(String runId, SymbolKind symbolkind);
+
+    /**
+     * symbol_source_index 생성 시 owner/sourceFile 접근 N+1을 줄이기 위한 fetch 조회.
+     */
+    @Query("""
+            select s
+            from SymbolEntity s
+            left join fetch s.owner
+            left join fetch s.sourceFile
+            where s.run.runId = :runId
+            """)
+    List<SymbolEntity> findAllWithOwnerAndSourceByRunId(@Param("runId") String runId);
 
     /**
      * 군집화 투영 단계에서 노드 인덱스를 재현 가능하게 만들기 위해 정렬된 순서로 조회한다.
