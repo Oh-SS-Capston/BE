@@ -68,6 +68,9 @@ public class RunProgressQueryService {
                 .ruleCandidatesArtifactId(
                         latestArtifactId(runId, ArtifactKind.RULE_CANDIDATES_JSON)
                 )
+                .symbolSourceIndexArtifactId(
+                        latestArtifactId(runId, ArtifactKind.SYMBOL_SOURCE_INDEX_JSON)
+                )
 
                 .llmRefinedRulesArtifactId(
                         latestArtifactId(runId, ArtifactKind.LLM_REFINED_RULES)

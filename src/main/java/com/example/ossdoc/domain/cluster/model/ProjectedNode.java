@@ -2,16 +2,26 @@ package com.example.ossdoc.domain.cluster.model;
 
 import lombok.Builder;
 import lombok.Getter;
-/* ProjectedNode.java : 군집화 알고리즘에 넣기 전, DB에 SymbolEntity를 군집화용으로 변환한 노드
-* 즉, 군집화에 필요한 최소 정보만 들고 있는 가벼운 객체
-* */
+
+/*
+ * ProjectedNode:
+ * - 그래프/랭킹 계산에 필요한 SymbolEntity 핵심 정보를 담는 경량 투영 객체.
+ * - rankings.json 보강을 위해 symbol kind, owner, source span 메타를 함께 운반한다.
+ */
 @Getter
 @Builder
 public class ProjectedNode {
     private String symbolId;
-    private String qualifiedName; //rankingJson 생성에 필요
+    private String qualifiedName; // rankingJson 생성 시 표시 이름
     private String simpleName;
-    private String packageName; //subsystem 이름
-    private String moduleId; //같은 모듈끼리 묶을때 필요
-    private boolean publicApi; //entry symbol 판단
+    private String packageName; // subsystem 라벨링 단위
+    private String moduleId; // 동일 모듈 묶음 계산 시 사용
+    private boolean publicApi; // entry symbol 가중치 판단
+
+    // rankings.json 보강용 메타데이터
+    private String symbolKind;
+    private String ownerSymbol;
+    private String sourceFile;
+    private Integer sourceStartLine;
+    private Integer sourceEndLine;
 }

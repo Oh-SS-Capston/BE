@@ -30,13 +30,15 @@ import java.util.Set;
 /**
  * LLM 입력 조립 서비스.
  *
- * <p>팀 합의에 맞춰 LLM 입력 원천을 4개 JSON으로 제한한다.
+ *  팀 합의에 맞춰 LLM 입력 원천을 4개 JSON으로 제한
  * - api_map.json (ArtifactKind.API_MAP_JSON)
  * - rule_candidates.json (ArtifactKind.RULE_CANDIDATES_JSON)
  * - rankings.json (ArtifactKind.RANKINGS_JSON)
  * - subsystems.json (ArtifactKind.SUBSYSTEMS_JSON)
  *
- * <p>입력이 부족하면 LLM에 더 많은 파일을 넣지 않고, 앞단 산출물 보강으로 해결하도록 설계한다.
+ *  symbol_source_index.json은 없어도 파이프라인은 동작하고, 있으면 품질이 올라가는 형태
+ *
+ *  입력이 부족하면 LLM에 더 많은 파일을 넣지 않고, 앞단 산출물 보강으로 해결하도록 설계
  */
 @Service
 @RequiredArgsConstructor
@@ -106,13 +108,17 @@ public class LlmInputAssemblerService {
     private ObjectNode buildAutoStructure(String runId, boolean forceKorean) {
         JsonNode apiMap = loadOptionalArtifactMeta(runId, ArtifactKind.API_MAP_JSON);
         JsonNode apiSurface = loadOptionalArtifactMeta(runId, ArtifactKind.API_SURFACE_JSON);
+        JsonNode symbolSourceIndex = loadOptionalArtifactMeta(runId, ArtifactKind.SYMBOL_SOURCE_INDEX_JSON);
         JsonNode ruleCandidates = requireArtifactMeta(runId, ArtifactKind.RULE_CANDIDATES_JSON);
         JsonNode rankings = requireArtifactMeta(runId, ArtifactKind.RANKINGS_JSON);
         JsonNode subsystems = requireArtifactMeta(runId, ArtifactKind.SUBSYSTEMS_JSON);
 
         Map<String, String> publicApiTypeBySymbolId = indexPublicApiTypeBySymbolId(apiMap, apiSurface);
+        Map<String, SourceAnchor> sourceAnchorBySymbolId = indexSourceAnchorBySymbolId(symbolSourceIndex);
+        Map<String, SourceAnchor> sourceAnchorByFqn = indexSourceAnchorByFqn(symbolSourceIndex);
 
         List<CoreTypeSeed> coreTypes = extractCoreTypes(apiMap, rankings, subsystems, publicApiTypeBySymbolId);
+        coreTypes = applyTypeSourceAnchors(coreTypes, sourceAnchorBySymbolId, sourceAnchorByFqn);
         List<CoreMethodSeed> coreMethods = extractCoreMethods(
                 apiMap,
                 rankings,
@@ -120,6 +126,7 @@ public class LlmInputAssemblerService {
                 ruleCandidates,
                 publicApiTypeBySymbolId
         );
+        coreMethods = applyMethodSourceAnchors(coreMethods, sourceAnchorBySymbolId, sourceAnchorByFqn);
 
         ObjectNode root = objectMapper.createObjectNode();
         root.put("runId", runId);
@@ -134,7 +141,7 @@ public class LlmInputAssemblerService {
         root.set("extensionSeed", buildExtensionSeed(apiMap, coreTypes, subsystems));
         root.set("directories", buildDirectories(apiMap, coreTypes, coreMethods));
         root.set("evidenceIndex", buildEvidenceIndex(coreTypes, coreMethods, ruleCandidates));
-        root.set("qualityGate", buildQualityGate(apiMap, ruleCandidates, rankings, subsystems));
+        root.set("qualityGate", buildQualityGate(apiMap, ruleCandidates, rankings, subsystems, symbolSourceIndex));
 
         // 하위 호환을 위한 집계 필드
         ObjectNode publicSurface = root.putObject("publicSurface");
@@ -145,6 +152,162 @@ public class LlmInputAssemblerService {
         publicSurface.set("apiEntries", buildApiEntries(coreMethods));
 
         return root;
+    }
+
+    /**
+     * symbol_source_index.json을 symbol_id 기준으로 인덱싱한다.
+     * - 기존 산출물에 누락된 source_file/start_line/end_line을 보강하기 위해 사용한다.
+     */
+    private Map<String, SourceAnchor> indexSourceAnchorBySymbolId(JsonNode symbolSourceIndex) {
+        Map<String, SourceAnchor> out = new HashMap<>();
+        JsonNode symbols = symbolSourceIndex.path("symbols");
+        if (!symbols.isArray()) {
+            return out;
+        }
+        for (JsonNode item : symbols) {
+            String symbolId = safeText(item.path("symbol_id").asText(""));
+            if (symbolId.isBlank()) {
+                continue;
+            }
+            String fqn = sanitizeQualifiedName(item.path("fqn").asText(""));
+            String sourceFile = toUserFacingSourcePath(firstNonBlank(
+                    item.path("source_file").asText(""),
+                    item.path("sourceFile").asText("")
+            ));
+            Integer startLine = asNullableInt(item.path("start_line"));
+            Integer endLine = asNullableInt(item.path("end_line"));
+            double confidence = item.path("confidence").isNumber() ? item.path("confidence").asDouble(0.0d) : 0.0d;
+
+            out.put(symbolId, new SourceAnchor(symbolId, fqn, sourceFile, startLine, endLine, confidence));
+        }
+        return out;
+    }
+
+    /**
+     * symbol_source_index.json을 fqn 기준으로 인덱싱한다.
+     * - 동일 fqn 충돌 시 confidence가 더 높은 항목을 채택한다.
+     */
+    private Map<String, SourceAnchor> indexSourceAnchorByFqn(JsonNode symbolSourceIndex) {
+        Map<String, SourceAnchor> out = new HashMap<>();
+        JsonNode symbols = symbolSourceIndex.path("symbols");
+        if (!symbols.isArray()) {
+            return out;
+        }
+        for (JsonNode item : symbols) {
+            String fqn = sanitizeQualifiedName(item.path("fqn").asText(""));
+            if (fqn.isBlank()) {
+                continue;
+            }
+            String symbolId = safeText(item.path("symbol_id").asText(""));
+            String sourceFile = toUserFacingSourcePath(firstNonBlank(
+                    item.path("source_file").asText(""),
+                    item.path("sourceFile").asText("")
+            ));
+            Integer startLine = asNullableInt(item.path("start_line"));
+            Integer endLine = asNullableInt(item.path("end_line"));
+            double confidence = item.path("confidence").isNumber() ? item.path("confidence").asDouble(0.0d) : 0.0d;
+
+            SourceAnchor next = new SourceAnchor(symbolId, fqn, sourceFile, startLine, endLine, confidence);
+            SourceAnchor prev = out.get(fqn);
+            if (prev == null || next.confidence() > prev.confidence()) {
+                out.put(fqn, next);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * core class seed에 소스 앵커를 보강한다.
+     */
+    private List<CoreTypeSeed> applyTypeSourceAnchors(
+            List<CoreTypeSeed> coreTypes,
+            Map<String, SourceAnchor> sourceAnchorBySymbolId,
+            Map<String, SourceAnchor> sourceAnchorByFqn
+    ) {
+        if (coreTypes == null || coreTypes.isEmpty()) {
+            return List.of();
+        }
+        List<CoreTypeSeed> out = new ArrayList<>(coreTypes.size());
+        for (CoreTypeSeed seed : coreTypes) {
+            SourceAnchor anchor = resolveBestAnchor(
+                    seed.symbolId(),
+                    seed.fqn(),
+                    sourceAnchorBySymbolId,
+                    sourceAnchorByFqn
+            );
+            if (anchor == null) {
+                out.add(seed);
+                continue;
+            }
+            out.add(new CoreTypeSeed(
+                    seed.symbolId(),
+                    seed.fqn(),
+                    seed.packageName(),
+                    seed.className(),
+                    firstNonBlank(seed.filePath(), anchor.sourceFile()),
+                    seed.role(),
+                    seed.usage(),
+                    seed.importance(),
+                    firstNonNullInt(seed.startLine(), anchor.startLine()),
+                    firstNonNullInt(seed.endLine(), anchor.endLine())
+            ));
+        }
+        return List.copyOf(out);
+    }
+
+    /**
+     * core method seed에 소스 앵커를 보강한다.
+     */
+    private List<CoreMethodSeed> applyMethodSourceAnchors(
+            List<CoreMethodSeed> coreMethods,
+            Map<String, SourceAnchor> sourceAnchorBySymbolId,
+            Map<String, SourceAnchor> sourceAnchorByFqn
+    ) {
+        if (coreMethods == null || coreMethods.isEmpty()) {
+            return List.of();
+        }
+        List<CoreMethodSeed> out = new ArrayList<>(coreMethods.size());
+        for (CoreMethodSeed seed : coreMethods) {
+            SourceAnchor anchor = resolveBestAnchor(
+                    seed.symbolId(),
+                    seed.fqn(),
+                    sourceAnchorBySymbolId,
+                    sourceAnchorByFqn
+            );
+            if (anchor == null) {
+                out.add(seed);
+                continue;
+            }
+            out.add(new CoreMethodSeed(
+                    seed.symbolId(),
+                    seed.classSymbolId(),
+                    seed.classFqn(),
+                    seed.className(),
+                    seed.methodName(),
+                    seed.fqn(),
+                    firstNonBlank(seed.filePath(), anchor.sourceFile()),
+                    seed.importance(),
+                    seed.signatureHint(),
+                    seed.summarySeed(),
+                    seed.scenarioHint(),
+                    firstNonNullInt(seed.startLine(), anchor.startLine()),
+                    firstNonNullInt(seed.endLine(), anchor.endLine())
+            ));
+        }
+        return List.copyOf(out);
+    }
+
+    private SourceAnchor resolveBestAnchor(
+            String symbolId,
+            String fqn,
+            Map<String, SourceAnchor> sourceAnchorBySymbolId,
+            Map<String, SourceAnchor> sourceAnchorByFqn
+    ) {
+        SourceAnchor byId = sourceAnchorBySymbolId.get(safeText(symbolId));
+        if (byId != null) {
+            return byId;
+        }
+        return sourceAnchorByFqn.get(sanitizeQualifiedName(fqn));
     }
 
     /**
@@ -295,6 +458,12 @@ public class LlmInputAssemblerService {
             int confidenceBoost = confidenceToImportanceBoost(item.path("confidence").asText(""));
             int importance = Math.max(baseImportance, item.path("importance").asInt(baseImportance));
             importance = Math.max(importance, baseImportance + confidenceBoost + Math.min(4, Math.max(0, score / 2)));
+            String resolvedFilePath = toUserFacingSourcePath(firstNonBlank(
+                    item.path("filePath").asText(""),
+                    item.path("file_path").asText(""),
+                    item.path("sourceFile").asText(""),
+                    item.path("source_file").asText("")
+            ));
 
             CoreTypeSeed prev = byFqn.get(fqn);
             CoreTypeSeed next = new CoreTypeSeed(
@@ -303,8 +472,7 @@ public class LlmInputAssemblerService {
                     packageName,
                     className,
                     firstNonBlank(
-                            item.path("filePath").asText(""),
-                            item.path("file_path").asText(""),
+                            resolvedFilePath,
                             prev == null ? "" : prev.filePath()
                     ),
                     role,
@@ -392,7 +560,7 @@ public class LlmInputAssemblerService {
                         prev == null ? "" : prev.filePath(),
                         Math.max(importance, methodHeuristicBonus(methodName)),
                         prev == null ? "" : prev.signatureHint(),
-                        inferMethodUsage(methodName, className, prev == null ? "" : prev.signatureHint()),
+                        normalizeSummarySeed(inferMethodUsage(methodName, className, prev == null ? "" : prev.signatureHint())),
                         inferScenarioHint(methodName),
                         prev == null ? null : prev.startLine(),
                         prev == null ? null : prev.endLine()
@@ -404,8 +572,14 @@ public class LlmInputAssemblerService {
         }
 
         if (byFqn.isEmpty()) {
+            // rule_candidates의 method_cards를 먼저 반영해 "규칙 후보가 없는 메서드"도 코어 메서드 씨앗으로 포함한다.
+            appendMethodsFromApiMap(byFqn, ruleCandidates.path("methodCards"), coreTypeFqns, 9);
+            appendMethodsFromApiMap(byFqn, ruleCandidates.path("method_cards"), coreTypeFqns, 9);
             appendMethodsFromRuleCandidates(byFqn, ruleCandidates, coreTypeFqns, 8, publicApiTypeBySymbolId);
         } else {
+            // 이미 seed가 있더라도 method_cards를 낮은 가중치로 합쳐 coverage를 넓힌다.
+            appendMethodsFromApiMap(byFqn, ruleCandidates.path("methodCards"), coreTypeFqns, 7);
+            appendMethodsFromApiMap(byFqn, ruleCandidates.path("method_cards"), coreTypeFqns, 7);
             appendMethodsFromRuleCandidates(byFqn, ruleCandidates, coreTypeFqns, 6, publicApiTypeBySymbolId);
         }
 
@@ -480,6 +654,8 @@ public class LlmInputAssemblerService {
             String signatureHint = firstNonBlank(item.path("signatureHint").asText(""), item.path("signature").asText(""));
             String summarySeed = firstNonBlank(
                     item.path("summary").asText(""),
+                    item.path("summaryHint").asText(""),
+                    item.path("summary_hint").asText(""),
                     inferMethodUsage(methodName, className, signatureHint)
             );
             int importance = Math.max(baseImportance, item.path("importance").asInt(baseImportance) + methodHeuristicBonus(methodName));
@@ -489,6 +665,8 @@ public class LlmInputAssemblerService {
                     firstNonBlank(
                             item.path("symbolId").asText(""),
                             item.path("symbol_id").asText(""),
+                            item.path("methodSymbolId").asText(""),
+                            item.path("method_symbol_id").asText(""),
                             prev == null ? "" : prev.symbolId()
                     ),
                     firstNonBlank(
@@ -501,14 +679,22 @@ public class LlmInputAssemblerService {
                     methodName,
                     methodFqn,
                     firstNonBlank(
-                            item.path("filePath").asText(""),
-                            item.path("file_path").asText(""),
+                            toUserFacingSourcePath(firstNonBlank(
+                                    item.path("filePath").asText(""),
+                                    item.path("file_path").asText(""),
+                                    item.path("sourceFile").asText(""),
+                                    item.path("source_file").asText("")
+                            )),
                             prev == null ? "" : prev.filePath()
                     ),
                     importance,
                     signatureHint,
-                    shortenText(summarySeed, 140),
-                    firstNonBlank(item.path("scenarioHint").asText(""), inferScenarioHint(methodName)),
+                    normalizeSummarySeed(summarySeed),
+                    firstNonBlank(
+                            item.path("scenarioHint").asText(""),
+                            item.path("scenario_hint").asText(""),
+                            inferScenarioHint(methodName)
+                    ),
                     firstNonNullInt(asNullableInt(item.path("startLine")), asNullableInt(item.path("start_line"))),
                     firstNonNullInt(asNullableInt(item.path("endLine")), asNullableInt(item.path("end_line")))
             );
@@ -573,8 +759,11 @@ public class LlmInputAssemblerService {
 
             String filePath = firstNonBlank(
                     firstEvidence.path("filePath").asText(""),
-                    firstEvidence.path("file_path").asText("")
+                    firstEvidence.path("file_path").asText(""),
+                    firstEvidence.path("sourceFile").asText(""),
+                    firstEvidence.path("source_file").asText("")
             );
+            filePath = toUserFacingSourcePath(filePath);
             Integer startLine = firstNonNullInt(
                     asNullableInt(firstEvidence.path("startLine")),
                     asNullableInt(firstEvidence.path("start_line"))
@@ -604,7 +793,7 @@ public class LlmInputAssemblerService {
                     firstNonBlank(filePath, prev == null ? "" : prev.filePath()),
                     Math.max(importance, methodHeuristicBonus(methodName)),
                     prev == null ? "" : prev.signatureHint(),
-                    shortenText(summarySeed, 140),
+                    normalizeSummarySeed(summarySeed),
                     inferScenarioHint(methodName),
                     firstNonNullInt(startLine, prev == null ? null : prev.startLine()),
                     firstNonNullInt(endLine, prev == null ? null : prev.endLine())
@@ -951,12 +1140,15 @@ public class LlmInputAssemblerService {
         }
 
         Map<String, List<CoreTypeSeed>> typesByDir = new LinkedHashMap<>();
+        Map<String, String> typeFilePathByFqn = new HashMap<>();
         for (CoreTypeSeed type : coreTypes) {
-            if (!isUserFacingSourcePath(type.filePath())) {
+            String userFacingFilePath = toUserFacingSourcePath(type.filePath());
+            if (!isUserFacingSourcePath(userFacingFilePath)) {
                 continue;
             }
-            String dir = extractDirectoryPath(type.filePath());
+            String dir = extractDirectoryPath(userFacingFilePath);
             typesByDir.computeIfAbsent(dir, k -> new ArrayList<>()).add(type);
+            typeFilePathByFqn.put(type.fqn(), userFacingFilePath);
         }
 
         Map<String, List<CoreMethodSeed>> methodsByClass = new HashMap<>();
@@ -965,6 +1157,11 @@ public class LlmInputAssemblerService {
         }
         for (List<CoreMethodSeed> methods : methodsByClass.values()) {
             methods.sort(Comparator.comparingInt(CoreMethodSeed::importance).reversed());
+        }
+
+        // core type에서 파일 경로를 찾지 못한 경우에도 core method 기준 최소 파일 트리를 만든다.
+        if (typesByDir.isEmpty()) {
+            return buildDirectoriesFromMethods(coreMethods);
         }
 
         ArrayNode directories = objectMapper.createArrayNode();
@@ -979,7 +1176,10 @@ public class LlmInputAssemblerService {
 
             for (CoreTypeSeed type : entry.getValue()) {
                 ObjectNode fileNode = files.addObject();
-                fileNode.put("path", type.filePath());
+                fileNode.put("path", firstNonBlank(
+                        typeFilePathByFqn.get(type.fqn()),
+                        toUserFacingSourcePath(type.filePath())
+                ));
                 ArrayNode classes = fileNode.putArray("classes");
                 ObjectNode classNode = classes.addObject();
                 classNode.put("symbolId", type.symbolId());
@@ -1004,6 +1204,76 @@ public class LlmInputAssemblerService {
     }
 
     /**
+     * core type seed가 비어도 core method seed를 이용해 최소 파일 트리를 구성한다.
+     */
+    private JsonNode buildDirectoriesFromMethods(List<CoreMethodSeed> coreMethods) {
+        Map<String, Map<String, List<CoreMethodSeed>>> methodsByDirAndClass = new LinkedHashMap<>();
+        Map<String, String> classFileByFqn = new HashMap<>();
+        Map<String, String> classNameByFqn = new HashMap<>();
+        Map<String, String> classSymbolIdByFqn = new HashMap<>();
+
+        for (CoreMethodSeed method : coreMethods) {
+            String filePath = toUserFacingSourcePath(method.filePath());
+            if (!isUserFacingSourcePath(filePath)) {
+                continue;
+            }
+            String classFqn = sanitizeQualifiedName(firstNonBlank(
+                    method.classFqn(),
+                    extractOwnerFqn(method.fqn())
+            ));
+            if (classFqn.isBlank()) {
+                continue;
+            }
+            String directory = extractDirectoryPath(filePath);
+            methodsByDirAndClass
+                    .computeIfAbsent(directory, k -> new LinkedHashMap<>())
+                    .computeIfAbsent(classFqn, k -> new ArrayList<>())
+                    .add(method);
+            classFileByFqn.putIfAbsent(classFqn, filePath);
+            classNameByFqn.putIfAbsent(classFqn, firstNonBlank(method.className(), extractSimpleName(classFqn)));
+            classSymbolIdByFqn.putIfAbsent(classFqn, method.classSymbolId());
+        }
+
+        ArrayNode directories = objectMapper.createArrayNode();
+        int dirCount = 0;
+        for (Map.Entry<String, Map<String, List<CoreMethodSeed>>> dirEntry : methodsByDirAndClass.entrySet()) {
+            if (dirCount++ >= MAX_DIRECTORIES) {
+                break;
+            }
+
+            ObjectNode dirNode = directories.addObject();
+            dirNode.put("path", dirEntry.getKey());
+            ArrayNode files = dirNode.putArray("files");
+
+            for (Map.Entry<String, List<CoreMethodSeed>> classEntry : dirEntry.getValue().entrySet()) {
+                String classFqn = classEntry.getKey();
+                List<CoreMethodSeed> classMethods = classEntry.getValue();
+                classMethods.sort(Comparator.comparingInt(CoreMethodSeed::importance).reversed());
+
+                ObjectNode fileNode = files.addObject();
+                fileNode.put("path", classFileByFqn.getOrDefault(classFqn, ""));
+                ArrayNode classes = fileNode.putArray("classes");
+                ObjectNode classNode = classes.addObject();
+                putIfText(classNode, "symbolId", classSymbolIdByFqn.getOrDefault(classFqn, ""));
+                classNode.put("name", classNameByFqn.getOrDefault(classFqn, extractSimpleName(classFqn)));
+                classNode.put("summary", "핵심 메서드 기반으로 추정한 클래스");
+                classNode.put("estimated", true);
+
+                ArrayNode methods = classNode.putArray("methods");
+                for (int i = 0; i < classMethods.size() && i < MAX_METHODS_PER_CLASS; i++) {
+                    CoreMethodSeed method = classMethods.get(i);
+                    ObjectNode methodNode = methods.addObject();
+                    methodNode.put("symbolId", method.symbolId());
+                    methodNode.put("name", method.methodName());
+                    methodNode.put("summary", method.summarySeed());
+                    methodNode.put("estimated", true);
+                }
+            }
+        }
+        return directories;
+    }
+
+    /**
      * 근거 인덱스.
      */
     private JsonNode buildEvidenceIndex(
@@ -1015,10 +1285,11 @@ public class LlmInputAssemblerService {
         Set<String> dedupe = new LinkedHashSet<>();
 
         for (CoreTypeSeed type : coreTypes) {
-            if (!isUserFacingSourcePath(type.filePath())) {
+            String filePath = toUserFacingSourcePath(type.filePath());
+            if (!isUserFacingSourcePath(filePath)) {
                 continue;
             }
-            String key = "TYPE|" + type.fqn() + "|" + type.filePath() + "|" + type.startLine() + "|" + type.endLine();
+            String key = "TYPE|" + type.fqn() + "|" + filePath + "|" + type.startLine() + "|" + type.endLine();
             if (!dedupe.add(key)) {
                 continue;
             }
@@ -1026,7 +1297,7 @@ public class LlmInputAssemblerService {
             node.put("kind", "TYPE");
             putIfText(node, "symbolId", type.symbolId());
             putIfText(node, "fqn", type.fqn());
-            putIfText(node, "filePath", type.filePath());
+            putIfText(node, "filePath", filePath);
             if (type.startLine() != null) {
                 node.put("startLine", type.startLine());
             }
@@ -1036,10 +1307,11 @@ public class LlmInputAssemblerService {
         }
 
         for (CoreMethodSeed method : coreMethods) {
-            if (!isUserFacingSourcePath(method.filePath())) {
+            String filePath = toUserFacingSourcePath(method.filePath());
+            if (!isUserFacingSourcePath(filePath)) {
                 continue;
             }
-            String key = "METHOD|" + method.fqn() + "|" + method.filePath() + "|" + method.startLine() + "|" + method.endLine();
+            String key = "METHOD|" + method.fqn() + "|" + filePath + "|" + method.startLine() + "|" + method.endLine();
             if (!dedupe.add(key)) {
                 continue;
             }
@@ -1047,7 +1319,7 @@ public class LlmInputAssemblerService {
             node.put("kind", "METHOD");
             putIfText(node, "symbolId", method.symbolId());
             putIfText(node, "fqn", method.fqn());
-            putIfText(node, "filePath", method.filePath());
+            putIfText(node, "filePath", filePath);
             if (method.startLine() != null) {
                 node.put("startLine", method.startLine());
             }
@@ -1065,7 +1337,12 @@ public class LlmInputAssemblerService {
                 }
                 for (JsonNode evidence : evidences) {
                     Long evidenceId = evidence.path("evidenceId").canConvertToLong() ? evidence.path("evidenceId").asLong() : null;
-                    String filePath = safeText(evidence.path("filePath").asText(""));
+                    String filePath = toUserFacingSourcePath(firstNonBlank(
+                            evidence.path("filePath").asText(""),
+                            evidence.path("file_path").asText(""),
+                            evidence.path("sourceFile").asText(""),
+                            evidence.path("source_file").asText("")
+                    ));
                     if (!isUserFacingSourcePath(filePath)) {
                         continue;
                     }
@@ -1097,13 +1374,20 @@ public class LlmInputAssemblerService {
     /**
      * 품질 게이트 요약.
      */
-    private JsonNode buildQualityGate(JsonNode apiMap, JsonNode ruleCandidates, JsonNode rankings, JsonNode subsystems) {
+    private JsonNode buildQualityGate(
+            JsonNode apiMap,
+            JsonNode ruleCandidates,
+            JsonNode rankings,
+            JsonNode subsystems,
+            JsonNode symbolSourceIndex
+    ) {
         ObjectNode out = objectMapper.createObjectNode();
         out.put("apiMapPresent", !apiMap.isMissingNode() && !apiMap.isNull() && !apiMap.isEmpty());
         out.put("ruleCandidateCount", countArray(ruleCandidates.path("candidates")));
         out.put("rankingCount", countArray(rankings.path("symbolRankings")));
         out.put("subsystemCount", countArray(subsystems.path("subsystems")));
-        out.put("inputSourcePolicy", "api_map + rule_candidates + rankings + subsystems");
+        out.put("symbolSourceAnchorCount", countArray(symbolSourceIndex.path("symbols")));
+        out.put("inputSourcePolicy", "api_map + rule_candidates + rankings + subsystems + optional(symbol_source_index)");
         return out;
     }
 
@@ -1407,7 +1691,7 @@ public class LlmInputAssemblerService {
     }
 
     private boolean isUserFacingSourcePath(String filePath) {
-        String normalized = normalizePath(filePath);
+        String normalized = normalizePath(toUserFacingSourcePath(filePath));
         if (normalized == null) {
             return false;
         }
@@ -1415,6 +1699,77 @@ public class LlmInputAssemblerService {
             return false;
         }
         return normalized.contains(MAIN_JAVA_MARKER) || normalized.contains(MAIN_KOTLIN_MARKER);
+    }
+
+    /**
+     * 바이트코드 경로를 사용자 소스 경로로 정규화한다.
+     */
+    private String toUserFacingSourcePath(String rawPath) {
+        String normalized = safeText(rawPath).replace('\\', '/');
+        if (normalized.isBlank()) {
+            return "";
+        }
+
+        String lower = normalized.toLowerCase(Locale.ROOT);
+        String fromMavenTarget = rewriteCompiledPath(
+                normalized,
+                lower,
+                "/target/classes/",
+                "/src/main/java/",
+                ".java"
+        );
+        if (!fromMavenTarget.isBlank()) {
+            return fromMavenTarget;
+        }
+
+        String fromGradleJava = rewriteCompiledPath(
+                normalized,
+                lower,
+                "/build/classes/java/main/",
+                "/src/main/java/",
+                ".java"
+        );
+        if (!fromGradleJava.isBlank()) {
+            return fromGradleJava;
+        }
+
+        String fromGradleKotlin = rewriteCompiledPath(
+                normalized,
+                lower,
+                "/build/classes/kotlin/main/",
+                "/src/main/kotlin/",
+                ".kt"
+        );
+        if (!fromGradleKotlin.isBlank()) {
+            return fromGradleKotlin;
+        }
+
+        return normalized;
+    }
+
+    private String rewriteCompiledPath(
+            String originalPath,
+            String lowerPath,
+            String marker,
+            String sourceRoot,
+            String sourceExtension
+    ) {
+        int markerIndex = lowerPath.indexOf(marker);
+        if (markerIndex < 0) {
+            return "";
+        }
+
+        String prefix = originalPath.substring(0, markerIndex);
+        String suffix = originalPath.substring(markerIndex + marker.length());
+        if (suffix.endsWith(".class")) {
+            String classPath = suffix.substring(0, suffix.length() - ".class".length());
+            int nestedTypeIndex = classPath.indexOf('$');
+            if (nestedTypeIndex >= 0) {
+                classPath = classPath.substring(0, nestedTypeIndex);
+            }
+            suffix = classPath + sourceExtension;
+        }
+        return prefix + sourceRoot + suffix;
     }
 
     private String normalizePath(String rawPath) {
@@ -1639,6 +1994,14 @@ public class LlmInputAssemblerService {
         return value.substring(0, maxLength);
     }
 
+    private String normalizeSummarySeed(String text) {
+        String normalized = safeText(text).replaceAll("\\s+", " ").trim();
+        if (normalized.isBlank()) {
+            return "핵심 동작을 수행한다.";
+        }
+        return normalized;
+    }
+
     private double round3(double value) {
         return Math.round(value * 1000.0d) / 1000.0d;
     }
@@ -1646,6 +2009,16 @@ public class LlmInputAssemblerService {
     public record LlmContextBundle(
             Map<String, Object> structureEngineOutput,
             List<LlmRequest.EvidenceSnippet> evidenceBundle
+    ) {
+    }
+
+    private record SourceAnchor(
+            String symbolId,
+            String fqn,
+            String sourceFile,
+            Integer startLine,
+            Integer endLine,
+            double confidence
     ) {
     }
 

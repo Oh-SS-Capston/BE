@@ -32,6 +32,11 @@ class SymbolScoringServiceTest {
                                 .packageName("com.example.auth")
                                 .moduleId("m1")
                                 .publicApi(true)
+                                .symbolKind("TYPE")
+                                .ownerSymbol(null)
+                                .sourceFile("src/main/java/com/example/auth/AuthController.java")
+                                .sourceStartLine(10)
+                                .sourceEndLine(120)
                                 .build(),
                         ProjectedNode.builder()
                                 .symbolId("sym_service")
@@ -40,6 +45,11 @@ class SymbolScoringServiceTest {
                                 .packageName("com.example.auth")
                                 .moduleId("m1")
                                 .publicApi(false)
+                                .symbolKind("TYPE")
+                                .ownerSymbol(null)
+                                .sourceFile("src/main/java/com/example/auth/AuthService.java")
+                                .sourceStartLine(15)
+                                .sourceEndLine(180)
                                 .build()
                 ))
                 .edges(List.of(
@@ -67,6 +77,11 @@ class SymbolScoringServiceTest {
         assertThat(ranked).hasSize(2);
         assertThat(ranked.get(0).getSymbolId()).isEqualTo("sym_controller");
         assertThat(ranked.get(0).getApiScore()).isEqualTo(1.0);
+        assertThat(ranked.get(0).getSymbolKind()).isEqualTo("TYPE");
+        assertThat(ranked.get(0).getSourceFile()).isEqualTo("src/main/java/com/example/auth/AuthController.java");
+        assertThat(ranked.get(0).getLineRange()).isNotNull();
+        assertThat(ranked.get(0).getLineRange().getStartLine()).isEqualTo(10);
+        assertThat(ranked.get(0).getLineRange().getEndLine()).isEqualTo(120);
         assertThat(ranked.get(1).getSymbolId()).isEqualTo("sym_service");
         assertThat(ranked.get(1).getApiScore()).isEqualTo(0.0);
     }

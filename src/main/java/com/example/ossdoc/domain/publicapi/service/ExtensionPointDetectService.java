@@ -142,8 +142,12 @@ public class ExtensionPointDetectService {
             candidates.add(ExtensionPointCandidate.builder()
                     .symbolId(symbol.getSymbolId())
                     .qualifiedName(symbol.getQualifiedName())
+                    .ownerTypeFqn(resolveOwnerTypeFqn(symbol))
                     .simpleName(symbol.getSimpleName())
                     .typeKind(typeKind)
+                    .sourceFile(resolveSourceFilePath(symbol))
+                    .startLine(symbol.getSourceStartLine())
+                    .endLine(symbol.getSourceEndLine())
                     .subsystemId(subsystemId)
                     .subsystemLabel(subsystemLabel)
                     .linkedImplementorCount(implementorCount)
@@ -620,6 +624,24 @@ public class ExtensionPointDetectService {
         if (symbol == null) return "";
         int colon = symbol.indexOf(':');
         return colon >= 0 ? symbol.substring(colon + 1) : symbol;
+    }
+
+    /**
+     * extension point 결과의 owner_type_fqn 앵커를 계산한다.
+     * - TYPE 중심 결과에서는 자기 자신의 qualifiedName을 owner로 사용한다.
+     */
+    private String resolveOwnerTypeFqn(SymbolEntity symbol) {
+        return symbol.getQualifiedName();
+    }
+
+    /**
+     * 파일 트리 문서 생성을 위해 타입의 소스 파일 경로를 전달한다.
+     */
+    private String resolveSourceFilePath(SymbolEntity symbol) {
+        if (symbol.getSourceFile() == null || symbol.getSourceFile().getPath() == null) {
+            return "";
+        }
+        return symbol.getSourceFile().getPath();
     }
 
     private String extractSimpleName(String qualifiedOrSymbol) {
