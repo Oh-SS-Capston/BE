@@ -73,6 +73,7 @@ public class LlmService {
     private static final int MAX_METHOD_FLOW = 8;
     private static final int MAX_EVIDENCE_LINKS = 3;
     private static final int MAX_API_ENTRY_OUTPUT = 14;
+    private static final int MAX_METHOD_DESCRIPTION_PREVIEW = 140;
 
     private static final int TOKENS_CAUTIONS = 4000;
     private static final int TOKENS_SCENARIOS = 10000;
@@ -786,11 +787,17 @@ public class LlmService {
 
             String fqn = seed.path("fqn").asText("");
             String methodName = seed.path("methodName").asText("");
+            String whatItDoesFull = normalizeSentence(seed.path("summarySeed").asText("핵심 동작을 수행한다."));
+            String whatItDoesPreview = shortenForPreview(whatItDoesFull, MAX_METHOD_DESCRIPTION_PREVIEW);
+            boolean whatItDoesTruncated = !whatItDoesPreview.equals(whatItDoesFull);
 
             card.put("methodName", methodName);
             card.put("classFqn", seed.path("classFqn").asText(""));
             card.put("fqn", fqn);
-            card.put("whatItDoes", seed.path("summarySeed").asText("핵심 동작을 수행한다."));
+            card.put("whatItDoes", whatItDoesPreview);
+            card.put("whatItDoesPreview", whatItDoesPreview);
+            card.put("whatItDoesFull", whatItDoesFull);
+            card.put("whatItDoesTruncated", whatItDoesTruncated);
             card.put("whenToUse", inferWhenToUse(methodName));
             card.put("inputs", extractInputs(seed.path("signatureHint").asText("")));
             card.put("returns", extractReturns(seed.path("signatureHint").asText("")));
@@ -975,7 +982,16 @@ public class LlmService {
             JsonNode method = coreMethods.get(i);
             ObjectNode entry = out.addObject();
             entry.put("fqn", method.path("fqn").asText(""));
-            entry.put("summary", shortenText(method.path("whatItDoes").asText("핵심 동작 수행"), 140));
+            String summaryFull = normalizeSentence(firstNonBlank(
+                    method.path("whatItDoesFull").asText(""),
+                    method.path("whatItDoes").asText("핵심 동작 수행")
+            ));
+            String summaryPreview = shortenForPreview(summaryFull, MAX_METHOD_DESCRIPTION_PREVIEW);
+            boolean summaryTruncated = !summaryPreview.equals(summaryFull);
+            entry.put("summary", summaryPreview);
+            entry.put("summaryPreview", summaryPreview);
+            entry.put("summaryFull", summaryFull);
+            entry.put("summaryTruncated", summaryTruncated);
             entry.put("subsystem", shortenText(method.path("classFqn").asText("core"), 80));
             ArrayNode relatedScenarios = entry.putArray("relatedScenarios");
             relatedScenarios.add("SCN-001");
@@ -1540,6 +1556,44 @@ public class LlmService {
             return value;
         }
         return value.substring(0, maxLength);
+    }
+
+    private String normalizeSentence(String text) {
+        String normalized = safeText(text).replaceAll("\\s+", " ").trim();
+        if (normalized.isBlank()) {
+            return "핵심 동작 수행";
+        }
+        return normalized;
+    }
+
+    private String shortenForPreview(String text, int maxLength) {
+        String value = normalizeSentence(text);
+        if (value.length() <= maxLength) {
+            return value;
+        }
+
+        int sentenceBoundary = findSentenceBoundary(value, maxLength);
+        if (sentenceBoundary >= Math.max(1, maxLength / 2)) {
+            return value.substring(0, sentenceBoundary).trim() + "...";
+        }
+
+        int wordBoundary = value.lastIndexOf(' ', maxLength);
+        if (wordBoundary >= Math.max(1, maxLength / 2)) {
+            return value.substring(0, wordBoundary).trim() + "...";
+        }
+
+        return value.substring(0, maxLength).trim() + "...";
+    }
+
+    private int findSentenceBoundary(String text, int limit) {
+        int scanLimit = Math.min(limit, text.length() - 1);
+        for (int i = scanLimit; i >= 0; i--) {
+            char current = text.charAt(i);
+            if (current == '.' || current == '!' || current == '?') {
+                return i + 1;
+            }
+        }
+        return -1;
     }
 
     private String toJson(Object obj) {

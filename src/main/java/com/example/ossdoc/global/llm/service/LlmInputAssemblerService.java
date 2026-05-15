@@ -560,7 +560,7 @@ public class LlmInputAssemblerService {
                         prev == null ? "" : prev.filePath(),
                         Math.max(importance, methodHeuristicBonus(methodName)),
                         prev == null ? "" : prev.signatureHint(),
-                        inferMethodUsage(methodName, className, prev == null ? "" : prev.signatureHint()),
+                        normalizeSummarySeed(inferMethodUsage(methodName, className, prev == null ? "" : prev.signatureHint())),
                         inferScenarioHint(methodName),
                         prev == null ? null : prev.startLine(),
                         prev == null ? null : prev.endLine()
@@ -689,7 +689,7 @@ public class LlmInputAssemblerService {
                     ),
                     importance,
                     signatureHint,
-                    shortenText(summarySeed, 140),
+                    normalizeSummarySeed(summarySeed),
                     firstNonBlank(
                             item.path("scenarioHint").asText(""),
                             item.path("scenario_hint").asText(""),
@@ -793,7 +793,7 @@ public class LlmInputAssemblerService {
                     firstNonBlank(filePath, prev == null ? "" : prev.filePath()),
                     Math.max(importance, methodHeuristicBonus(methodName)),
                     prev == null ? "" : prev.signatureHint(),
-                    shortenText(summarySeed, 140),
+                    normalizeSummarySeed(summarySeed),
                     inferScenarioHint(methodName),
                     firstNonNullInt(startLine, prev == null ? null : prev.startLine()),
                     firstNonNullInt(endLine, prev == null ? null : prev.endLine())
@@ -1992,6 +1992,14 @@ public class LlmInputAssemblerService {
             return value;
         }
         return value.substring(0, maxLength);
+    }
+
+    private String normalizeSummarySeed(String text) {
+        String normalized = safeText(text).replaceAll("\\s+", " ").trim();
+        if (normalized.isBlank()) {
+            return "핵심 동작을 수행한다.";
+        }
+        return normalized;
     }
 
     private double round3(double value) {
