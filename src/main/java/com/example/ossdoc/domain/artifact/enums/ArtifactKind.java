@@ -9,6 +9,7 @@ public enum ArtifactKind {
 
     // Rule Candidate Mining 결과물
     RULE_CANDIDATES_JSON,
+    SYMBOL_SOURCE_INDEX_JSON,
 
     // LLM 정제 결과물
     LLM_REFINED_RULES,

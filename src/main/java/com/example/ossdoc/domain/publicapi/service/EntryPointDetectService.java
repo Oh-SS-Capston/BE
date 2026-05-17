@@ -104,8 +104,12 @@ public class EntryPointDetectService {
             candidates.add(EntryPointCandidate.builder()
                     .symbolId(symbol.getSymbolId())
                     .qualifiedName(symbol.getQualifiedName())
+                    .ownerTypeFqn(resolveOwnerTypeFqn(symbol))
                     .simpleName(symbol.getSimpleName())
                     .typeKind(resolveTypeKind(symbol))
+                    .sourceFile(resolveSourceFilePath(symbol))
+                    .startLine(symbol.getSourceStartLine())
+                    .endLine(symbol.getSourceEndLine())
                     .subsystemId(subsystemId)
                     .subsystemLabel(subsystemLabel)
                     .role(result.role())
@@ -569,6 +573,25 @@ public class EntryPointDetectService {
         String javadoc = sig.path("javadoc").asText("").toLowerCase(Locale.ROOT);
         if (javadoc.isBlank()) return false;
         return JAVADOC_KEYWORDS.stream().anyMatch(javadoc::contains);
+    }
+
+    /**
+     * api_map / api_surface의 owner_type_fqn 앵커를 결정한다.
+     * - TYPE 단위 후보는 자기 자신의 FQN이 owner 역할을 수행한다.
+     */
+    private String resolveOwnerTypeFqn(SymbolEntity symbol) {
+        return symbol.getQualifiedName();
+    }
+
+    /**
+     * LLM이 파일 트리/근거 위치를 잃지 않도록 source_file 메타를 채운다.
+     * - sourceFile 연관이 없으면 빈 문자열로 내려서 null 분기 비용을 줄인다.
+     */
+    private String resolveSourceFilePath(SymbolEntity symbol) {
+        if (symbol.getSourceFile() == null || symbol.getSourceFile().getPath() == null) {
+            return "";
+        }
+        return symbol.getSourceFile().getPath();
     }
 
     private String extractSimpleName(String qualifiedOrSymbol) {
