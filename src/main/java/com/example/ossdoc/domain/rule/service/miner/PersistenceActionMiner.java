@@ -8,6 +8,7 @@ import com.example.ossdoc.domain.rule.enums.RuleCandidateSource;
 import com.example.ossdoc.domain.rule.enums.RuleMiningSignalType;
 import com.example.ossdoc.domain.rule.repository.RuleCandidateEvidenceRepository;
 import com.example.ossdoc.domain.rule.repository.RuleCandidateRepository;
+import com.example.ossdoc.domain.rule.repository.RuleMiningSignalRepository;
 import com.example.ossdoc.domain.rule.repository.custom.RuleMiningQueryRepository;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import lombok.extern.slf4j.Slf4j;
@@ -21,14 +22,17 @@ import java.util.List;
 public class PersistenceActionMiner extends AbstractRuleCandidateMiner {
 
     private final RuleMiningQueryRepository ruleMiningQueryRepository;
+    private final RuleMiningSignalRepository ruleMiningSignalRepository;
 
     public PersistenceActionMiner(
             RuleMiningQueryRepository ruleMiningQueryRepository,
+            RuleMiningSignalRepository ruleMiningSignalRepository,
             RuleCandidateRepository ruleCandidateRepository,
             RuleCandidateEvidenceRepository ruleCandidateEvidenceRepository
     ) {
         super(ruleCandidateRepository, ruleCandidateEvidenceRepository);
         this.ruleMiningQueryRepository = ruleMiningQueryRepository;
+        this.ruleMiningSignalRepository = ruleMiningSignalRepository;
     }
 
     @Override
@@ -39,6 +43,19 @@ public class PersistenceActionMiner extends AbstractRuleCandidateMiner {
     @Override
     @Transactional
     public int mine(RepoRun run) {
+        // @Transactional 신호가 없으면 영속 프레임워크 미사용 프로젝트 → 패스
+        boolean hasPersistenceFramework = ruleMiningSignalRepository.existsByRun_RunIdAndSignalType(
+                run.getRunId(),
+                RuleMiningSignalType.TRANSACTION_BOUNDARY
+        );
+        if (!hasPersistenceFramework) {
+            log.info(
+                    "[RULE-MINING] PersistenceActionMiner skipped: no @Transactional signals found. runId={}",
+                    run.getRunId()
+            );
+            return 0;
+        }
+
         List<PersistenceActionProjection> projections =
                 ruleMiningQueryRepository.findPersistenceActionSignals(run.getRunId());
 

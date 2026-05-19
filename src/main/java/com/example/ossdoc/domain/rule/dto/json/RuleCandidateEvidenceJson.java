@@ -9,6 +9,8 @@ public record RuleCandidateEvidenceJson(
         Long candidateEvidenceId,
         Long signalId,
         Long evidenceId,
+        String rawId,
+        String evidenceType,
         Long edgeId,
         String role,
         BigDecimal weight,
