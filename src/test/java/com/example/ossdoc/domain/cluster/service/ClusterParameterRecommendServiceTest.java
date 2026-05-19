@@ -58,7 +58,7 @@ class ClusterParameterRecommendServiceTest {
         assertThat(response.getClusterRecommended().getResolution()).isEqualTo(0.22);
         assertThat(response.getClusterRecommended().getIterations()).isEqualTo(8);
         assertThat(response.getClusterRecommended().getMinClusterSize()).isEqualTo(3);
-        assertThat(response.getClusterRecommended().getTopK()).isEqualTo(4);
+        assertThat(response.getClusterRecommended().getTopK()).isEqualTo(25);
         assertThat(response.getClassMapRecommended().getMaxNodes()).isEqualTo(24);
         assertThat(response.getClassMapRecommended().getMaxEdges()).isEqualTo(50);
         assertThat(response.getClassMapRecommended().getStartHereTopN()).isEqualTo(3);
@@ -84,7 +84,7 @@ class ClusterParameterRecommendServiceTest {
         assertThat(response.getClusterRecommended().getResolution()).isEqualTo(0.2);
         assertThat(response.getClusterRecommended().getIterations()).isEqualTo(10);
         assertThat(response.getClusterRecommended().getMinClusterSize()).isEqualTo(2);
-        assertThat(response.getClusterRecommended().getTopK()).isEqualTo(5);
+        assertThat(response.getClusterRecommended().getTopK()).isEqualTo(30);
         assertThat(response.getClassMapRecommended().getMaxNodes()).isEqualTo(36);
         assertThat(response.getClassMapRecommended().getMaxEdges()).isEqualTo(80);
         assertThat(response.getClassMapRecommended().getStartHereTopN()).isEqualTo(5);

@@ -848,14 +848,24 @@ public class LlmInputAssemblerService {
                 ArrayNode evidenceIds = caution.putArray("evidenceIds");
                 JsonNode evidences = candidate.path("evidences");
                 if (evidences.isArray()) {
-                    for (int e = 0; e < evidences.size() && e < MAX_EVIDENCE_PER_CAUTION; e++) {
+                    Set<String> seenEv = new LinkedHashSet<>();
+                    for (int e = 0; e < evidences.size() && evidenceIds.size() < MAX_EVIDENCE_PER_CAUTION; e++) {
                         JsonNode evidence = evidences.get(e);
-                        if (evidence.path("evidenceId").canConvertToLong()) {
-                            evidenceIds.add(evidence.path("evidenceId").asLong());
+                        String rawId = evidence.path("rawId").asText("");
+                        if (!rawId.isBlank() && seenEv.add(rawId)) {
+                            evidenceIds.add(rawId);
                         }
                     }
                 }
                 caution.put("confidence", round3(candidate.path("score").asDouble(0.72d)));
+
+                JsonNode candidateSummary = candidate.path("summary");
+                if (candidateSummary.isObject()) {
+                    String condition = candidateSummary.path("condition").asText("");
+                    String action    = candidateSummary.path("action").asText("");
+                    if (!condition.isBlank()) caution.put("condition", condition);
+                    if (!action.isBlank())    caution.put("action", action);
+                }
 
                 String relatedClass = guessRelatedClass(candidate, typeBySimple);
                 putIfText(caution, "relatedClass", relatedClass);
@@ -1337,12 +1347,13 @@ public class LlmInputAssemblerService {
                 }
                 for (JsonNode evidence : evidences) {
                     Long evidenceId = evidence.path("evidenceId").canConvertToLong() ? evidence.path("evidenceId").asLong() : null;
-                    String filePath = toUserFacingSourcePath(firstNonBlank(
+                    String rawFilePath = firstNonBlank(
                             evidence.path("filePath").asText(""),
                             evidence.path("file_path").asText(""),
                             evidence.path("sourceFile").asText(""),
                             evidence.path("source_file").asText("")
-                    ));
+                    );
+                    String filePath = toUserFacingSourcePath(rawFilePath);
                     if (!isUserFacingSourcePath(filePath)) {
                         continue;
                     }
@@ -1364,7 +1375,12 @@ public class LlmInputAssemblerService {
                     if (endLine != null) {
                         node.put("endLine", endLine);
                     }
-                    putIfText(node, "snippet", trimSnippet(evidence.path("snippet").asText("")));
+                    // bytecode 경로 또는 BYTECODE 타입 evidence의 snippet은 제외한다.
+                    boolean isBytecodeEvidence = isBytecodeFilePath(rawFilePath)
+                            || "BYTECODE".equalsIgnoreCase(evidence.path("evidenceType").asText(""));
+                    if (!isBytecodeEvidence) {
+                        putIfText(node, "snippet", trimSnippet(evidence.path("snippet").asText("")));
+                    }
                 }
             }
         }
@@ -1465,16 +1481,29 @@ public class LlmInputAssemblerService {
             if (out.size() >= limit || evidence == null) {
                 break;
             }
+            boolean isBytecode = "BYTECODE".equalsIgnoreCase(safeText(evidence.getEvidenceType()))
+                    || isBytecodeFilePath(evidence.getFilePath());
             out.add(new LlmRequest.EvidenceSnippet(
                     evidence.getEvidenceId(),
                     safeText(evidence.getFilePath()),
                     evidence.getStartLine(),
                     evidence.getEndLine(),
-                    safeText(trimSnippet(evidence.getSnippet())),
+                    isBytecode ? "" : safeText(trimSnippet(evidence.getSnippet())),
                     safeText(evidence.getEvidenceType())
             ));
         }
         return List.copyOf(out);
+    }
+
+    private boolean isBytecodeFilePath(String path) {
+        if (path == null || path.isBlank()) {
+            return false;
+        }
+        String lower = path.replace('\\', '/').toLowerCase(Locale.ROOT);
+        return lower.endsWith(".class")
+                || lower.contains("/target/classes/")
+                || lower.contains("/build/classes/java/main/")
+                || lower.contains("/build/classes/kotlin/main/");
     }
 
     private JsonNode requireArtifactMeta(String runId, ArtifactKind kind) {
@@ -1692,13 +1721,15 @@ public class LlmInputAssemblerService {
 
     private boolean isUserFacingSourcePath(String filePath) {
         String normalized = normalizePath(toUserFacingSourcePath(filePath));
-        if (normalized == null) {
+        if (normalized == null || normalized.isBlank()) {
             return false;
         }
         if (normalized.contains(TEST_MARKER) || normalized.contains(TARGET_MARKER)) {
             return false;
         }
-        return normalized.contains(MAIN_JAVA_MARKER) || normalized.contains(MAIN_KOTLIN_MARKER);
+        // leading slash 없이 시작하는 상대 경로(e.g. "src/main/java/...")도 인식
+        String withSlash = normalized.startsWith("/") ? normalized : "/" + normalized;
+        return withSlash.contains(MAIN_JAVA_MARKER) || withSlash.contains(MAIN_KOTLIN_MARKER);
     }
 
     /**

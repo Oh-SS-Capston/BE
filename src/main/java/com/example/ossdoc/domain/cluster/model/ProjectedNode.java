@@ -24,4 +24,7 @@ public class ProjectedNode {
     private String sourceFile;
     private Integer sourceStartLine;
     private Integer sourceEndLine;
+
+    // evidence 커버리지 — evidenceScore 계산에 사용
+    private int evidenceCount;
 }

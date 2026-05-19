@@ -29,6 +29,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -99,9 +100,10 @@ public class LlmService {
             1) cautions는 최대 %d개
             2) 각 항목은 title(짧게), message(1~2문장), when(언제 주의할지) 포함
             3) relatedClass/relatedMethod/evidenceIds를 가능한 범위에서 채운다.
+            4) evidenceIds는 시드에 제공된 "ev_" 형식 문자열 ID를 그대로 사용한다.
             출력 스키마(JSON):
             {"cautions":[{"cautionId":"CAU-001","title":"string","message":"string","when":"string",
-            "relatedClass":"pkg.Type","relatedMethod":"pkg.Type.method","evidenceIds":[1],"confidence":0.0}]}
+            "relatedClass":"pkg.Type","relatedMethod":"pkg.Type.method","evidenceIds":["ev_abc123"],"confidence":0.0}]}
             """;
 
     private static final String PROMPT_CAUTIONS_COMPACT = """
@@ -110,9 +112,10 @@ public class LlmService {
             1) cautions 최대 %d개
             2) message는 100자 이내
             3) 중복 항목 제거
+            4) evidenceIds는 시드에 제공된 "ev_" 형식 문자열 ID를 그대로 사용한다.
             출력 스키마(JSON):
             {"cautions":[{"cautionId":"CAU-001","title":"string","message":"string","when":"string",
-            "relatedClass":"pkg.Type","relatedMethod":"pkg.Type.method","evidenceIds":[1],"confidence":0.0}]}
+            "relatedClass":"pkg.Type","relatedMethod":"pkg.Type.method","evidenceIds":["ev_abc123"],"confidence":0.0}]}
             """;
 
     private static final String PROMPT_SCENARIOS = """
@@ -275,6 +278,7 @@ public class LlmService {
 
         ObjectNode out = objectMapper.createObjectNode();
         ArrayNode coreClasses = buildCoreClassDocs(structure.path("coreClassSeed"), structure.path("coreMethodSeed"));
+        fillCoreClassRelatedScenarios(coreClasses, scenarioSpecs);
         ArrayNode extensionPoints = buildExtensionPointDocs(structure.path("extensionSeed"));
         ArrayNode subsystems = buildSubsystemDocs(coreClasses, scenarioSpecs, refinedRules);
 
@@ -316,17 +320,76 @@ public class LlmService {
 
     /**
      * Step 5: 디렉터리/근거 위치 출력.
+     * coreMethods는 api_docs의 방법 카드를 복사하지 않고 coreMethodSeed에서 파일 위치 뷰를 독립 생성한다.
      */
     private JsonNode buildFileTreeDocs(JsonNode structure, JsonNode apiDocs) {
         log.info("[LlmService] {} (deterministic)", STEP5_FILE_TREE_DOCS);
 
+        Map<String, String> classSourceMap = buildClassSourceMap(structure.path("coreClassSeed"));
+
         ObjectNode out = objectMapper.createObjectNode();
         out.set("directories", structure.path("directories").deepCopy());
         out.set("evidenceLocations", structure.path("evidenceIndex").deepCopy());
-        out.set("coreMethods", apiDocs.path("coreMethods").deepCopy());
+        out.set("coreMethods", buildFileLocationMethods(structure.path("coreMethodSeed"), classSourceMap));
         out.put("fallbackApplied", false);
         out.put("deterministicSeedApplied", true);
         out.put("contractVersion", "guide-v1");
+        return out;
+    }
+
+    /**
+     * coreClassSeed에서 classFqn → sourceFile 인덱스를 구성한다.
+     * coreMethodSeed의 filePath가 비어 있을 때 소속 클래스의 파일 경로를 fallback으로 사용한다.
+     */
+    private Map<String, String> buildClassSourceMap(JsonNode coreClassSeed) {
+        Map<String, String> map = new HashMap<>();
+        if (!coreClassSeed.isArray()) {
+            return map;
+        }
+        for (JsonNode cls : coreClassSeed) {
+            String fqn = cls.path("fqn").asText("").trim();
+            String filePath = cls.path("filePath").asText("").trim();
+            if (!fqn.isBlank() && !filePath.isBlank() && isUserFacingSourcePath(filePath)) {
+                map.put(fqn, filePath);
+            }
+        }
+        return map;
+    }
+
+    /**
+     * file_tree_docs 전용 coreMethods — 파일 탐색 시 소스 위치를 빠르게 찾기 위한 경량 뷰.
+     * api_docs의 방법 카드(whatItDoes, inputs, returns 등)와 중복되지 않도록 위치 정보만 포함한다.
+     * filePath가 없으면 classFqn으로 classSourceMap에서 역추적한다.
+     */
+    private ArrayNode buildFileLocationMethods(JsonNode methodSeed, Map<String, String> classSourceMap) {
+        ArrayNode out = objectMapper.createArrayNode();
+        if (!methodSeed.isArray()) {
+            return out;
+        }
+        for (int i = 0; i < methodSeed.size() && out.size() < MAX_CORE_METHODS; i++) {
+            JsonNode seed = methodSeed.get(i);
+            String classFqn = seed.path("classFqn").asText("").trim();
+            String filePath = seed.path("filePath").asText("").trim();
+            if (filePath.isBlank()) {
+                filePath = classSourceMap.getOrDefault(classFqn, "");
+            }
+            if (filePath.isBlank() || !isUserFacingSourcePath(filePath)) {
+                continue;
+            }
+            ObjectNode item = out.addObject();
+            item.put("fqn", seed.path("fqn").asText(""));
+            item.put("methodName", seed.path("methodName").asText(""));
+            item.put("classFqn", classFqn);
+            item.put("filePath", filePath);
+            if (seed.path("startLine").canConvertToInt()) {
+                item.put("startLine", seed.path("startLine").asInt());
+            }
+            if (seed.path("endLine").canConvertToInt()) {
+                item.put("endLine", seed.path("endLine").asInt());
+            }
+            item.put("summary", shortenText(normalizeSentence(seed.path("summarySeed").asText("")), 120));
+            item.put("importance", seed.path("importance").asInt(0));
+        }
         return out;
     }
 
@@ -375,6 +438,22 @@ public class LlmService {
         ArrayNode cautions = objectMapper.createArrayNode();
         Set<String> dedupe = new HashSet<>();
 
+        Map<String, ObjectNode> seedSmByCautionId = new HashMap<>();
+        JsonNode seedCautions = structure.path("cautionSeed").path("cautions");
+        if (seedCautions.isArray()) {
+            for (JsonNode sc : seedCautions) {
+                String cid  = sc.path("cautionId").asText("");
+                String cond = sc.path("condition").asText("");
+                String act  = sc.path("action").asText("");
+                if (!cid.isBlank() && (!cond.isBlank() || !act.isBlank())) {
+                    ObjectNode sm = objectMapper.createObjectNode();
+                    if (!cond.isBlank()) sm.put("condition", cond);
+                    if (!act.isBlank())  sm.put("action", act);
+                    seedSmByCautionId.put(cid, sm);
+                }
+            }
+        }
+
         for (int i = 0; i < cautionsRaw.size() && cautions.size() < MAX_CAUTIONS; i++) {
             JsonNode rawItem = cautionsRaw.get(i);
             if (!rawItem.isObject()) {
@@ -405,8 +484,15 @@ public class LlmService {
             item.put("when", shortenText(rawItem.path("when").asText("호출 전 입력값과 호출 순서를 점검할 때"), 100));
             putIfText(item, "relatedClass", rawItem.path("relatedClass").asText(""));
             putIfText(item, "relatedMethod", rawItem.path("relatedMethod").asText(""));
-            item.set("evidenceIds", limitLongArray(rawItem.path("evidenceIds"), MAX_EVIDENCE_LINKS));
+            item.set("evidenceIds", limitEvidenceIdArray(rawItem.path("evidenceIds"), MAX_EVIDENCE_LINKS));
             item.put("confidence", normalizeConfidence(rawItem.path("confidence").asDouble(0.75d)));
+            String rawCautionId = rawItem.path("cautionId").asText("");
+            if (!rawCautionId.isBlank()) {
+                ObjectNode seedSm = seedSmByCautionId.get(rawCautionId);
+                if (seedSm != null) {
+                    item.set("summary", seedSm);
+                }
+            }
         }
 
         if (cautions.isEmpty()) {
@@ -512,8 +598,16 @@ public class LlmService {
                 caution.put("when", "메서드 호출 전 파라미터를 구성할 때");
                 putIfText(caution, "relatedClass", item.path("relatedClass").asText(""));
                 putIfText(caution, "relatedMethod", item.path("relatedMethod").asText(""));
-                caution.set("evidenceIds", limitLongArray(item.path("evidenceIds"), MAX_EVIDENCE_LINKS));
+                caution.set("evidenceIds", limitEvidenceIdArray(item.path("evidenceIds"), MAX_EVIDENCE_LINKS));
                 caution.put("confidence", normalizeConfidence(item.path("confidence").asDouble(0.70d)));
+                String cond = item.path("condition").asText("");
+                String act  = item.path("action").asText("");
+                if (!cond.isBlank() || !act.isBlank()) {
+                    ObjectNode sm = objectMapper.createObjectNode();
+                    if (!cond.isBlank()) sm.put("condition", cond);
+                    if (!act.isBlank())  sm.put("action", act);
+                    caution.set("summary", sm);
+                }
             }
         }
 
@@ -538,7 +632,10 @@ public class LlmService {
         ObjectNode scenario = scenarios.addObject();
         scenario.put("scenarioId", "SCN-001");
         scenario.put("title", "기본 사용 흐름");
-        scenario.put("intent", "옵션 정의 -> 파싱 -> 결과 조회 -> 예외/도움말 처리 순서로 사용한다.");
+        String seedPurpose = structure.path("overviewSeed").path("purpose").asText("");
+        scenario.put("intent", seedPurpose.isBlank()
+                ? "핵심 API를 순서대로 호출해 기본 기능을 구현한다."
+                : shortenText(seedPurpose, 120));
         ArrayNode steps = scenario.putArray("steps");
 
         ArrayNode flow = out.path("methodFlow").isArray() ? (ArrayNode) out.path("methodFlow") : objectMapper.createArrayNode();
@@ -574,8 +671,9 @@ public class LlmService {
             rule.put("name", caution.path("title").asText("주의사항"));
             rule.put("classification", "defensive");
             rule.put("description", caution.path("message").asText(""));
-            rule.putArray("mergedFromGroups");
-            rule.set("evidenceIds", limitLongArray(caution.path("evidenceIds"), MAX_EVIDENCE_LINKS));
+            JsonNode mergedFrom = caution.path("mergedFromGroups");
+            rule.set("mergedFromGroups", mergedFrom.isArray() ? mergedFrom.deepCopy() : objectMapper.createArrayNode());
+            rule.set("evidenceIds", limitEvidenceIdArray(caution.path("evidenceIds"), MAX_EVIDENCE_LINKS));
             rule.put("confidence", normalizeConfidence(caution.path("confidence").asDouble(0.70d)));
         }
         return rules;
@@ -641,10 +739,17 @@ public class LlmService {
 
     private ArrayNode buildCoreClassDocs(JsonNode classSeed, JsonNode methodSeed) {
         Map<String, List<JsonNode>> methodsByClassId = new HashMap<>();
+        Map<String, List<JsonNode>> methodsByClassFqn = new HashMap<>();
         if (methodSeed.isArray()) {
             for (JsonNode method : methodSeed) {
                 String classId = method.path("classSymbolId").asText("");
-                methodsByClassId.computeIfAbsent(classId, k -> new ArrayList<>()).add(method);
+                if (!classId.isBlank()) {
+                    methodsByClassId.computeIfAbsent(classId, k -> new ArrayList<>()).add(method);
+                }
+                String classFqn = method.path("classFqn").asText("");
+                if (!classFqn.isBlank()) {
+                    methodsByClassFqn.computeIfAbsent(classFqn, k -> new ArrayList<>()).add(method);
+                }
             }
         }
 
@@ -656,11 +761,12 @@ public class LlmService {
         for (int i = 0; i < classSeed.size() && out.size() < MAX_CORE_CLASSES; i++) {
             JsonNode seed = classSeed.get(i);
             String classId = seed.path("symbolId").asText("");
+            String classFqn = seed.path("fqn").asText("");
             ObjectNode item = out.addObject();
             item.put("classId", classId);
             item.put("packageName", seed.path("packageName").asText(""));
             item.put("className", seed.path("className").asText(""));
-            item.put("fqn", seed.path("fqn").asText(""));
+            item.put("fqn", classFqn);
             item.put("role", seed.path("role").asText(""));
             item.put("responsibility", seed.path("role").asText(""));
             item.put("useCase", seed.path("usage").asText(""));
@@ -674,8 +780,11 @@ public class LlmService {
             }
 
             ArrayNode keyMethods = item.putArray("keyMethods");
-            // getOrDefault의 기본값(List.of)은 불변 리스트이므로 정렬 전에 가변 복사본으로 변환한다.
+            // classSymbolId 기준 조회 우선, 없으면 classFqn 기반 fallback
             List<JsonNode> classMethods = new ArrayList<>(methodsByClassId.getOrDefault(classId, List.of()));
+            if (classMethods.isEmpty()) {
+                classMethods = new ArrayList<>(methodsByClassFqn.getOrDefault(classFqn, List.of()));
+            }
             classMethods.sort(Comparator.comparingInt((JsonNode m) -> m.path("importance").asInt(0)).reversed());
             for (int m = 0; m < classMethods.size() && m < 5; m++) {
                 JsonNode method = classMethods.get(m);
@@ -684,6 +793,58 @@ public class LlmService {
             item.putArray("relatedScenarios");
         }
         return out;
+    }
+
+    /**
+     * 시나리오 스텝의 classFqn/methodFqn을 교차 참조하여 각 핵심 클래스의 relatedScenarios를 채운다.
+     * 직접 참조가 없는 클래스는 모든 시나리오를 fallback으로 포함한다.
+     */
+    private void fillCoreClassRelatedScenarios(ArrayNode coreClasses, JsonNode scenarioSpecs) {
+        JsonNode scenarios = scenarioSpecs.path("scenarios");
+        if (!scenarios.isArray() || scenarios.isEmpty()) {
+            return;
+        }
+
+        List<String> allScenarioIds = new ArrayList<>();
+        Map<String, Set<String>> scenarioIdsByClassFqn = new LinkedHashMap<>();
+        for (JsonNode scenario : scenarios) {
+            String scenarioId = scenario.path("scenarioId").asText("");
+            if (scenarioId.isBlank()) {
+                continue;
+            }
+            allScenarioIds.add(scenarioId);
+            JsonNode steps = scenario.path("steps");
+            if (!steps.isArray()) {
+                continue;
+            }
+            for (JsonNode step : steps) {
+                String classFqn = step.path("classFqn").asText("");
+                if (!classFqn.isBlank()) {
+                    scenarioIdsByClassFqn.computeIfAbsent(classFqn, k -> new LinkedHashSet<>()).add(scenarioId);
+                }
+                String methodFqn = step.path("methodFqn").asText("");
+                if (!methodFqn.isBlank()) {
+                    String ownerFqn = ownerFromMethodFqn(methodFqn);
+                    if (!ownerFqn.isBlank()) {
+                        scenarioIdsByClassFqn.computeIfAbsent(ownerFqn, k -> new LinkedHashSet<>()).add(scenarioId);
+                    }
+                }
+            }
+        }
+
+        for (JsonNode classNode : coreClasses) {
+            if (!classNode.isObject()) {
+                continue;
+            }
+            ObjectNode classObj = (ObjectNode) classNode;
+            String fqn = classObj.path("fqn").asText("");
+            Set<String> related = scenarioIdsByClassFqn.getOrDefault(fqn, Set.of());
+            List<String> ids = related.isEmpty() ? allScenarioIds : new ArrayList<>(related);
+            ArrayNode relatedScenarios = classObj.putArray("relatedScenarios");
+            for (int i = 0; i < ids.size() && i < 3; i++) {
+                relatedScenarios.add(ids.get(i));
+            }
+        }
     }
 
     private ArrayNode buildExtensionPointDocs(JsonNode extensionSeed) {
@@ -1084,7 +1245,9 @@ public class LlmService {
         if (normalized.contains(TEST_MARKER) || normalized.contains(TARGET_MARKER)) {
             return false;
         }
-        return normalized.contains(MAIN_JAVA_MARKER) || normalized.contains(MAIN_KOTLIN_MARKER);
+        // leading slash 없이 시작하는 상대 경로(e.g. "src/main/java/...")도 인식
+        String withSlash = normalized.startsWith("/") ? normalized : "/" + normalized;
+        return withSlash.contains(MAIN_JAVA_MARKER) || withSlash.contains(MAIN_KOTLIN_MARKER);
     }
 
     private String normalizePath(String path) {
@@ -1166,15 +1329,18 @@ public class LlmService {
         return out;
     }
 
-    private ArrayNode limitLongArray(JsonNode source, int maxCount) {
+    private ArrayNode limitEvidenceIdArray(JsonNode source, int maxCount) {
         ArrayNode out = objectMapper.createArrayNode();
+        Set<String> seen = new LinkedHashSet<>();
         if (source == null || !source.isArray()) {
             return out;
         }
         for (int i = 0; i < source.size() && out.size() < maxCount; i++) {
             JsonNode value = source.get(i);
-            if (value.canConvertToLong()) {
-                out.add(value.asLong());
+            String id = value.isTextual() ? value.asText("").trim()
+                    : (value.canConvertToLong() ? String.valueOf(value.asLong()) : "");
+            if (!id.isBlank() && seen.add(id)) {
+                out.add(id);
             }
         }
         return out;

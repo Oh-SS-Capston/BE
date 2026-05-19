@@ -10,16 +10,19 @@ import com.example.ossdoc.domain.graphstore.entity.Edge;
 import com.example.ossdoc.domain.graphstore.entity.SymbolEntity;
 import com.example.ossdoc.domain.graphstore.enums.SymbolKind;
 import com.example.ossdoc.domain.graphstore.repository.EdgeRepository;
+import com.example.ossdoc.domain.graphstore.repository.SymbolEvidenceRepository;
 import com.example.ossdoc.domain.graphstore.repository.SymbolRepository;
 import com.example.ossdoc.domain.publicapi.entity.PublicApiEntry;
 import com.example.ossdoc.domain.publicapi.repository.PublicApiEntryRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.*;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 @Transactional(readOnly = true)
@@ -27,6 +30,7 @@ public class GraphProjectionService {
 
     private final SymbolRepository symbolRepository;
     private final EdgeRepository edgeRepository;
+    private final SymbolEvidenceRepository symbolEvidenceRepository;
     private final PublicApiEntryRepository publicApiEntryRepository;
     private final EdgeWeightPolicy edgeWeightPolicy;
 
@@ -46,6 +50,20 @@ public class GraphProjectionService {
             throw new ClusterException(ClusterErrorCode.CLUSTER_GRAPH_EMPTY);
         }
 
+        int totalLoaded = typeSymbols.size();
+        typeSymbols = typeSymbols.stream()
+                .filter(s -> !isTestSourceRoot(s.getSourceRoot()))
+                .toList();
+        int excluded = totalLoaded - typeSymbols.size();
+        if (excluded > 0) {
+            log.info("[CLUSTER] Excluded {} test-source symbols from projection. runId={}, remaining={}",
+                    excluded, runId, typeSymbols.size());
+        }
+
+        if (typeSymbols.isEmpty()) {
+            throw new ClusterException(ClusterErrorCode.CLUSTER_GRAPH_EMPTY);
+        }
+
         Set<String> publicApiSymbolIds;
         try {
             publicApiSymbolIds = publicApiEntryRepository.findAllByRun_RunId(runId).stream()
@@ -54,6 +72,17 @@ public class GraphProjectionService {
                     .collect(Collectors.toSet());
         } catch (Exception e) {
             throw new ClusterException(ClusterErrorCode.CLUSTER_PROJECTION_FAILED);
+        }
+
+        Map<String, Integer> evidenceCountBySymbolId;
+        try {
+            evidenceCountBySymbolId = symbolEvidenceRepository.countBySymbolIdForRun(runId).stream()
+                    .collect(Collectors.toMap(
+                            row -> (String) row[0],
+                            row -> ((Number) row[1]).intValue()
+                    ));
+        } catch (Exception e) {
+            evidenceCountBySymbolId = Map.of();
         }
 
         List<ProjectedNode> nodes = new ArrayList<>();
@@ -76,6 +105,7 @@ public class GraphProjectionService {
                     .sourceFile(symbol.getSourceFile() == null ? null : symbol.getSourceFile().getPath())
                     .sourceStartLine(symbol.getSourceStartLine())
                     .sourceEndLine(symbol.getSourceEndLine())
+                    .evidenceCount(evidenceCountBySymbolId.getOrDefault(symbol.getSymbolId(), 0))
                     .build());
 
             nodeIndexMap.put(symbol.getSymbolId(), i);
@@ -140,9 +170,33 @@ public class GraphProjectionService {
     }
 
     private String extractPackageName(String qualifiedName) {
-        int idx = qualifiedName == null ? -1 : qualifiedName.lastIndexOf('.');
-        if (idx < 0) return "";
-        return qualifiedName.substring(0, idx);
+        if (qualifiedName == null) return "";
+        // "type:", "method:", "field:" 등 스킴 접두사 제거
+        int colonIdx = qualifiedName.indexOf(':');
+        String fqn = colonIdx >= 0 ? qualifiedName.substring(colonIdx + 1) : qualifiedName;
+        // Java 패키지 세그먼트는 소문자 시작 — 첫 대문자 세그먼트(클래스명)에서 멈춘다
+        String[] parts = fqn.split("\\.");
+        StringBuilder pkg = new StringBuilder();
+        for (String part : parts) {
+            if (part.isEmpty() || Character.isUpperCase(part.charAt(0))) break;
+            if (pkg.length() > 0) pkg.append('.');
+            pkg.append(part);
+        }
+        return pkg.toString();
+    }
+
+    /**
+     * Maven/Gradle 표준 test source root 패턴을 판별한다.
+     * 예) src/test/java, src/test/kotlin, test, test/java
+     */
+    private boolean isTestSourceRoot(String sourceRoot) {
+        if (sourceRoot == null || sourceRoot.isBlank()) {
+            return false;
+        }
+        String normalized = sourceRoot.replace('\\', '/');
+        return normalized.contains("/test/")
+                || normalized.startsWith("test/")
+                || normalized.equals("test");
     }
 
     /**

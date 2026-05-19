@@ -14,6 +14,8 @@ public interface RuleMiningSignalRepository extends JpaRepository<RuleMiningSign
 
     boolean existsByRun_RunId(String runId);
 
+    boolean existsByRun_RunIdAndSignalType(String runId, RuleMiningSignalType signalType);
+
     long countByRun_RunId(String runId);
 
     List<RuleMiningSignal> findAllByRun_RunId(String runId);

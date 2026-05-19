@@ -394,6 +394,15 @@ public class GraphStoreIngestService {
                     current.assignSourceSpan(sourceEvidence.getStartLine(), sourceEvidence.getEndLine());
                 }
 
+                // facts.json의 symbol.source_file은 병합 결과상 .class(bytecode)로 기록되지만,
+                // 동일 심볼의 AST evidence는 실제 .java 경로를 보유한다.
+                // AST evidence의 소스 파일을 .class보다 우선해 심볼 source file로 승격한다.
+                FileIndex astSourceFile = selectSourceCodeFileIndex(dto.evidenceIds(), evidenceMap);
+                if (astSourceFile != null && shouldAssignSourceFile(current, astSourceFile)) {
+                    current.assignSourceFile(astSourceFile);
+                    sourceFileLinkedCount++;
+                }
+
                 for (String factEvidenceId : dto.evidenceIds()) {
                     Evidence evidence = evidenceMap.get(factEvidenceId);
                     if (evidence == null || evidence.getEvidenceId() == null) {
@@ -447,7 +456,23 @@ public class GraphStoreIngestService {
         if (symbol.getSourceFile() == null) {
             return true;
         }
+        // .java/.kt 소스 파일이 .class 바이트코드보다 항상 우선한다
+        boolean newIsSource = isSourceCodeFile(sourceFile.getPath());
+        boolean currentIsSource = isSourceCodeFile(symbol.getSourceFile().getPath());
+        if (newIsSource && !currentIsSource) {
+            return true;   // .class → .java 업그레이드
+        }
+        if (!newIsSource && currentIsSource) {
+            return false;  // .java를 .class로 덮어쓰지 않음
+        }
         return !Objects.equals(symbol.getSourceFile().getFileId(), sourceFile.getFileId());
+    }
+
+    private boolean isSourceCodeFile(String path) {
+        if (path == null) return false;
+        String lower = path.toLowerCase(Locale.ROOT);
+        return lower.endsWith(".java") || lower.endsWith(".kt")
+                || lower.endsWith(".scala") || lower.endsWith(".groovy");
     }
 
     private boolean shouldAssignOwner(SymbolEntity current, SymbolEntity owner) {
@@ -481,6 +506,25 @@ public class GraphStoreIngestService {
             }
         }
         return fallback;
+    }
+
+    /**
+     * 심볼의 evidence 중 AST 타입이면서 소스 코드 파일(.java/.kt 등)을 가리키는
+     * evidence의 FileIndex를 선택한다. 없으면 null.
+     * facts.json symbol.source_file은 .class(bytecode)로 기록되므로,
+     * 실제 .java 경로를 보유한 AST evidence를 source file 승격에 사용한다.
+     */
+    private FileIndex selectSourceCodeFileIndex(List<String> evidenceIds, Map<String, Evidence> evidenceMap) {
+        for (String id : evidenceIds) {
+            Evidence ev = evidenceMap.get(id);
+            if (ev == null || ev.getFile() == null) {
+                continue;
+            }
+            if (ev.getEvidenceType() == EvidenceType.AST && isSourceCodeFile(ev.getFile().getPath())) {
+                return ev.getFile();
+            }
+        }
+        return null;
     }
 
     /**

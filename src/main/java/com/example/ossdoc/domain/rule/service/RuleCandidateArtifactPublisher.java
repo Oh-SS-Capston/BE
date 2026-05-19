@@ -3,7 +3,9 @@ package com.example.ossdoc.domain.rule.service;
 import com.example.ossdoc.domain.artifact.entity.Artifact;
 import com.example.ossdoc.domain.artifact.enums.ArtifactKind;
 import com.example.ossdoc.domain.artifact.service.ArtifactService;
+import com.example.ossdoc.domain.graphstore.entity.Evidence;
 import com.example.ossdoc.domain.graphstore.entity.SymbolEntity;
+import com.example.ossdoc.domain.graphstore.enums.EvidenceType;
 import com.example.ossdoc.domain.graphstore.enums.SymbolKind;
 import com.example.ossdoc.domain.graphstore.repository.EdgeRepository;
 import com.example.ossdoc.domain.graphstore.repository.SymbolEvidenceRepository;
@@ -40,6 +42,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -168,6 +171,9 @@ public class RuleCandidateArtifactPublisher {
             return;
         }
 
+        // owner-type 소스 승격에 사용할 symbolId → .java 경로 맵 (이미 fetch된 sourceFile만 참조)
+        Map<String, String> javaPathBySymbolId = buildJavaPathBySymbolId(symbols);
+
         Map<String, SymbolCoverageAggregate> aggregateBySymbolId = new HashMap<>();
         for (SymbolEntity symbol : symbols) {
             if (symbol == null || symbol.getSymbolId() == null || symbol.getSymbolId().isBlank()) {
@@ -229,9 +235,26 @@ public class RuleCandidateArtifactPublisher {
                 continue;
             }
 
-            String sourceFile = symbol.getSourceFile() == null ? "" : safeText(symbol.getSourceFile().getPath());
+            String rawSourceFile = symbol.getSourceFile() == null ? "" : safeText(symbol.getSourceFile().getPath());
+
+            // ① synthetic 필터: <clinit>, enum values/valueOf/.VALUES는 소스 선언이 없으므로 제외
+            if (isSyntheticCompilerSymbol(fqn, rawSourceFile)) {
+                continue;
+            }
+
+            // ② owner-type 소스 승격: .class 백킹 심볼의 파일을 owner의 .java 경로로 교체
+            String sourceFile = rawSourceFile;
             Integer startLine = firstNonNull(symbol.getSourceStartLine(), aggregate.minStartLine());
             Integer endLine = firstNonNull(symbol.getSourceEndLine(), aggregate.maxEndLine());
+            if (isClassFile(sourceFile) && symbol.getOwner() != null) {
+                String ownerJavaPath = javaPathBySymbolId.get(symbol.getOwner().getSymbolId());
+                if (ownerJavaPath != null) {
+                    sourceFile = ownerJavaPath;
+                    // 바이트코드 라인 번호는 .java 위치와 다르므로 제거
+                    startLine = null;
+                    endLine = null;
+                }
+            }
 
             items.add(SymbolSourceIndexItemJson.builder()
                     .symbolId(symbol.getSymbolId())
@@ -265,6 +288,69 @@ public class RuleCandidateArtifactPublisher {
                 SOURCE_INDEX_RELATIVE_PATH,
                 objectMapper.valueToTree(output)
         );
+    }
+
+    /**
+     * 이미 fetch된 symbols 목록에서 symbolId → .java 소스 경로 맵을 만든다.
+     * owner-type 소스 승격 시 추가 쿼리 없이 파일 경로를 조회하기 위해 사용한다.
+     */
+    private Map<String, String> buildJavaPathBySymbolId(List<SymbolEntity> symbols) {
+        Map<String, String> result = new HashMap<>();
+        for (SymbolEntity symbol : symbols) {
+            if (symbol.getSymbolId() == null || symbol.getSourceFile() == null) continue;
+            String path = symbol.getSourceFile().getPath();
+            if (isJavaSourcePath(path)) {
+                result.put(symbol.getSymbolId(), path);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Java 컴파일러가 바이트코드에만 자동 생성하는 심볼인지 판별한다.
+     * - &lt;clinit&gt;: static 초기화 메서드 — 모든 클래스에서 소스 선언 없음
+     * - values/valueOf/.VALUES: enum 자동 생성 — .class 출처인 경우만 필터
+     * - 익명 클래스($1, $2...): 소스에 이름 있는 선언 없는 inline 클래스 — .class 출처인 경우만 필터
+     * - package-info: 패키지 메타 선언이며 LLM 심볼 조회에 불필요 — .class 출처인 경우만 필터
+     */
+    private boolean isSyntheticCompilerSymbol(String fqn, String sourceFile) {
+        if (fqn.contains("#<clinit>()")) return true;
+        if (isClassFile(sourceFile)) {
+            if (fqn.contains("#values()")) return true;
+            if (fqn.contains("#valueOf(java.lang.String)")) return true;
+            if (fqn.contains("#.VALUES")) return true;
+            if (containsAnonymousClassSegment(fqn)) return true;
+            if (fqn.contains("package-info")) return true;
+        }
+        return false;
+    }
+
+    /**
+     * fqn 타입 부분(kind 접두어와 # 사이)에 익명 클래스 패턴($숫자)이 있는지 확인한다.
+     * 예) type:Outer$1, method:Outer$1#foo(), field:Outer$1#val$x
+     */
+    private boolean containsAnonymousClassSegment(String fqn) {
+        int colon = fqn.indexOf(':');
+        int hash = fqn.indexOf('#');
+        String typePart = colon >= 0
+                ? (hash > colon ? fqn.substring(colon + 1, hash) : fqn.substring(colon + 1))
+                : fqn;
+        for (int i = 0; i < typePart.length() - 1; i++) {
+            if (typePart.charAt(i) == '$' && Character.isDigit(typePart.charAt(i + 1))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isClassFile(String path) {
+        return path != null && path.toLowerCase(Locale.ROOT).endsWith(".class");
+    }
+
+    private boolean isJavaSourcePath(String path) {
+        if (path == null) return false;
+        String lower = path.toLowerCase(Locale.ROOT);
+        return lower.endsWith(".java") || lower.endsWith(".kt");
     }
 
     /**
@@ -499,19 +585,26 @@ public class RuleCandidateArtifactPublisher {
 
     /**
      * 단일 evidence 엔티티를 JSON DTO로 변환한다.
+     * BYTECODE 타입 evidence는 snippet을 제외한다 — 역어셈블 텍스트는 사용자에게 무의미하다.
      */
     private RuleCandidateEvidenceJson toEvidenceJson(RuleCandidateEvidence evidence) {
+        Evidence ev = evidence.getEvidence();
+        EvidenceType evType = (ev != null) ? ev.getEvidenceType() : null;
+        boolean isBytecode = evType == EvidenceType.BYTECODE;
+
         return RuleCandidateEvidenceJson.builder()
                 .candidateEvidenceId(evidence.getCandidateEvidenceId())
                 .signalId(evidence.getSignal() == null ? null : evidence.getSignal().getSignalId())
-                .evidenceId(evidence.getEvidence() == null ? null : evidence.getEvidence().getEvidenceId())
+                .evidenceId(ev == null ? null : ev.getEvidenceId())
+                .rawId(ev == null ? null : ev.getRawId())
+                .evidenceType(evType != null ? evType.name() : null)
                 .edgeId(evidence.getEdge() == null ? null : evidence.getEdge().getEdgeId())
                 .role(evidence.getRole())
                 .weight(evidence.getWeight())
                 .filePath(evidence.getFilePath())
                 .startLine(evidence.getStartLine())
                 .endLine(evidence.getEndLine())
-                .snippet(evidence.getSnippet())
+                .snippet(isBytecode ? null : evidence.getSnippet())
                 .note(evidence.getNote())
                 .build();
     }
@@ -528,6 +621,14 @@ public class RuleCandidateArtifactPublisher {
         if (signals == null || signals.isEmpty()) {
             return List.of();
         }
+
+        // C-4: 영속 프레임워크(@Transactional) 신호가 없으면 REPOSITORY_* 신호는
+        // 이름 패턴(save/update/delete) 오탐일 가능성이 높다. PersistenceActionMiner
+        // 가드와 동일하게, persistence 행위 분류·설명을 산출하지 않도록 해당 신호를 제외한다.
+        boolean hasPersistenceFramework = ruleMiningSignalRepository.existsByRun_RunIdAndSignalType(
+                runId,
+                RuleMiningSignalType.TRANSACTION_BOUNDARY
+        );
 
         Map<String, List<RuleCandidate>> candidatesByMethodSymbolId = new HashMap<>();
         for (RuleCandidate candidate : candidates) {
@@ -547,6 +648,9 @@ public class RuleCandidateArtifactPublisher {
                 continue;
             }
             if (symbol.getSymbolId() == null || symbol.getSymbolId().isBlank()) {
+                continue;
+            }
+            if (!hasPersistenceFramework && isPersistenceSignal(signal.getSignalType())) {
                 continue;
             }
             aggregateByMethod
@@ -729,6 +833,16 @@ public class RuleCandidateArtifactPublisher {
     }
 
     /**
+     * REPOSITORY_SAVE/UPDATE/DELETE 등 영속화 변경 신호인지 판별한다.
+     * 영속 프레임워크 미사용 프로젝트에서 이름 패턴 오탐을 걸러내는 데 사용한다.
+     */
+    private boolean isPersistenceSignal(RuleMiningSignalType signalType) {
+        return signalType == RuleMiningSignalType.REPOSITORY_SAVE
+                || signalType == RuleMiningSignalType.REPOSITORY_UPDATE
+                || signalType == RuleMiningSignalType.REPOSITORY_DELETE;
+    }
+
+    /**
      * symbol이 METHOD/CONSTRUCTOR인지 판별한다.
      */
     private boolean isMethodSymbol(SymbolEntity symbol) {
@@ -741,32 +855,48 @@ public class RuleCandidateArtifactPublisher {
 
     /**
      * method FQN에서 owner class FQN을 추출한다.
-     * 예) a.b.C.m -> a.b.C
+     * 예) ctor:a.b.C#<init>(a.b.D) -> a.b.C
+     * 예) method:a.b.C#m(int,String) -> a.b.C
      */
     private String extractOwnerFqn(String methodFqn) {
         if (methodFqn == null || methodFqn.isBlank()) {
             return "";
         }
-        int idx = methodFqn.lastIndexOf('.');
-        if (idx <= 0) {
-            return "";
+        // "ctor:", "method:", "field:" 등 kind prefix 제거
+        String fqn = methodFqn;
+        int colonIdx = fqn.indexOf(':');
+        if (colonIdx >= 0) {
+            fqn = fqn.substring(colonIdx + 1);
         }
-        return methodFqn.substring(0, idx);
+        // '#' 기준으로 분리 — '#' 앞이 owner class FQN
+        int hashIdx = fqn.indexOf('#');
+        if (hashIdx <= 0) {
+            return fqn;
+        }
+        return fqn.substring(0, hashIdx);
     }
 
     /**
      * method FQN에서 method 이름을 추출한다.
-     * 예) a.b.C.m -> m
+     * 예) ctor:a.b.C#<init>(a.b.D) -> <init>
+     * 예) method:a.b.C#m(int,String) -> m
      */
     private String extractMethodName(String methodFqn) {
         if (methodFqn == null || methodFqn.isBlank()) {
             return "";
         }
-        int idx = methodFqn.lastIndexOf('.');
-        if (idx < 0 || idx + 1 >= methodFqn.length()) {
+        // '#' 기준 분리 — '#' 뒤가 메서드 이름(파라미터 포함)
+        int hashIdx = methodFqn.indexOf('#');
+        if (hashIdx < 0 || hashIdx + 1 >= methodFqn.length()) {
             return "";
         }
-        return methodFqn.substring(idx + 1);
+        String afterHash = methodFqn.substring(hashIdx + 1);
+        // '(' 이후 파라미터 제거
+        int parenIdx = afterHash.indexOf('(');
+        if (parenIdx >= 0) {
+            return afterHash.substring(0, parenIdx);
+        }
+        return afterHash;
     }
 
     /**

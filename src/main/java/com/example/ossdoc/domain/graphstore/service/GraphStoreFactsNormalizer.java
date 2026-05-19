@@ -24,10 +24,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Component
 public class GraphStoreFactsNormalizer {
+
+    // 바이트코드 내부 클래스 구분자 $UpperCase를 .UpperCase로 정규화한다.
+    // 익명 클래스($1, $2)는 숫자로 시작하므로 매칭에서 제외된다.
+    private static final Pattern INNER_CLASS_DOLLAR = Pattern.compile("\\$([A-Z])");
 
     private static final Set<String> PRIMITIVES_AND_VOID = Set.of(
             "void", "int", "long", "short", "byte", "char", "boolean", "float", "double",
@@ -112,9 +117,14 @@ public class GraphStoreFactsNormalizer {
                 continue;
             }
 
+            // 바이트코드 inner class 구분자($UpperCase)를 AST 표기(.UpperCase)로 통일한다.
+            // 동일 클래스에 대한 AST/bytecode 심볼이 같은 키로 병합되어 중복 노드를 방지한다.
+            String normalizedSymbol = normalizeInnerClassSeparator(dto.getSymbol());
+            String normalizedOwner = normalizeInnerClassSeparator(dto.getOwnerTypeSymbol());
+
             JsonNode sig = dto.getSignature();
             target.add(new NormalizedSymbolFact(
-                    dto.getSymbol(),
+                    normalizedSymbol,
                     dto.getName(),
                     dto.getKind(),
                     dto.getTypeKind(),
@@ -123,7 +133,7 @@ public class GraphStoreFactsNormalizer {
                     dto.getModifiers() == null ? List.of() : List.copyOf(dto.getModifiers()),
                     dto.getOrigin(),
                     dto.getQualifiedName(),
-                    dto.getOwnerTypeSymbol(),
+                    normalizedOwner,
                     dto.getPackageSymbol(),
                     dto.getModule(),
                     dto.getSourceFile(),
@@ -176,8 +186,8 @@ public class GraphStoreFactsNormalizer {
 
             target.add(new NormalizedRelationFact(
                     dto.getKind(),
-                    dto.getSrcSymbol(),
-                    dto.getDstSymbol(),
+                    normalizeInnerClassSeparator(dto.getSrcSymbol()),
+                    normalizeInnerClassSeparator(dto.getDstSymbol()),
                     dto.getDstRawRef(),
                     dto.getOrigin(),
                     resolution == null ? null : resolution.getStatus(),
@@ -345,6 +355,19 @@ public class GraphStoreFactsNormalizer {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * 바이트코드 inner class 구분자를 AST 표기로 정규화한다.
+     * 예) type:org.example.Outer$Inner → type:org.example.Outer.Inner
+     * 예) method:org.example.Outer$Inner#build() → method:org.example.Outer.Inner#build()
+     * 익명 클래스($1, $2 등 숫자 시작)는 변경하지 않는다.
+     */
+    private String normalizeInnerClassSeparator(String symbolId) {
+        if (symbolId == null || !symbolId.contains("$")) {
+            return symbolId;
+        }
+        return INNER_CLASS_DOLLAR.matcher(symbolId).replaceAll(".$1");
+    }
 
     private String firstNonBlank(String left, String right) {
         if (left != null && !left.isBlank()) {
