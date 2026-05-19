@@ -8,6 +8,7 @@ import com.example.ossdoc.domain.githubstats.repository.GithubStatsSnapshotRepos
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.example.ossdoc.global.properties.GithubStatsProperties;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -52,7 +53,7 @@ public class GithubStatsQueryService {
 
         GithubStatsSnapshot snapshot = snapshots.get(0);
 
-        if (!isCacheAlive(snapshot)) {
+        if (!isCacheAlive(snapshot) || !isIssueActivityCache(snapshot.getPayload())) {
             return Optional.empty();
         }
 
@@ -79,6 +80,18 @@ public class GithubStatsQueryService {
 
             throw new GithubStatsException(GithubStatsErrorCode.GITHUB_STATS_CACHE_READ_FAILED);
         }
+    }
+
+    private boolean isIssueActivityCache(JsonNode payload) {
+        if (payload == null || payload.isNull()) {
+            return false;
+        }
+
+        JsonNode summary = payload.path("summary");
+        JsonNode activity = payload.path("activity");
+
+        return summary.has("recent28dClosedIssues")
+                && activity.has("recent28dDailyIssueActivities");
     }
 
     private boolean isCacheAlive(GithubStatsSnapshot snapshot) {

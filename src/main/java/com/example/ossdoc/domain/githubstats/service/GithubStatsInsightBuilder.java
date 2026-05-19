@@ -11,13 +11,13 @@ public class GithubStatsInsightBuilder {
 
     public List<GithubStatsResponse.Insight> build(
             Long stars,
-            Integer recent28dCommits,
+            Long recent28dClosedIssues,
             Long contributors
     ) {
         List<GithubStatsResponse.Insight> insights = new ArrayList<>();
 
         insights.add(popularityInsight(stars));
-        insights.add(maintenanceInsight(recent28dCommits));
+        insights.add(maintenanceInsight(recent28dClosedIssues));
         insights.add(communityInsight(contributors));
 
         return insights;
@@ -49,35 +49,35 @@ public class GithubStatsInsightBuilder {
         );
     }
 
-    private GithubStatsResponse.Insight maintenanceInsight(Integer recent28dCommits) {
-        if (recent28dCommits == null) {
+    private GithubStatsResponse.Insight maintenanceInsight(Long recent28dClosedIssues) {
+        if (recent28dClosedIssues == null) {
             return insight(
                     "MAINTENANCE",
-                    "활동 수집 중",
-                    "GitHub 커밋 통계가 아직 생성 중입니다. 잠시 후 다시 조회해주세요."
+                    "이슈 해결 수집 실패",
+                    "최근 28일 해결 이슈를 수집하지 못했습니다. GitHub API 상태를 확인해주세요."
             );
         }
 
-        if (recent28dCommits >= 100) {
+        if (recent28dClosedIssues >= 100) {
             return insight(
                     "MAINTENANCE",
-                    "활발한 유지보수",
-                    "최근 28일 동안 커밋이 꾸준히 발생하여 개발 활동이 활발합니다."
+                    "활발한 이슈 대응",
+                    "최근 28일 동안 해결된 이슈가 많아 유지보수 대응이 활발합니다."
             );
         }
 
-        if (recent28dCommits >= 20) {
+        if (recent28dClosedIssues >= 20) {
             return insight(
                     "MAINTENANCE",
-                    "유지보수 진행 중",
-                    "최근 28일 동안 일정 수준의 커밋 활동이 확인됩니다."
+                    "이슈 대응 진행 중",
+                    "최근 28일 동안 일정 수준의 이슈 해결 활동이 확인됩니다."
             );
         }
 
         return insight(
                 "MAINTENANCE",
-                "낮은 최근 활동",
-                "최근 28일 커밋 수가 적어 유지보수 상태를 추가로 확인하는 것이 좋습니다."
+                "낮은 최근 이슈 해결",
+                "최근 28일 해결 이슈 수가 적어 유지보수 상태를 추가로 확인하는 것이 좋습니다."
         );
     }
 

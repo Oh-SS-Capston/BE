@@ -14,6 +14,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.*;
 import java.util.*;
+import java.util.function.Supplier;
 
 @Slf4j
 @Service
@@ -48,17 +49,44 @@ public class GithubStatsService {
         String owner = repoRef.getOwner();
         String repo = repoRef.getRepo();
 
+        /*
+         * 저장소 기본 정보는 화면 구성에 필요한 필수 데이터입니다.
+         * contributors/search 계열 API는 rate limit이나 일시 실패가 발생할 수 있으므로
+         * 실패해도 전체 화면이 깨지지 않도록 null 또는 빈 데이터로 대체합니다.
+         */
         JsonNode repositoryNode = githubStatsApiClient.getRepository(owner, repo);
-        JsonNode languagesNode = githubStatsApiClient.getLanguages(owner, repo);
-        JsonNode commitActivityNode = githubStatsApiClient.getCommitActivityOrNull(owner, repo);
+        String defaultBranch = text(repositoryNode, "default_branch", null);
+
+        JsonNode languagesNode = getOptionalJson("languages", () -> githubStatsApiClient.getLanguages(owner, repo));
         JsonNode latestReleaseNode = githubStatsApiClient.getLatestReleaseOrNull(owner, repo);
 
-        Long contributors = githubStatsApiClient.countContributors(owner, repo);
+        Long contributors = getOptionalLong("contributors", () -> githubStatsApiClient.countContributors(owner, repo));
 
         LocalDate recentStartDate = LocalDate.now(UTC).minusDays(RECENT_DAYS - 1L);
-        Long recentIssues = githubStatsApiClient.countRecentIssues(owner, repo, recentStartDate);
 
-        CommitActivityResult commitActivity = buildCommitActivity(commitActivityNode, recentStartDate);
+        Map<LocalDate, Integer> recentIssueCounts = getOptionalDailyCountMap(
+                "recent_issues_created_by_date",
+                () -> githubStatsApiClient.countRecentIssuesByDate(owner, repo, recentStartDate)
+        );
+
+        Map<LocalDate, Integer> recentClosedIssueCounts = getOptionalDailyCountMap(
+                "recent_issues_closed_by_date",
+                () -> githubStatsApiClient.countRecentClosedIssuesByDate(owner, repo, recentStartDate)
+        );
+
+        Long recentIssues = recentIssueCounts == null
+                ? getOptionalLong("recent_issues_created", () -> githubStatsApiClient.countRecentIssues(owner, repo, recentStartDate))
+                : recentIssueCounts.values().stream().mapToLong(Integer::longValue).sum();
+
+        Long recentClosedIssues = recentClosedIssueCounts == null
+                ? getOptionalLong("recent_issues_closed", () -> githubStatsApiClient.countRecentClosedIssues(owner, repo, recentStartDate))
+                : recentClosedIssueCounts.values().stream().mapToLong(Integer::longValue).sum();
+
+        IssueActivityResult issueActivity = buildRecentIssueActivity(
+                recentStartDate,
+                recentIssueCounts,
+                recentClosedIssueCounts
+        );
 
         String fullName = text(repositoryNode, "full_name", owner + "/" + repo);
         String primaryLanguage = text(repositoryNode, "language", null);
@@ -78,9 +106,10 @@ public class GithubStatsService {
                         .name(repo)
                         .description(text(repositoryNode, "description", ""))
                         .htmlUrl(text(repositoryNode, "html_url", ""))
+                        .avatarUrl(text(repositoryNode.path("owner"), "avatar_url", null))
                         .language(primaryLanguage)
                         .languagePercent(languagePercent)
-                        .defaultBranch(text(repositoryNode, "default_branch", ""))
+                        .defaultBranch(defaultBranch == null ? "" : defaultBranch)
                         .license(resolveLicense(repositoryNode))
                         .createdAt(text(repositoryNode, "created_at", null))
                         .updatedAt(text(repositoryNode, "updated_at", null))
@@ -92,8 +121,8 @@ public class GithubStatsService {
                         .stars(stars)
                         .forks(forks)
                         .openIssues(openIssues)
-                        .recent28dCommits(commitActivity.recent28dCommits())
                         .recent28dIssues(recentIssues)
+                        .recent28dClosedIssues(recentClosedIssues)
                         .contributors(contributors)
                         .starDelta28d(null)
                         .forkDelta28d(null)
@@ -101,11 +130,9 @@ public class GithubStatsService {
                         .contributorDelta28d(null)
                         .build())
                 .activity(GithubStatsResponse.Activity.builder()
-                        .commitStatsProcessing(commitActivity.processing())
-                        .recent28dDailyActivities(commitActivity.dailyActivities())
-                        .lastYearWeeklyCommits(commitActivity.weeklyActivities())
+                        .recent28dDailyIssueActivities(issueActivity.dailyActivities())
                         .build())
-                .insights(insightBuilder.build(stars, commitActivity.recent28dCommits(), contributors))
+                .insights(insightBuilder.build(stars, recentClosedIssues, contributors))
                 .collectedAt(collectedAt)
                 .fromCache(false)
                 .build();
@@ -130,79 +157,80 @@ public class GithubStatsService {
         }
     }
 
-    private CommitActivityResult buildCommitActivity(JsonNode commitActivityNode, LocalDate recentStartDate) {
-        LocalDate today = LocalDate.now(UTC);
+    private IssueActivityResult buildRecentIssueActivity(
+            LocalDate recentStartDate,
+            Map<LocalDate, Integer> dailyIssueCounts,
+            Map<LocalDate, Integer> dailyClosedIssueCounts
+    ) {
+        boolean hasIssueCounts = dailyIssueCounts != null;
+        boolean hasClosedIssueCounts = dailyClosedIssueCounts != null;
 
-        Map<LocalDate, Integer> recentCommitCounts = new LinkedHashMap<>();
+        if (!hasIssueCounts && !hasClosedIssueCounts) {
+            return new IssueActivityResult(List.of());
+        }
+
+        List<GithubStatsResponse.DailyIssueActivity> daily = new ArrayList<>();
 
         for (int i = 0; i < RECENT_DAYS; i++) {
-            recentCommitCounts.put(recentStartDate.plusDays(i), 0);
+            LocalDate date = recentStartDate.plusDays(i);
+
+            Integer issuesCreated = hasIssueCounts ? dailyIssueCounts.getOrDefault(date, 0) : 0;
+            Integer issuesClosed = hasClosedIssueCounts ? dailyClosedIssueCounts.getOrDefault(date, 0) : 0;
+
+            daily.add(dailyIssueActivity(date, issuesCreated, issuesClosed));
         }
 
-        List<GithubStatsResponse.WeeklyCommitActivity> weeklyActivities = new ArrayList<>();
-
-        if (commitActivityNode == null || !commitActivityNode.isArray()) {
-            List<GithubStatsResponse.DailyActivity> daily = recentCommitCounts.entrySet()
-                    .stream()
-                    .map(entry -> dailyActivity(entry.getKey(), null, null))
-                    .toList();
-
-            return new CommitActivityResult(true, null, daily, weeklyActivities);
-        }
-
-        for (JsonNode weekNode : commitActivityNode) {
-            long weekEpochSeconds = weekNode.path("week").asLong(0L);
-
-            LocalDate weekStart = Instant.ofEpochSecond(weekEpochSeconds)
-                    .atZone(UTC)
-                    .toLocalDate();
-
-            int weekTotal = weekNode.path("total").asInt(0);
-
-            weeklyActivities.add(GithubStatsResponse.WeeklyCommitActivity.builder()
-                    .weekStart(weekStart.toString())
-                    .commits(weekTotal)
-                    .build());
-
-            JsonNode daysNode = weekNode.path("days");
-
-            if (!daysNode.isArray()) {
-                continue;
-            }
-
-            for (int i = 0; i < daysNode.size(); i++) {
-                LocalDate date = weekStart.plusDays(i);
-
-                if (date.isBefore(recentStartDate) || date.isAfter(today)) {
-                    continue;
-                }
-
-                recentCommitCounts.put(date, daysNode.get(i).asInt(0));
-            }
-        }
-
-        int recentTotal = recentCommitCounts.values()
-                .stream()
-                .mapToInt(Integer::intValue)
-                .sum();
-
-        List<GithubStatsResponse.DailyActivity> daily = recentCommitCounts.entrySet()
-                .stream()
-                .map(entry -> dailyActivity(entry.getKey(), entry.getValue(), null))
-                .toList();
-
-        return new CommitActivityResult(false, recentTotal, daily, weeklyActivities);
+        return new IssueActivityResult(daily);
     }
 
-    private GithubStatsResponse.DailyActivity dailyActivity(
-            LocalDate date,
-            Integer commits,
-            Integer issuesCreated
+    private JsonNode getOptionalJson(String apiName, Supplier<JsonNode> supplier) {
+        try {
+            return supplier.get();
+        } catch (GithubStatsException e) {
+            log.warn("GitHub optional API skipped apiName={}, code={}", apiName, e.getCode().getReason().getCode());
+            return null;
+        } catch (Exception e) {
+            log.warn("GitHub optional API skipped apiName={}, cause={}", apiName, e.toString());
+            return null;
+        }
+    }
+
+    private Long getOptionalLong(String apiName, Supplier<Long> supplier) {
+        try {
+            return supplier.get();
+        } catch (GithubStatsException e) {
+            log.warn("GitHub optional API skipped apiName={}, code={}", apiName, e.getCode().getReason().getCode());
+            return null;
+        } catch (Exception e) {
+            log.warn("GitHub optional API skipped apiName={}, cause={}", apiName, e.toString());
+            return null;
+        }
+    }
+
+    private Map<LocalDate, Integer> getOptionalDailyCountMap(
+            String apiName,
+            Supplier<Map<LocalDate, Integer>> supplier
     ) {
-        return GithubStatsResponse.DailyActivity.builder()
+        try {
+            return supplier.get();
+        } catch (GithubStatsException e) {
+            log.warn("GitHub optional API skipped apiName={}, code={}", apiName, e.getCode().getReason().getCode());
+            return null;
+        } catch (Exception e) {
+            log.warn("GitHub optional API skipped apiName={}, cause={}", apiName, e.toString());
+            return null;
+        }
+    }
+
+    private GithubStatsResponse.DailyIssueActivity dailyIssueActivity(
+            LocalDate date,
+            Integer issuesCreated,
+            Integer issuesClosed
+    ) {
+        return GithubStatsResponse.DailyIssueActivity.builder()
                 .date(date.toString())
-                .commits(commits)
                 .issuesCreated(issuesCreated)
+                .issuesClosed(issuesClosed)
                 .build();
     }
 
@@ -265,11 +293,8 @@ public class GithubStatsService {
         return value != null && !value.isBlank();
     }
 
-    private record CommitActivityResult(
-            boolean processing,
-            Integer recent28dCommits,
-            List<GithubStatsResponse.DailyActivity> dailyActivities,
-            List<GithubStatsResponse.WeeklyCommitActivity> weeklyActivities
+    private record IssueActivityResult(
+            List<GithubStatsResponse.DailyIssueActivity> dailyActivities
     ) {
     }
 }

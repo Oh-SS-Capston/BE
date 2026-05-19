@@ -35,8 +35,8 @@ public class GithubStatsSnapshotCommandService {
                 summary.getForks(),
                 summary.getOpenIssues(),
                 summary.getContributors(),
-                summary.getRecent28dCommits(),
                 summary.getRecent28dIssues(),
+                summary.getRecent28dClosedIssues(),
                 payload,
                 response.getCollectedAt()
         ));

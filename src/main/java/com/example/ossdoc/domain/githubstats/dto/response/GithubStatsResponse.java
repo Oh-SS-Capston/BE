@@ -29,6 +29,7 @@ public class GithubStatsResponse {
         private final String name;
         private final String description;
         private final String htmlUrl;
+        private final String avatarUrl;
         private final String language;
         private final Double languagePercent;
         private final String defaultBranch;
@@ -47,14 +48,13 @@ public class GithubStatsResponse {
         private final Long stars;
         private final Long forks;
         private final Long openIssues;
-        private final Integer recent28dCommits;
         private final Long recent28dIssues;
+        private final Long recent28dClosedIssues;
         private final Long contributors;
 
         /*
-         * GitHub API만으로 과거 대비 증가량을 안정적으로 계산하기 어렵기 때문에,
-         * 초기 버전에서는 null로 내려주고 FE에서 숨김 처리합니다.
-         * 추후 우리 DB에 일별 snapshot을 쌓으면 값 채우면 됩니다.
+         * 현재 버전에서는 snapshot이 충분히 쌓였을 때만 계산합니다.
+         * 값이 null이면 FE에서 증가량 문구를 숨기거나 "-"로 표시합니다.
          */
         private final Long starDelta28d;
         private final Long forkDelta28d;
@@ -66,26 +66,16 @@ public class GithubStatsResponse {
     @Builder
     @Jacksonized
     public static class Activity {
-        private final Boolean commitStatsProcessing;
-        private final List<DailyActivity> recent28dDailyActivities;
-        private final List<WeeklyCommitActivity> lastYearWeeklyCommits;
+        private final List<DailyIssueActivity> recent28dDailyIssueActivities;
     }
 
     @Getter
     @Builder
     @Jacksonized
-    public static class DailyActivity {
+    public static class DailyIssueActivity {
         private final String date;
-        private final Integer commits;
         private final Integer issuesCreated;
-    }
-
-    @Getter
-    @Builder
-    @Jacksonized
-    public static class WeeklyCommitActivity {
-        private final String weekStart;
-        private final Integer commits;
+        private final Integer issuesClosed;
     }
 
     @Getter

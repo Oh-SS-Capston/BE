@@ -48,7 +48,7 @@ spring:
             redirect-uri: "{baseUrl}/login/oauth2/code/{registrationId}"
 
 build:
-  maven-command: ${MAVEN_COMMAND:C:\\tools\\apache-maven-3.9.13\\bin\\mvn.cmd}
+  maven-command: ${MAVEN_COMMAND:D:\\Program Files\\apache-maven-3.9.13\\bin\\mvn.cmd}
   gradle-command: ${GRADLE_COMMAND:gradle}
   java-homes:
     - ${JAVA11_HOME}
@@ -94,6 +94,7 @@ claude:
   model: ${CLAUDE_MODEL:claude-sonnet-4-5}
   # Step2~5는 기본적으로 Haiku를 사용하고, 실패 시 서비스에서 Sonnet 폴백을 수행한다.
   haiku-model: ${CLAUDE_HAIKU_MODEL:claude-haiku-4-5}
+  # enabled: ${LLM_ENABLED:false}
   max-tokens: ${CLAUDE_MAX_TOKENS:20000}
 
 cloud:
@@ -105,6 +106,12 @@ cloud:
       static: ${AWS_REGION:ap-northeast-2}
     s3:
       bucket: ${S3_BUCKET:ossdoc-artifact-storage}
+
+github:
+  stats:
+    token: ${GITHUB_STATS_TOKEN:}
+    cache-ttl-minutes: ${GITHUB_STATS_CACHE_TTL_MINUTES:360}
+    api-timeout-seconds: ${GITHUB_STATS_API_TIMEOUT_SECONDS:30}
 
 logging:
   level:

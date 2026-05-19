@@ -50,11 +50,11 @@ public class GithubStatsSnapshot extends BaseCreatedEntity {
     @Column(name = "contributors")
     private Long contributors;
 
-    @Column(name = "recent_28d_commits")
-    private Integer recent28dCommits;
-
     @Column(name = "recent_28d_issues")
     private Long recent28dIssues;
+
+    @Column(name = "recent_28d_closed_issues")
+    private Long recent28dClosedIssues;
 
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "payload", columnDefinition = "jsonb", nullable = false)
@@ -70,8 +70,8 @@ public class GithubStatsSnapshot extends BaseCreatedEntity {
             Long forks,
             Long openIssues,
             Long contributors,
-            Integer recent28dCommits,
             Long recent28dIssues,
+            Long recent28dClosedIssues,
             JsonNode payload,
             LocalDateTime collectedAt
     ) {
@@ -82,8 +82,8 @@ public class GithubStatsSnapshot extends BaseCreatedEntity {
         snapshot.forks = forks;
         snapshot.openIssues = openIssues;
         snapshot.contributors = contributors;
-        snapshot.recent28dCommits = recent28dCommits;
         snapshot.recent28dIssues = recent28dIssues;
+        snapshot.recent28dClosedIssues = recent28dClosedIssues;
         snapshot.payload = payload;
         snapshot.collectedAt = collectedAt;
         return snapshot;
