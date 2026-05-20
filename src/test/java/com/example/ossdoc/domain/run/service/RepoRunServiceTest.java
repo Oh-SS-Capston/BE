@@ -1,11 +1,15 @@
 package com.example.ossdoc.domain.run.service;
 
+import com.example.ossdoc.domain.artifact.repository.ArtifactRepository;
 import com.example.ossdoc.domain.run.cache.model.AnalysisCacheLookupResult;
 import com.example.ossdoc.domain.run.cache.service.AnalysisCacheLookupService;
 import com.example.ossdoc.domain.run.dto.request.RepoRunCreateRequest;
 import com.example.ossdoc.domain.run.dto.response.RepoRunCreateResponse;
 import com.example.ossdoc.domain.run.entity.RepoRun;
+import com.example.ossdoc.domain.run.entity.RunPipelineStepExecution;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
+import com.example.ossdoc.domain.run.repository.RunPipelineJobRepository;
+import com.example.ossdoc.domain.run.repository.RunPipelineStepExecutionRepository;
 import com.example.ossdoc.domain.run.support.GithubClient;
 import com.example.ossdoc.domain.run.support.RunAnalysisCacheKeyFactory;
 import com.example.ossdoc.domain.run.support.WorkspaceManager;
@@ -23,6 +27,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -47,6 +52,12 @@ class RepoRunServiceTest {
     private RunPipelineQueueService pipelineQueueService;
     @Mock
     private AnalysisCacheLookupService analysisCacheLookupService;
+    @Mock
+    private RunPipelineJobRepository runPipelineJobRepository;
+    @Mock
+    private RunPipelineStepExecutionRepository runPipelineStepExecutionRepository;
+    @Mock
+    private ArtifactRepository artifactRepository;
 
     private RepoRunService repoRunService;
 
@@ -67,7 +78,10 @@ class RepoRunServiceTest {
                 pipelineQueueService,
                 new RunAnalysisCacheKeyFactory(),
                 analysisCacheLookupService,
-                cacheProperties
+                cacheProperties,
+                runPipelineJobRepository,
+                runPipelineStepExecutionRepository,
+                artifactRepository
         );
     }
 
@@ -102,8 +116,55 @@ class RepoRunServiceTest {
         assertThat(response.getCommitSha()).isEqualTo("e717fd63");
         assertThat(response.getWorkspaceRoot()).isEqualTo("C:/data/ossdoc/run_cached_001");
 
-        // cache hit 경로에서는 신규 run 저장/큐 적재를 수행하지 않아야 합니다.
         verify(repoRunRepository, never()).save(any(RepoRun.class));
+        verify(pipelineQueueService, never()).enqueue(any(RepoRun.class), eq(userId));
+    }
+
+    @Test
+    void cache_hit이지만_타사용자_run이면_요청자_소유_공유_run을_생성해_반환한다() {
+        Long userId = 1L;
+        RepoRunCreateRequest request = request("https://github.com/apache/commons-cli", "master");
+        User requester = user(userId);
+
+        User sourceOwner = user(2L);
+        RepoRun sourceRun = new RepoRun(
+                "run_source_001",
+                sourceOwner,
+                "https://github.com/apache/commons-cli",
+                "apache",
+                "commons-cli",
+                "master",
+                "e717fd63",
+                "C:/data/ossdoc/run_source_001"
+        );
+        sourceRun.markSuccess();
+
+        when(userRepository.findById(userId)).thenReturn(Optional.of(requester));
+        when(githubClient.resolveCommitSha("apache", "commons-cli", "master")).thenReturn("e717fd63");
+        when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63")))
+                .thenReturn(AnalysisCacheLookupResult.hit("cache-key-1", "run_source_001", "REDIS_HIT_DB_CONFIRMED"));
+        when(repoRunRepository.findByRunIdAndOwner_Id("run_source_001", userId))
+                .thenReturn(Optional.empty());
+        when(repoRunRepository.findById("run_source_001"))
+                .thenReturn(Optional.of(sourceRun));
+        when(repoRunRepository.save(any(RepoRun.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(runPipelineJobRepository.findByRun_RunId("run_source_001"))
+                .thenReturn(Optional.empty());
+        when(runPipelineJobRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(runPipelineStepExecutionRepository.findAllByRun_RunIdOrderByStepIdAsc("run_source_001"))
+                .thenReturn(List.of());
+        when(artifactRepository.findAllByRun_RunIdOrderByArtifactIdAsc("run_source_001"))
+                .thenReturn(List.of());
+
+        RepoRunCreateResponse response = repoRunService.createRun(request, userId);
+
+        assertThat(response.getRunId()).startsWith("run_");
+        assertThat(response.getRunId()).isNotEqualTo("run_source_001");
+        assertThat(response.getCommitSha()).isEqualTo("e717fd63");
+
+        verify(repoRunRepository).save(any(RepoRun.class));
         verify(pipelineQueueService, never()).enqueue(any(RepoRun.class), eq(userId));
     }
 

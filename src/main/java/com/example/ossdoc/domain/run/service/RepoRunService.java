@@ -1,14 +1,22 @@
 package com.example.ossdoc.domain.run.service;
 
+import com.example.ossdoc.domain.artifact.entity.Artifact;
+import com.example.ossdoc.domain.artifact.repository.ArtifactRepository;
 import com.example.ossdoc.domain.auth.exception.AuthException;
 import com.example.ossdoc.domain.auth.exception.code.AuthErrorCode;
+import com.example.ossdoc.domain.run.cache.model.AnalysisCacheLookupResult;
+import com.example.ossdoc.domain.run.cache.service.AnalysisCacheLookupService;
 import com.example.ossdoc.domain.run.dto.request.RepoRunCreateRequest;
 import com.example.ossdoc.domain.run.dto.response.RepoRunCreateResponse;
 import com.example.ossdoc.domain.run.dto.response.RepoRunRecentResponse;
-import com.example.ossdoc.domain.run.cache.model.AnalysisCacheLookupResult;
-import com.example.ossdoc.domain.run.cache.service.AnalysisCacheLookupService;
 import com.example.ossdoc.domain.run.entity.RepoRun;
+import com.example.ossdoc.domain.run.entity.RunPipelineJob;
+import com.example.ossdoc.domain.run.entity.RunPipelineStepExecution;
+import com.example.ossdoc.domain.run.enums.PipelineJobStatus;
+import com.example.ossdoc.domain.run.enums.PipelineStepStatus;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
+import com.example.ossdoc.domain.run.repository.RunPipelineJobRepository;
+import com.example.ossdoc.domain.run.repository.RunPipelineStepExecutionRepository;
 import com.example.ossdoc.domain.run.support.GithubClient;
 import com.example.ossdoc.domain.run.support.GithubRepoRef;
 import com.example.ossdoc.domain.run.support.GithubUrlParser;
@@ -41,6 +49,9 @@ public class RepoRunService {
     private final RunAnalysisCacheKeyFactory runAnalysisCacheKeyFactory;
     private final AnalysisCacheLookupService analysisCacheLookupService;
     private final AnalysisCacheProperties analysisCacheProperties;
+    private final RunPipelineJobRepository runPipelineJobRepository;
+    private final RunPipelineStepExecutionRepository runPipelineStepExecutionRepository;
+    private final ArtifactRepository artifactRepository;
 
     @Transactional
     public RepoRunCreateResponse createRun(RepoRunCreateRequest req, Long userId) {
@@ -76,11 +87,6 @@ public class RepoRunService {
                 ref
         );
 
-        /*
-         * [1단계 캐시 연동]
-         * 아직 캐시 조회/재사용은 적용하지 않고, 캐시 키 생성 규격만 실제 실행 경로에 연결합니다.
-         * 이렇게 먼저 연결해두면 운영 로그에서 키 안정성을 검증한 뒤, 다음 단계에서 Redis/DB 조회를 안전하게 붙일 수 있습니다.
-         */
         RunAnalysisCacheKeySeed cacheKeySeed = buildCacheKeySeed(req.getRepoUrl(), commitSha);
         String analysisCacheKey = runAnalysisCacheKeyFactory.buildKey(cacheKeySeed);
         String normalizedRepoUrl = runAnalysisCacheKeyFactory.normalizeRepoUrlForCache(req.getRepoUrl());
@@ -98,11 +104,6 @@ public class RepoRunService {
                 abbreviateCacheKey(analysisCacheKey)
         );
 
-        /*
-         * [W06 캐시 조회 연결]
-         * cache hit이면 정적 분석 파이프라인을 다시 실행하지 않고,
-         * 기존 run 결과를 즉시 반환해 프런트에서 바로 산출물을 조회할 수 있게 합니다.
-         */
         AnalysisCacheLookupResult cacheLookupResult = analysisCacheLookupService.lookupReady(
                 analysisCacheKey,
                 normalizedRepoUrl,
@@ -110,25 +111,32 @@ public class RepoRunService {
         );
 
         if (cacheLookupResult.hit()) {
-            RepoRun cachedRun = resolveOwnedCachedRun(cacheLookupResult.sourceRunId(), userId);
-            if (cachedRun != null) {
+            RepoRun ownedCachedRun = resolveOwnedCachedRun(cacheLookupResult.sourceRunId(), userId);
+            if (ownedCachedRun != null) {
                 log.info(
                         "[CACHE] hit accepted. requestSha={}, sourceRunId={}, reason={}",
                         abbreviateSha(commitSha),
-                        cachedRun.getRunId(),
+                        ownedCachedRun.getRunId(),
                         cacheLookupResult.reason()
                 );
-                return toCreateResponse(cachedRun);
+                return toCreateResponse(ownedCachedRun);
             }
 
-            /*
-             * cache hit이더라도 현재 사용자 소유 run이 아니면 진행 조회 권한에서 막히므로
-             * 안전하게 miss로 폴백해 신규 분석을 실행합니다.
-             */
-            log.info(
-                    "[CACHE] hit ignored due to ownership mismatch. sourceRunId={}, userId={}",
-                    cacheLookupResult.sourceRunId(),
-                    userId
+            RepoRun sourceRun = resolveAnyCachedRun(cacheLookupResult.sourceRunId());
+            if (sourceRun != null) {
+                RepoRun sharedCachedRun = createSharedCachedRun(sourceRun, owner, userId);
+                log.info(
+                        "[CACHE] global hit accepted. sourceRunId={}, sharedRunId={}, requestUserId={}",
+                        sourceRun.getRunId(),
+                        sharedCachedRun.getRunId(),
+                        userId
+                );
+                return toCreateResponse(sharedCachedRun);
+            }
+
+            log.warn(
+                    "[CACHE] hit payload exists but source run is missing. sourceRunId={}, fallback=MISS",
+                    cacheLookupResult.sourceRunId()
             );
         } else {
             log.info(
@@ -138,10 +146,7 @@ public class RepoRunService {
             );
         }
 
-        String runId = "run_"
-                + OffsetDateTime.now().toLocalDate().toString().replace("-", "")
-                + "_"
-                + UUID.randomUUID().toString().substring(0, 8);
+        String runId = generateRunId();
 
         Path wsRoot = workspaceManager.workspaceRoot(runId);
 
@@ -160,10 +165,6 @@ public class RepoRunService {
 
         repoRunRepository.save(run);
 
-        /*
-         * 프론트가 build/extraction/graphstore/cluster/classMap API를 직접 호출하지 않도록,
-         * run 생성과 동시에 pipeline job을 큐에 넣습니다.
-         */
         pipelineQueueService.enqueue(run, userId);
 
         log.info(
@@ -195,9 +196,9 @@ public class RepoRunService {
     /**
      * 캐시 키 시드 구성 전용 메서드입니다.
      * <p>
-     * 왜 분리했는가:
+     * 분리한 이유:
      * - createRun 본문에서 버전/옵션 조립 로직을 분리해 가독성과 유지보수성을 높입니다.
-     * - 추후 옵션 항목이 늘어나도 이 메서드만 수정하면 되도록 변경 지점을 고정합니다.
+     * - 추후 옵션 축이 늘어나도 이 메서드만 수정하면 되도록 변경 지점을 고정합니다.
      */
     private RunAnalysisCacheKeySeed buildCacheKeySeed(String repoUrl, String commitSha) {
         return RunAnalysisCacheKeySeed.builder()
@@ -213,7 +214,6 @@ public class RepoRunService {
 
     /**
      * 캐시 hit sourceRun이 현재 사용자 소유인지 확인합니다.
-     * 권한이 맞지 않으면 null을 반환해 신규 분석 경로로 폴백합니다.
      */
     private RepoRun resolveOwnedCachedRun(String sourceRunId, Long userId) {
         if (sourceRunId == null || sourceRunId.isBlank()) {
@@ -221,6 +221,126 @@ public class RepoRunService {
         }
         return repoRunRepository.findByRunIdAndOwner_Id(sourceRunId, userId)
                 .orElse(null);
+    }
+
+    /**
+     * 전역 캐시 수용을 위해 sourceRunId 존재 여부만 확인합니다.
+     */
+    private RepoRun resolveAnyCachedRun(String sourceRunId) {
+        if (sourceRunId == null || sourceRunId.isBlank()) {
+            return null;
+        }
+        return repoRunRepository.findById(sourceRunId)
+                .orElse(null);
+    }
+
+    /**
+     * 원본 run 결과를 요청자 소유 run으로 복제합니다.
+     *
+     * 이렇게 구현한 이유:
+     * - 단순히 원본 runId를 반환하면 owner 검증(progress/artifact)에서 차단됩니다.
+     * - 요청자 소유 run으로 메타를 복제하면 기존 권한 모델을 유지한 채 전역 캐시를 재사용할 수 있습니다.
+     */
+    private RepoRun createSharedCachedRun(RepoRun sourceRun, User owner, Long requestUserId) {
+        String sharedRunId = generateRunId();
+
+        RepoRun sharedRun = new RepoRun(
+                sharedRunId,
+                owner,
+                sourceRun.getRepoUrl(),
+                sourceRun.getRepoOwner(),
+                sourceRun.getRepoName(),
+                sourceRun.getResolvedRef(),
+                sourceRun.getCommitSha(),
+                sourceRun.getWorkspaceRoot()
+        );
+        repoRunRepository.save(sharedRun);
+
+        RunPipelineJob sharedJob = copyJobState(sourceRun.getRunId(), sharedRun, requestUserId);
+        runPipelineJobRepository.save(sharedJob);
+
+        copyStepExecutionSnapshots(sourceRun.getRunId(), sharedRun, sharedJob);
+        copyArtifactsForSharedRun(sourceRun.getRunId(), sharedRun);
+
+        return sharedRun;
+    }
+
+    /**
+     * 원본 run의 최종 잡 상태를 복제합니다.
+     * READY 캐시는 성공 결과를 전제로 하므로 기본값은 SUCCESS입니다.
+     */
+    private RunPipelineJob copyJobState(String sourceRunId, RepoRun sharedRun, Long requestUserId) {
+        RunPipelineJob sharedJob = RunPipelineJob.create(sharedRun, requestUserId);
+        sharedJob.markSuccess();
+
+        RunPipelineJob sourceJob = runPipelineJobRepository.findByRun_RunId(sourceRunId)
+                .orElse(null);
+
+        if (sourceJob == null) {
+            return sharedJob;
+        }
+
+        PipelineJobStatus sourceStatus = sourceJob.getStatus();
+        if (sourceStatus == PipelineJobStatus.PARTIAL_SUCCESS) {
+            sharedJob.markPartialSuccess(sourceJob.getFailureMessage());
+        } else if (sourceStatus == PipelineJobStatus.FAILED) {
+            sharedJob.markFailed(sourceJob.getFailureMessage(), sourceJob.getLastError());
+        } else {
+            sharedJob.markSuccess();
+        }
+
+        return sharedJob;
+    }
+
+    /**
+     * 원본 run의 단계별 상태를 복제해 진행 상세 화면에서 동일한 단계를 확인할 수 있게 합니다.
+     */
+    private void copyStepExecutionSnapshots(String sourceRunId, RepoRun sharedRun, RunPipelineJob sharedJob) {
+        List<RunPipelineStepExecution> sourceSteps =
+                runPipelineStepExecutionRepository.findAllByRun_RunIdOrderByStepIdAsc(sourceRunId);
+
+        for (RunPipelineStepExecution sourceStep : sourceSteps) {
+            RunPipelineStepExecution copied = RunPipelineStepExecution.create(
+                    sharedJob,
+                    sharedRun,
+                    sourceStep.getStage()
+            );
+
+            PipelineStepStatus sourceStatus = sourceStep.getStatus();
+            if (sourceStatus == PipelineStepStatus.SUCCESS) {
+                copied.succeed(sourceStep.getMessage());
+            } else if (sourceStatus == PipelineStepStatus.FAILED) {
+                copied.fail(sourceStep.getErrorMessage());
+            } else if (sourceStatus == PipelineStepStatus.SKIPPED) {
+                copied.skip(sourceStep.getMessage());
+            } else if (sourceStatus == PipelineStepStatus.RUNNING) {
+                copied.succeed(sourceStep.getMessage());
+            } else {
+                copied.skip("캐시 재사용으로 큐 대기 단계를 생략했습니다.");
+            }
+
+            runPipelineStepExecutionRepository.save(copied);
+        }
+    }
+
+    /**
+     * 원본 run의 산출물 메타를 요청자 소유 run으로 복제합니다.
+     * S3 재업로드 없이 DB 레코드만 복제하므로 캐시 hit 지연이 매우 낮습니다.
+     */
+    private void copyArtifactsForSharedRun(String sourceRunId, RepoRun sharedRun) {
+        List<Artifact> sourceArtifacts = artifactRepository.findAllByRun_RunIdOrderByArtifactIdAsc(sourceRunId);
+
+        for (Artifact source : sourceArtifacts) {
+            artifactRepository.save(new Artifact(
+                    null,
+                    sharedRun,
+                    source.getKind(),
+                    source.getSchemaVersion(),
+                    source.getContentType(),
+                    source.getPath(),
+                    source.getMeta()
+            ));
+        }
     }
 
     private RepoRunCreateResponse toCreateResponse(RepoRun run) {
@@ -237,5 +357,12 @@ public class RepoRunService {
             return "<empty>";
         }
         return cacheKey.length() <= 12 ? cacheKey : cacheKey.substring(0, 12);
+    }
+
+    private String generateRunId() {
+        return "run_"
+                + OffsetDateTime.now().toLocalDate().toString().replace("-", "")
+                + "_"
+                + UUID.randomUUID().toString().substring(0, 8);
     }
 }
