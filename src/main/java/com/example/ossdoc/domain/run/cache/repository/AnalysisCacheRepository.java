@@ -14,9 +14,12 @@ import java.util.Optional;
  */
 public interface AnalysisCacheRepository extends JpaRepository<AnalysisCache, String> {
 
-    Optional<AnalysisCache> findByCacheKey(String cacheKey);
+    Optional<AnalysisCache> findByCacheKeyAndStatus(
+            String cacheKey,
+            AnalysisCacheStatus status
+    );
 
-    Optional<AnalysisCache> findByRepoUrlNormAndCommitShaAndStatus(
+    Optional<AnalysisCache> findTopByRepoUrlNormAndCommitShaAndStatusOrderByUpdatedAtDesc(
             String repoUrlNorm,
             String commitSha,
             AnalysisCacheStatus status
