@@ -10,9 +10,12 @@ import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.example.ossdoc.domain.run.support.GithubClient;
 import com.example.ossdoc.domain.run.support.GithubRepoRef;
 import com.example.ossdoc.domain.run.support.GithubUrlParser;
+import com.example.ossdoc.domain.run.support.RunAnalysisCacheKeyFactory;
+import com.example.ossdoc.domain.run.support.RunAnalysisCacheKeySeed;
 import com.example.ossdoc.domain.run.support.WorkspaceManager;
 import com.example.ossdoc.domain.user.entity.User;
 import com.example.ossdoc.domain.user.repository.UserRepository;
+import com.example.ossdoc.global.properties.AnalysisCacheProperties;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -33,6 +36,8 @@ public class RepoRunService {
     private final GithubClient githubClient;
     private final WorkspaceManager workspaceManager;
     private final RunPipelineQueueService pipelineQueueService;
+    private final RunAnalysisCacheKeyFactory runAnalysisCacheKeyFactory;
+    private final AnalysisCacheProperties analysisCacheProperties;
 
     @Transactional
     public RepoRunCreateResponse createRun(RepoRunCreateRequest req, Long userId) {
@@ -68,12 +73,25 @@ public class RepoRunService {
                 ref
         );
 
+        /*
+         * [1단계 캐시 연동]
+         * 아직 캐시 조회/재사용은 적용하지 않고, 캐시 키 생성 규격만 실제 실행 경로에 연결합니다.
+         * 이렇게 먼저 연결해두면 운영 로그에서 키 안정성을 검증한 뒤, 다음 단계에서 Redis/DB 조회를 안전하게 붙일 수 있습니다.
+         */
+        RunAnalysisCacheKeySeed cacheKeySeed = buildCacheKeySeed(req.getRepoUrl(), commitSha);
+        String analysisCacheKey = runAnalysisCacheKeyFactory.buildKey(cacheKeySeed);
+
         log.info(
                 "Resolved commit SHA owner={}, repo={}, ref={}, sha={}",
                 parsed.getOwner(),
                 parsed.getRepo(),
                 ref,
                 abbreviateSha(commitSha)
+        );
+        log.info(
+                "[CACHE] analysis key prepared. sha={}, key={}",
+                abbreviateSha(commitSha),
+                abbreviateCacheKey(analysisCacheKey)
         );
 
         String runId = "run_"
@@ -133,5 +151,31 @@ public class RepoRunService {
         }
 
         return sha.length() <= 8 ? sha : sha.substring(0, 8);
+    }
+
+    /**
+     * 캐시 키 시드 구성 전용 메서드입니다.
+     * <p>
+     * 왜 분리했는가:
+     * - createRun 본문에서 버전/옵션 조립 로직을 분리해 가독성과 유지보수성을 높입니다.
+     * - 추후 옵션 항목이 늘어나도 이 메서드만 수정하면 되도록 변경 지점을 고정합니다.
+     */
+    private RunAnalysisCacheKeySeed buildCacheKeySeed(String repoUrl, String commitSha) {
+        return RunAnalysisCacheKeySeed.builder()
+                .repoUrl(repoUrl)
+                .commitSha(commitSha)
+                .pipelineContractVersion(analysisCacheProperties.getPipelineContractVersion())
+                .llmProfileVersion(analysisCacheProperties.getLlmProfileVersion())
+                .promptTemplateVersion(analysisCacheProperties.getPromptTemplateVersion())
+                .outputSchemaVersion(analysisCacheProperties.getOutputSchemaVersion())
+                .runOptionsSignature(analysisCacheProperties.getDefaultRunOptionsSignature())
+                .build();
+    }
+
+    private String abbreviateCacheKey(String cacheKey) {
+        if (cacheKey == null || cacheKey.isBlank()) {
+            return "<empty>";
+        }
+        return cacheKey.length() <= 12 ? cacheKey : cacheKey.substring(0, 12);
     }
 }

@@ -65,6 +65,13 @@ build:
 ossdoc:
   workspace:
     base-dir: ${OSSDOC_WORKSPACE_BASE_DIR:C:/data/ossdoc}
+  analysis-cache:
+    # 구조 분석/LLM/출력 계약이 바뀌면 아래 버전값을 올려서 캐시를 분리합니다.
+    pipeline-contract-version: ${OSSDOC_CACHE_PIPELINE_CONTRACT_VERSION:pipeline-v1}
+    llm-profile-version: ${OSSDOC_CACHE_LLM_PROFILE_VERSION:llm-profile-v1}
+    prompt-template-version: ${OSSDOC_CACHE_PROMPT_TEMPLATE_VERSION:prompt-v1}
+    output-schema-version: ${OSSDOC_CACHE_OUTPUT_SCHEMA_VERSION:schema-v1}
+    default-run-options-signature: ${OSSDOC_CACHE_DEFAULT_RUN_OPTIONS_SIGNATURE:options-default-v1}
   pipeline:
     worker:
       fixed-delay-ms: ${PIPELINE_WORKER_FIXED_DELAY_MS:2000}
