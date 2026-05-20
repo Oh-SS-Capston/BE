@@ -6,6 +6,7 @@ import com.example.ossdoc.domain.run.cache.model.AnalysisCacheLookupResult;
 import com.example.ossdoc.domain.run.cache.repository.AnalysisCacheRepository;
 import com.example.ossdoc.domain.run.cache.support.AnalysisCacheRedisKeyPolicy;
 import com.example.ossdoc.domain.run.cache.support.AnalysisCacheRedisStore;
+import com.example.ossdoc.domain.run.cache.support.ReadyPayload;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -143,9 +144,4 @@ public class AnalysisCacheLookupService {
         return key.length() <= 12 ? key : key.substring(0, 12);
     }
 
-    private record ReadyPayload(
-            String cacheKey,
-            String sourceRunId
-    ) {
-    }
 }

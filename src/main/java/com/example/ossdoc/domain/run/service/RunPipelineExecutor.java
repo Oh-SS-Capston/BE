@@ -14,6 +14,7 @@ import com.example.ossdoc.domain.graphstore.dto.request.GraphStoreIngestRequest;
 import com.example.ossdoc.domain.graphstore.service.GraphStoreIngestService;
 import com.example.ossdoc.domain.rule.dto.request.RuleCandidateMineRequest;
 import com.example.ossdoc.domain.rule.service.RuleCandidateMiningService;
+import com.example.ossdoc.domain.run.cache.service.AnalysisCachePublishService;
 import com.example.ossdoc.domain.run.entity.RunPipelineJob;
 import com.example.ossdoc.domain.run.enums.RunStage;
 import com.example.ossdoc.domain.run.exception.RunException;
@@ -60,6 +61,7 @@ public class RunPipelineExecutor {
 
     private final RuleCandidateMiningService ruleCandidateMiningService;
     private final LlmService llmService;
+    private final AnalysisCachePublishService analysisCachePublishService;
 
     public void execute(Long jobId) {
         RunPipelineJob job = jobRepository.findById(jobId)
@@ -219,6 +221,7 @@ public class RunPipelineExecutor {
 
             if (optionalFailures.isEmpty()) {
                 stepService.markRunSuccess(jobId);
+                publishReadyCacheSafely(job);
             } else {
                 stepService.markRunPartialSuccess(
                         jobId,
@@ -364,6 +367,31 @@ public class RunPipelineExecutor {
         }
 
         return e.getMessage();
+    }
+
+    /**
+     * W08: 파이프라인이 풀 성공한 경우 READY 캐시를 발행합니다.
+     *
+     * 실패 처리 정책:
+     * - 캐시 발행 실패는 파이프라인 본 성공 상태를 뒤집지 않습니다.
+     * - 대신 경고 로그를 남기고 다음 요청에서 miss -> 재분석 경로로 안전 폴백합니다.
+     */
+    private void publishReadyCacheSafely(RunPipelineJob job) {
+        try {
+            boolean published = analysisCachePublishService.publishReady(job.getRun());
+            if (!published) {
+                log.warn(
+                        "[CACHE] READY publish skipped. runId={}, reason=REQUIRED_ARTIFACT_MISSING_OR_INVALID",
+                        job.getRun().getRunId()
+                );
+            }
+        } catch (Exception e) {
+            log.warn(
+                    "[CACHE] READY publish failed. runId={}",
+                    job.getRun().getRunId(),
+                    e
+            );
+        }
     }
 
     /**
