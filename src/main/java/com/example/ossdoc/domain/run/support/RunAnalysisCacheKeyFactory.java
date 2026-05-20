@@ -29,6 +29,15 @@ public class RunAnalysisCacheKeyFactory {
     }
 
     /**
+     * Repo URL 정규화 결과만 필요할 때 사용하는 유틸 메서드입니다.
+     * <p>
+     * W06에서 Redis/DB 조회 입력값(repoUrlNorm)을 만들 때 동일 규칙을 재사용하기 위해 제공합니다.
+     */
+    public String normalizeRepoUrlForCache(String repoUrl) {
+        return normalizeRepoUrl(repoUrl);
+    }
+
+    /**
      * 키 계산의 원본 문자열을 만듭니다.
      * <p>
      * 이 문자열 포맷은 운영 중 디버깅 시 "왜 캐시가 갈렸는지" 추적하기 위한 기준이 됩니다.

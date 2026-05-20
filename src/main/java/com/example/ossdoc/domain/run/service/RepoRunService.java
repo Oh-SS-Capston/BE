@@ -5,6 +5,8 @@ import com.example.ossdoc.domain.auth.exception.code.AuthErrorCode;
 import com.example.ossdoc.domain.run.dto.request.RepoRunCreateRequest;
 import com.example.ossdoc.domain.run.dto.response.RepoRunCreateResponse;
 import com.example.ossdoc.domain.run.dto.response.RepoRunRecentResponse;
+import com.example.ossdoc.domain.run.cache.model.AnalysisCacheLookupResult;
+import com.example.ossdoc.domain.run.cache.service.AnalysisCacheLookupService;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.example.ossdoc.domain.run.support.GithubClient;
@@ -37,6 +39,7 @@ public class RepoRunService {
     private final WorkspaceManager workspaceManager;
     private final RunPipelineQueueService pipelineQueueService;
     private final RunAnalysisCacheKeyFactory runAnalysisCacheKeyFactory;
+    private final AnalysisCacheLookupService analysisCacheLookupService;
     private final AnalysisCacheProperties analysisCacheProperties;
 
     @Transactional
@@ -80,6 +83,7 @@ public class RepoRunService {
          */
         RunAnalysisCacheKeySeed cacheKeySeed = buildCacheKeySeed(req.getRepoUrl(), commitSha);
         String analysisCacheKey = runAnalysisCacheKeyFactory.buildKey(cacheKeySeed);
+        String normalizedRepoUrl = runAnalysisCacheKeyFactory.normalizeRepoUrlForCache(req.getRepoUrl());
 
         log.info(
                 "Resolved commit SHA owner={}, repo={}, ref={}, sha={}",
@@ -93,6 +97,46 @@ public class RepoRunService {
                 abbreviateSha(commitSha),
                 abbreviateCacheKey(analysisCacheKey)
         );
+
+        /*
+         * [W06 캐시 조회 연결]
+         * cache hit이면 정적 분석 파이프라인을 다시 실행하지 않고,
+         * 기존 run 결과를 즉시 반환해 프런트에서 바로 산출물을 조회할 수 있게 합니다.
+         */
+        AnalysisCacheLookupResult cacheLookupResult = analysisCacheLookupService.lookupReady(
+                analysisCacheKey,
+                normalizedRepoUrl,
+                commitSha
+        );
+
+        if (cacheLookupResult.hit()) {
+            RepoRun cachedRun = resolveOwnedCachedRun(cacheLookupResult.sourceRunId(), userId);
+            if (cachedRun != null) {
+                log.info(
+                        "[CACHE] hit accepted. requestSha={}, sourceRunId={}, reason={}",
+                        abbreviateSha(commitSha),
+                        cachedRun.getRunId(),
+                        cacheLookupResult.reason()
+                );
+                return toCreateResponse(cachedRun);
+            }
+
+            /*
+             * cache hit이더라도 현재 사용자 소유 run이 아니면 진행 조회 권한에서 막히므로
+             * 안전하게 miss로 폴백해 신규 분석을 실행합니다.
+             */
+            log.info(
+                    "[CACHE] hit ignored due to ownership mismatch. sourceRunId={}, userId={}",
+                    cacheLookupResult.sourceRunId(),
+                    userId
+            );
+        } else {
+            log.info(
+                    "[CACHE] miss. sha={}, reason={}",
+                    abbreviateSha(commitSha),
+                    cacheLookupResult.reason()
+            );
+        }
 
         String runId = "run_"
                 + OffsetDateTime.now().toLocalDate().toString().replace("-", "")
@@ -129,12 +173,7 @@ public class RepoRunService {
                 abbreviateSha(commitSha)
         );
 
-        return RepoRunCreateResponse.builder()
-                .runId(runId)
-                .status(run.getStatus())
-                .commitSha(commitSha)
-                .workspaceRoot(wsRoot.toString())
-                .build();
+        return toCreateResponse(run);
     }
 
     @Transactional(readOnly = true)
@@ -169,6 +208,27 @@ public class RepoRunService {
                 .promptTemplateVersion(analysisCacheProperties.getPromptTemplateVersion())
                 .outputSchemaVersion(analysisCacheProperties.getOutputSchemaVersion())
                 .runOptionsSignature(analysisCacheProperties.getDefaultRunOptionsSignature())
+                .build();
+    }
+
+    /**
+     * 캐시 hit sourceRun이 현재 사용자 소유인지 확인합니다.
+     * 권한이 맞지 않으면 null을 반환해 신규 분석 경로로 폴백합니다.
+     */
+    private RepoRun resolveOwnedCachedRun(String sourceRunId, Long userId) {
+        if (sourceRunId == null || sourceRunId.isBlank()) {
+            return null;
+        }
+        return repoRunRepository.findByRunIdAndOwner_Id(sourceRunId, userId)
+                .orElse(null);
+    }
+
+    private RepoRunCreateResponse toCreateResponse(RepoRun run) {
+        return RepoRunCreateResponse.builder()
+                .runId(run.getRunId())
+                .status(run.getStatus())
+                .commitSha(run.getCommitSha())
+                .workspaceRoot(run.getWorkspaceRoot())
                 .build();
     }
 
