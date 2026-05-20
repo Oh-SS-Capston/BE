@@ -31,6 +31,9 @@ public class SymbolScoringService {
 
         double maxDegree = degreeMap.values().stream().mapToDouble(v -> v).max().orElse(1.0);
         double maxBridge = bridgeMap.values().stream().mapToDouble(v -> v).max().orElse(1.0);
+        double maxEvidence = graph.getNodes().stream()
+                .mapToDouble(n -> n.getEvidenceCount())
+                .max().orElse(1.0);
 
         List<SymbolRankingItem> items = new ArrayList<>();
 
@@ -44,7 +47,7 @@ public class SymbolScoringService {
                     maxBridge
             );
             double api = node.isPublicApi() ? 1.0 : 0.0;
-            double evidence = 0.5;
+            double evidence = scoreNormalizer.normalize(node.getEvidenceCount(), maxEvidence);
             double subsystemCentrality = structural;
 
             double total = 0.35 * structural

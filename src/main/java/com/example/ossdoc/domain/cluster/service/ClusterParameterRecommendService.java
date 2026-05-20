@@ -109,32 +109,32 @@ public class ClusterParameterRecommendService {
         double resolution = 0.22;
         int iterations = 8;
         int minClusterSize = 2;
-        int topK = 3;
+        int topK = 20;
 
         switch (sizeTier) {
             case SMALL -> {
                 resolution = 0.22;
                 iterations = 8;
                 minClusterSize = 2;
-                topK = 3;
+                topK = 20;
             }
             case MEDIUM -> {
                 resolution = 0.17;
                 iterations = 10;
                 minClusterSize = 3;
-                topK = 5;
+                topK = 30;
             }
             case LARGE -> {
                 resolution = 0.12;
                 iterations = 12;
                 minClusterSize = 5;
-                topK = 8;
+                topK = 50;
             }
         }
 
         if (edgePerType >= 80.0) {
             minClusterSize = Math.min(minClusterSize + 1, 10);
-            topK = Math.min(topK + 1, 20);
+            topK = Math.min(topK + 5, 100);
         } else if (edgePerType <= 20.0) {
             resolution = Math.min(resolution + 0.03, 0.35);
             minClusterSize = Math.max(minClusterSize - 1, 1);

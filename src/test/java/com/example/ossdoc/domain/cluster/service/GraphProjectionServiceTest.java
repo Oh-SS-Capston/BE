@@ -10,6 +10,7 @@ import com.example.ossdoc.domain.graphstore.enums.EdgeType;
 import com.example.ossdoc.domain.graphstore.enums.ResolutionStatus;
 import com.example.ossdoc.domain.graphstore.enums.SymbolKind;
 import com.example.ossdoc.domain.graphstore.repository.EdgeRepository;
+import com.example.ossdoc.domain.graphstore.repository.SymbolEvidenceRepository;
 import com.example.ossdoc.domain.graphstore.repository.SymbolRepository;
 import com.example.ossdoc.domain.publicapi.entity.PublicApiEntry;
 import com.example.ossdoc.domain.publicapi.repository.PublicApiEntryRepository;
@@ -34,12 +35,17 @@ class GraphProjectionServiceTest {
         // given
         SymbolRepository symbolRepository = mock(SymbolRepository.class);
         EdgeRepository edgeRepository = mock(EdgeRepository.class);
+        SymbolEvidenceRepository symbolEvidenceRepository = mock(SymbolEvidenceRepository.class);
         PublicApiEntryRepository publicApiEntryRepository = mock(PublicApiEntryRepository.class);
         EdgeWeightPolicy edgeWeightPolicy = new EdgeWeightPolicy();
+
+        when(symbolEvidenceRepository.countBySymbolIdForRun(org.mockito.ArgumentMatchers.anyString()))
+                .thenReturn(List.of());
 
         GraphProjectionService graphProjectionService = new GraphProjectionService(
                 symbolRepository,
                 edgeRepository,
+                symbolEvidenceRepository,
                 publicApiEntryRepository,
                 edgeWeightPolicy
         );

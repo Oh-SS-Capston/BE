@@ -17,4 +17,12 @@ public interface SymbolEvidenceRepository extends JpaRepository<SymbolEvidence, 
 
     @Query("SELECT se FROM SymbolEvidence se JOIN FETCH se.evidence WHERE se.symbol.run.runId = :runId")
     List<SymbolEvidence> findAllWithEvidenceByRunId(@Param("runId") String runId);
+
+    @Query("""
+            SELECT se.symbol.symbolId, COUNT(se)
+            FROM SymbolEvidence se
+            WHERE se.symbol.run.runId = :runId
+            GROUP BY se.symbol.symbolId
+            """)
+    List<Object[]> countBySymbolIdForRun(@Param("runId") String runId);
 }
