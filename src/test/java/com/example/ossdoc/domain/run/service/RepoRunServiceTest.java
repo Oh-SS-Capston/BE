@@ -118,6 +118,9 @@ class RepoRunServiceTest {
         assertThat(response.getRunId()).isEqualTo("run_cached_001");
         assertThat(response.getCommitSha()).isEqualTo("e717fd63");
         assertThat(response.getWorkspaceRoot()).isEqualTo("C:/data/ossdoc/run_cached_001");
+        assertThat(response.isCacheHit()).isTrue();
+        assertThat(response.getCacheKey()).isEqualTo("cache-key-1");
+        assertThat(response.getSourceRunId()).isEqualTo("run_cached_001");
 
         verify(repoRunRepository, never()).save(any(RepoRun.class));
         verify(pipelineQueueService, never()).enqueue(any(RepoRun.class), eq(userId));
@@ -166,6 +169,9 @@ class RepoRunServiceTest {
         assertThat(response.getRunId()).startsWith("run_");
         assertThat(response.getRunId()).isNotEqualTo("run_source_001");
         assertThat(response.getCommitSha()).isEqualTo("e717fd63");
+        assertThat(response.isCacheHit()).isTrue();
+        assertThat(response.getCacheKey()).isEqualTo("cache-key-1");
+        assertThat(response.getSourceRunId()).isEqualTo("run_source_001");
 
         verify(repoRunRepository).save(any(RepoRun.class));
         verify(pipelineQueueService, never()).enqueue(any(RepoRun.class), eq(userId));
@@ -204,6 +210,9 @@ class RepoRunServiceTest {
 
         assertThat(response.getRunId()).startsWith("run_");
         assertThat(response.getRunId()).isNotEqualTo("run_source_partial_001");
+        assertThat(response.isCacheHit()).isFalse();
+        assertThat(response.getCacheKey()).isNotBlank();
+        assertThat(response.getSourceRunId()).isNull();
 
         ArgumentCaptor<RepoRun> runCaptor = ArgumentCaptor.forClass(RepoRun.class);
         verify(repoRunRepository).save(runCaptor.capture());
@@ -227,6 +236,9 @@ class RepoRunServiceTest {
         assertThat(response.getRunId()).startsWith("run_");
         assertThat(response.getCommitSha()).isEqualTo("e717fd63");
         assertThat(response.getWorkspaceRoot()).isEqualTo(Path.of("C:/data/ossdoc/run_new_001").toString());
+        assertThat(response.isCacheHit()).isFalse();
+        assertThat(response.getCacheKey()).isNotBlank();
+        assertThat(response.getSourceRunId()).isNull();
 
         ArgumentCaptor<RepoRun> runCaptor = ArgumentCaptor.forClass(RepoRun.class);
         verify(repoRunRepository).save(runCaptor.capture());

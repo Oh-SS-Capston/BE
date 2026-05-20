@@ -121,7 +121,12 @@ public class RepoRunService {
                             ownedCachedRun.getRunId(),
                             cacheLookupResult.reason()
                     );
-                    return toCreateResponse(ownedCachedRun);
+                    return toCreateResponse(
+                            ownedCachedRun,
+                            true,
+                            cacheLookupResult.cacheKey(),
+                            cacheLookupResult.sourceRunId()
+                    );
                 }
 
                 log.warn(
@@ -141,7 +146,12 @@ public class RepoRunService {
                             sharedCachedRun.getRunId(),
                             userId
                     );
-                    return toCreateResponse(sharedCachedRun);
+                    return toCreateResponse(
+                            sharedCachedRun,
+                            true,
+                            cacheLookupResult.cacheKey(),
+                            sourceRun.getRunId()
+                    );
                 }
 
                 log.warn(
@@ -191,7 +201,12 @@ public class RepoRunService {
                 abbreviateSha(commitSha)
         );
 
-        return toCreateResponse(run);
+        return toCreateResponse(
+                run,
+                false,
+                analysisCacheKey,
+                null
+        );
     }
 
     @Transactional(readOnly = true)
@@ -379,12 +394,27 @@ public class RepoRunService {
         }
     }
 
-    private RepoRunCreateResponse toCreateResponse(RepoRun run) {
+    /**
+     * Run 생성 응답을 표준 포맷으로 조립합니다.
+     *
+     * 왜 분리했는가:
+     * - W07 요구사항(캐시 메타 응답)을 한 지점에서 일관되게 채우기 위함입니다.
+     * - hit/miss/공유복제 경로가 달라도 응답 계약이 흔들리지 않게 합니다.
+     */
+    private RepoRunCreateResponse toCreateResponse(
+            RepoRun run,
+            boolean cacheHit,
+            String cacheKey,
+            String sourceRunId
+    ) {
         return RepoRunCreateResponse.builder()
                 .runId(run.getRunId())
                 .status(run.getStatus())
                 .commitSha(run.getCommitSha())
                 .workspaceRoot(run.getWorkspaceRoot())
+                .cacheHit(cacheHit)
+                .cacheKey(cacheKey)
+                .sourceRunId(sourceRunId)
                 .build();
     }
 
