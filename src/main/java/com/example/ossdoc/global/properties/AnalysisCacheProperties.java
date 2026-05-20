@@ -47,4 +47,28 @@ public class AnalysisCacheProperties {
      * 현재는 고정값을 사용하고, 추후 요청 옵션 확장 시 동적으로 구성합니다.
      */
     private String defaultRunOptionsSignature = "options-default-v1";
+
+    /**
+     * Redis READY 키 prefix입니다.
+     * 예: analysis:ready
+     */
+    private String redisReadyKeyPrefix = "analysis:ready";
+
+    /**
+     * Redis LOCK 키 prefix입니다.
+     * 예: analysis:lock
+     */
+    private String redisLockKeyPrefix = "analysis:lock";
+
+    /**
+     * READY 키 TTL(시간)입니다.
+     * 기본 24시간으로 두고 운영 환경에서 조정합니다.
+     */
+    private long redisReadyTtlHours = 24;
+
+    /**
+     * LOCK 키 TTL(분)입니다.
+     * 기본 20분(권장 범위 10~30분)으로 두고 운영 환경에서 조정합니다.
+     */
+    private long redisLockTtlMinutes = 20;
 }

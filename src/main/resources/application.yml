@@ -72,6 +72,11 @@ ossdoc:
     prompt-template-version: ${OSSDOC_CACHE_PROMPT_TEMPLATE_VERSION:prompt-v1}
     output-schema-version: ${OSSDOC_CACHE_OUTPUT_SCHEMA_VERSION:schema-v1}
     default-run-options-signature: ${OSSDOC_CACHE_DEFAULT_RUN_OPTIONS_SIGNATURE:options-default-v1}
+    # Redis 키 네이밍/TTL 정책
+    redis-ready-key-prefix: ${OSSDOC_CACHE_REDIS_READY_KEY_PREFIX:analysis:ready}
+    redis-lock-key-prefix: ${OSSDOC_CACHE_REDIS_LOCK_KEY_PREFIX:analysis:lock}
+    redis-ready-ttl-hours: ${OSSDOC_CACHE_REDIS_READY_TTL_HOURS:24}
+    redis-lock-ttl-minutes: ${OSSDOC_CACHE_REDIS_LOCK_TTL_MINUTES:20}
   pipeline:
     worker:
       fixed-delay-ms: ${PIPELINE_WORKER_FIXED_DELAY_MS:2000}
