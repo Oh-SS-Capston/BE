@@ -6,6 +6,7 @@ import com.example.ossdoc.domain.run.cache.service.AnalysisCacheLookupService;
 import com.example.ossdoc.domain.run.dto.request.RepoRunCreateRequest;
 import com.example.ossdoc.domain.run.dto.response.RepoRunCreateResponse;
 import com.example.ossdoc.domain.run.entity.RepoRun;
+import com.example.ossdoc.domain.run.entity.RunPipelineJob;
 import com.example.ossdoc.domain.run.entity.RunPipelineStepExecution;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.example.ossdoc.domain.run.repository.RunPipelineJobRepository;
@@ -109,6 +110,8 @@ class RepoRunServiceTest {
                 .thenReturn(AnalysisCacheLookupResult.hit("cache-key-1", "run_cached_001", "REDIS_HIT_DB_CONFIRMED"));
         when(repoRunRepository.findByRunIdAndOwner_Id("run_cached_001", userId))
                 .thenReturn(Optional.of(cachedRun));
+        when(runPipelineJobRepository.findByRun_RunId("run_cached_001"))
+                .thenReturn(Optional.of(successJob(cachedRun, userId)));
 
         RepoRunCreateResponse response = repoRunService.createRun(request, userId);
 
@@ -150,7 +153,7 @@ class RepoRunServiceTest {
         when(repoRunRepository.save(any(RepoRun.class)))
                 .thenAnswer(invocation -> invocation.getArgument(0));
         when(runPipelineJobRepository.findByRun_RunId("run_source_001"))
-                .thenReturn(Optional.empty());
+                .thenReturn(Optional.of(successJob(sourceRun, userId)));
         when(runPipelineJobRepository.save(any()))
                 .thenAnswer(invocation -> invocation.getArgument(0));
         when(runPipelineStepExecutionRepository.findAllByRun_RunIdOrderByStepIdAsc("run_source_001"))
@@ -166,6 +169,45 @@ class RepoRunServiceTest {
 
         verify(repoRunRepository).save(any(RepoRun.class));
         verify(pipelineQueueService, never()).enqueue(any(RepoRun.class), eq(userId));
+    }
+
+    @Test
+    void cache_hit이더라도_부분성공_결과면_재사용하지_않고_신규_분석을_실행한다() {
+        Long userId = 1L;
+        RepoRunCreateRequest request = request("https://github.com/apache/commons-cli", "master");
+        User requester = user(userId);
+
+        User sourceOwner = user(2L);
+        RepoRun sourceRun = new RepoRun(
+                "run_source_partial_001",
+                sourceOwner,
+                "https://github.com/apache/commons-cli",
+                "apache",
+                "commons-cli",
+                "master",
+                "e717fd63",
+                "C:/data/ossdoc/run_source_partial_001"
+        );
+        sourceRun.markPartialSuccess();
+
+        when(userRepository.findById(userId)).thenReturn(Optional.of(requester));
+        when(githubClient.resolveCommitSha("apache", "commons-cli", "master")).thenReturn("e717fd63");
+        when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63")))
+                .thenReturn(AnalysisCacheLookupResult.hit("cache-key-1", "run_source_partial_001", "REDIS_HIT_DB_CONFIRMED"));
+        when(repoRunRepository.findByRunIdAndOwner_Id("run_source_partial_001", userId))
+                .thenReturn(Optional.empty());
+        when(repoRunRepository.findById("run_source_partial_001"))
+                .thenReturn(Optional.of(sourceRun));
+        when(workspaceManager.workspaceRoot(any())).thenReturn(Path.of("C:/data/ossdoc/run_new_after_partial"));
+
+        RepoRunCreateResponse response = repoRunService.createRun(request, userId);
+
+        assertThat(response.getRunId()).startsWith("run_");
+        assertThat(response.getRunId()).isNotEqualTo("run_source_partial_001");
+
+        ArgumentCaptor<RepoRun> runCaptor = ArgumentCaptor.forClass(RepoRun.class);
+        verify(repoRunRepository).save(runCaptor.capture());
+        verify(pipelineQueueService).enqueue(runCaptor.getValue(), userId);
     }
 
     @Test
@@ -209,4 +251,11 @@ class RepoRunServiceTest {
                 .active(true)
                 .build();
     }
+
+    private RunPipelineJob successJob(RepoRun run, Long userId) {
+        RunPipelineJob job = RunPipelineJob.create(run, userId);
+        job.markSuccess();
+        return job;
+    }
+
 }

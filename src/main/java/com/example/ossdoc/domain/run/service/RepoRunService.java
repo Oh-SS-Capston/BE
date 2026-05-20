@@ -14,6 +14,7 @@ import com.example.ossdoc.domain.run.entity.RunPipelineJob;
 import com.example.ossdoc.domain.run.entity.RunPipelineStepExecution;
 import com.example.ossdoc.domain.run.enums.PipelineJobStatus;
 import com.example.ossdoc.domain.run.enums.PipelineStepStatus;
+import com.example.ossdoc.domain.run.enums.RunStatus;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.example.ossdoc.domain.run.repository.RunPipelineJobRepository;
 import com.example.ossdoc.domain.run.repository.RunPipelineStepExecutionRepository;
@@ -113,31 +114,47 @@ public class RepoRunService {
         if (cacheLookupResult.hit()) {
             RepoRun ownedCachedRun = resolveOwnedCachedRun(cacheLookupResult.sourceRunId(), userId);
             if (ownedCachedRun != null) {
-                log.info(
-                        "[CACHE] hit accepted. requestSha={}, sourceRunId={}, reason={}",
-                        abbreviateSha(commitSha),
+                if (isFullSuccessCacheSource(ownedCachedRun)) {
+                    log.info(
+                            "[CACHE] hit accepted. requestSha={}, sourceRunId={}, reason={}",
+                            abbreviateSha(commitSha),
+                            ownedCachedRun.getRunId(),
+                            cacheLookupResult.reason()
+                    );
+                    return toCreateResponse(ownedCachedRun);
+                }
+
+                log.warn(
+                        "[CACHE] hit rejected. run is not full-success. sourceRunId={}, runStatus={}",
                         ownedCachedRun.getRunId(),
-                        cacheLookupResult.reason()
+                        ownedCachedRun.getStatus()
                 );
-                return toCreateResponse(ownedCachedRun);
             }
 
             RepoRun sourceRun = resolveAnyCachedRun(cacheLookupResult.sourceRunId());
             if (sourceRun != null) {
-                RepoRun sharedCachedRun = createSharedCachedRun(sourceRun, owner, userId);
-                log.info(
-                        "[CACHE] global hit accepted. sourceRunId={}, sharedRunId={}, requestUserId={}",
-                        sourceRun.getRunId(),
-                        sharedCachedRun.getRunId(),
-                        userId
-                );
-                return toCreateResponse(sharedCachedRun);
-            }
+                if (isFullSuccessCacheSource(sourceRun)) {
+                    RepoRun sharedCachedRun = createSharedCachedRun(sourceRun, owner, userId);
+                    log.info(
+                            "[CACHE] global hit accepted. sourceRunId={}, sharedRunId={}, requestUserId={}",
+                            sourceRun.getRunId(),
+                            sharedCachedRun.getRunId(),
+                            userId
+                    );
+                    return toCreateResponse(sharedCachedRun);
+                }
 
-            log.warn(
-                    "[CACHE] hit payload exists but source run is missing. sourceRunId={}, fallback=MISS",
-                    cacheLookupResult.sourceRunId()
-            );
+                log.warn(
+                        "[CACHE] hit rejected. source run is not full-success. sourceRunId={}, runStatus={}",
+                        sourceRun.getRunId(),
+                        sourceRun.getStatus()
+                );
+            } else {
+                log.warn(
+                        "[CACHE] hit payload exists but source run is missing. sourceRunId={}, fallback=MISS",
+                        cacheLookupResult.sourceRunId()
+                );
+            }
         } else {
             log.info(
                     "[CACHE] miss. sha={}, reason={}",
@@ -232,6 +249,25 @@ public class RepoRunService {
         }
         return repoRunRepository.findById(sourceRunId)
                 .orElse(null);
+    }
+
+    /**
+     * 캐시 재사용 허용 조건(풀 성공)을 검사합니다.
+     *
+     * 허용 조건:
+     * 1) repo_run.status == SUCCESS
+     * 2) run_pipeline_job.status == SUCCESS
+     *
+     * 위 조건을 둘 다 만족하지 않으면 cache hit를 수용하지 않고 신규 분석 경로로 폴백합니다.
+     */
+    private boolean isFullSuccessCacheSource(RepoRun run) {
+        if (run.getStatus() != RunStatus.SUCCESS) {
+            return false;
+        }
+
+        return runPipelineJobRepository.findByRun_RunId(run.getRunId())
+                .map(job -> job.getStatus() == PipelineJobStatus.SUCCESS)
+                .orElse(false);
     }
 
     /**
