@@ -84,6 +84,9 @@ dependencies {
 
     //Leiden
     implementation 'nl.cwts:networkanalysis:1.3.0'
+
+    //Redis
+    implementation 'org.springframework.boot:spring-boot-starter-data-redis'
 }
 
 tasks.named('test') {

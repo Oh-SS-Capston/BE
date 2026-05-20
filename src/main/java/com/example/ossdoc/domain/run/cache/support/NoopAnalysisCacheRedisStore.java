@@ -1,6 +1,7 @@
 package com.example.ossdoc.domain.run.cache.support;
 
 import org.springframework.stereotype.Component;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 
 import java.time.Duration;
 import java.util.Optional;
@@ -17,6 +18,7 @@ import java.util.Optional;
  * - 이후 실제 Redis 구현체를 추가해도 서비스 코드는 그대로 재사용할 수 있습니다.
  */
 @Component
+@ConditionalOnMissingBean(AnalysisCacheRedisStore.class)
 public class NoopAnalysisCacheRedisStore implements AnalysisCacheRedisStore {
 
     @Override

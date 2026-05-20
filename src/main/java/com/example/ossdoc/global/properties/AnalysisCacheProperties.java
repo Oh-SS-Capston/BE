@@ -49,6 +49,12 @@ public class AnalysisCacheProperties {
     private String defaultRunOptionsSignature = "options-default-v1";
 
     /**
+     * Redis 기반 캐시를 활성화할지 여부입니다.
+     * false면 Noop 저장소를 사용하고, true면 실제 Redis 저장소를 사용합니다.
+     */
+    private boolean redisEnabled = false;
+
+    /**
      * Redis READY 키 prefix입니다.
      * 예: analysis:ready
      */
