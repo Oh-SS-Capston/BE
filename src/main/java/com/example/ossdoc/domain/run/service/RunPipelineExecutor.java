@@ -1,6 +1,8 @@
 package com.example.ossdoc.domain.run.service;
 
 import com.example.ossdoc.domain.build.service.BuildResolveService;
+import com.example.ossdoc.domain.build.dto.response.BuildResolveResponse;
+import com.example.ossdoc.domain.build.enums.BuildMode;
 import com.example.ossdoc.domain.classmap.dto.request.ClassMapBuildRequest;
 import com.example.ossdoc.domain.classmap.service.ClassMapBuildService;
 import com.example.ossdoc.domain.cluster.dto.request.ClusterBuildRequest;
@@ -28,6 +30,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 /*
  * 실제 파이프라인 실행 오케스트레이터입니다.
@@ -73,6 +76,7 @@ public class RunPipelineExecutor {
         log.info("[PIPELINE] execute start. jobId={}, runId={}", jobId, runId);
 
         List<String> optionalFailures = new ArrayList<>();
+        AtomicReference<BuildMode> buildModeRef = new AtomicReference<>(null);
 
         try {
             executeRequired(
@@ -86,7 +90,10 @@ public class RunPipelineExecutor {
                     jobId,
                     RunStage.BUILD,
                     "빌드 환경을 분석 중입니다.",
-                    () -> buildResolveService.resolve(runId)
+                    () -> {
+                        BuildResolveResponse response = buildResolveService.resolve(runId);
+                        buildModeRef.set(response == null ? null : response.getBuildMode());
+                    }
             );
 
             executeRequired(
@@ -219,13 +226,32 @@ public class RunPipelineExecutor {
                 );
             }
 
-            if (optionalFailures.isEmpty()) {
+            BuildMode buildMode = buildModeRef.get();
+            if (buildMode == BuildMode.FAILED) {
+                stepService.markRunFailed(
+                        jobId,
+                        "빌드 분석에 실패해 전체 분석을 완료할 수 없습니다.",
+                        "buildMode=FAILED"
+                );
+                return;
+            }
+
+            /*
+             * 최종 상태 정책:
+             * - FULL + 선택 단계 전부 성공 => SUCCESS
+             * - COMPILE_ONLY/SOURCE_ONLY/UNKNOWN 또는 선택 단계 일부 실패 => PARTIAL_SUCCESS
+             */
+            if (optionalFailures.isEmpty() && buildMode == BuildMode.FULL) {
                 stepService.markRunSuccess(jobId);
                 publishReadyCacheSafely(job);
             } else {
+                List<String> partialReasons = new ArrayList<>(optionalFailures);
+                if (buildMode != BuildMode.FULL) {
+                    partialReasons.add(buildModeToPartialReason(buildMode));
+                }
                 stepService.markRunPartialSuccess(
                         jobId,
-                        String.join(" / ", optionalFailures)
+                        String.join(" / ", partialReasons)
                 );
             }
         } catch (Exception e) {
@@ -367,6 +393,18 @@ public class RunPipelineExecutor {
         }
 
         return e.getMessage();
+    }
+
+    private String buildModeToPartialReason(BuildMode buildMode) {
+        if (buildMode == null) {
+            return "빌드 품질을 확인할 수 없어 부분 성공으로 처리했습니다.";
+        }
+        return switch (buildMode) {
+            case COMPILE_ONLY -> "빌드 결과가 COMPILE_ONLY라 부분 성공으로 처리했습니다.";
+            case SOURCE_ONLY -> "빌드 결과가 SOURCE_ONLY라 부분 성공으로 처리했습니다.";
+            case FAILED -> "빌드 결과가 FAILED라 부분 성공으로 처리했습니다.";
+            case FULL -> "빌드 결과가 FULL입니다.";
+        };
     }
 
     /**

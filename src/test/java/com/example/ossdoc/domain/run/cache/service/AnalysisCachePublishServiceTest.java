@@ -101,7 +101,7 @@ class AnalysisCachePublishServiceTest {
         String cacheKey = cacheKeyOf(run);
 
         when(analysisCacheRepository.findById(cacheKey)).thenReturn(Optional.empty());
-        stubArtifacts(run.getRunId(), buildRequiredArtifactMap(run));
+        stubArtifacts(run, buildRequiredArtifactMap(run), "FULL");
 
         boolean published = publishService.publishReady(run);
 
@@ -128,7 +128,20 @@ class AnalysisCachePublishServiceTest {
         RepoRun run = run("run_002");
         Map<ArtifactKind, Artifact> partial = buildRequiredArtifactMap(run);
         partial.remove(ArtifactKind.LLM_FILE_TREE_DOCS);
-        stubArtifacts(run.getRunId(), partial);
+        stubArtifacts(run, partial, "FULL");
+
+        boolean published = publishService.publishReady(run);
+
+        assertThat(published).isFalse();
+        verify(analysisCacheRepository, never()).save(any());
+        verify(redisStore, never()).set(any(), any(), any());
+    }
+
+    @Test
+    void buildMode가_FULL이_아니면_READY_캐시_발행을_차단한다() {
+        RepoRun run = run("run_003");
+        Map<ArtifactKind, Artifact> required = buildRequiredArtifactMap(run);
+        stubArtifacts(run, required, "SOURCE_ONLY");
 
         boolean published = publishService.publishReady(run);
 
@@ -185,12 +198,27 @@ class AnalysisCachePublishServiceTest {
      * kind별 아티팩트 조회를 맵 기반으로 스텁합니다.
      * 서비스가 어떤 순서로 조회하든 동일한 결과를 반환하도록 구성합니다.
      */
-    private void stubArtifacts(String runId, Map<ArtifactKind, Artifact> artifacts) {
-        when(artifactRepository.findTopByRun_RunIdAndKindOrderByCreatedAtDesc(eq(runId), any(ArtifactKind.class)))
+    private void stubArtifacts(RepoRun run, Map<ArtifactKind, Artifact> artifacts, String buildMode) {
+        when(artifactRepository.findTopByRun_RunIdAndKindOrderByCreatedAtDesc(eq(run.getRunId()), any(ArtifactKind.class)))
                 .thenAnswer(invocation -> {
                     ArtifactKind kind = invocation.getArgument(1);
+                    if (kind == ArtifactKind.BUILD_MANIFEST) {
+                        return Optional.of(buildManifestArtifact(run, buildMode));
+                    }
                     return Optional.ofNullable(artifacts.get(kind));
                 });
     }
-}
 
+    private Artifact buildManifestArtifact(RepoRun run, String buildMode) {
+        ObjectNode meta = objectMapper.createObjectNode().put("buildMode", buildMode);
+        return new Artifact(
+                999L,
+                run,
+                ArtifactKind.BUILD_MANIFEST,
+                "0.1",
+                "application/json",
+                "https://s3.example.com/build_manifest.json",
+                meta
+        );
+    }
+}

@@ -3,6 +3,7 @@ package com.example.ossdoc.domain.run.cache.service;
 import com.example.ossdoc.domain.artifact.entity.Artifact;
 import com.example.ossdoc.domain.artifact.enums.ArtifactKind;
 import com.example.ossdoc.domain.artifact.repository.ArtifactRepository;
+import com.example.ossdoc.domain.build.enums.BuildMode;
 import com.example.ossdoc.domain.run.cache.entity.AnalysisCache;
 import com.example.ossdoc.domain.run.cache.repository.AnalysisCacheRepository;
 import com.example.ossdoc.domain.run.cache.support.AnalysisCacheRedisKeyPolicy;
@@ -28,6 +29,7 @@ import java.time.LocalDateTime;
 import java.util.EnumMap;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 
@@ -94,6 +96,22 @@ public class AnalysisCachePublishService {
     public boolean publishReady(RepoRun run) {
         String cacheKey = buildCacheKey(run);
         String repoUrlNorm = runAnalysisCacheKeyFactory.normalizeRepoUrlForCache(run.getRepoUrl());
+        BuildMode buildMode = resolveBuildMode(run.getRunId());
+
+        /*
+         * 캐시 READY 정책:
+         * - FULL 빌드 결과만 READY 발행 대상이다.
+         * - COMPILE_ONLY / SOURCE_ONLY / FAILED / 미확인(null)은 캐시 오염 방지를 위해 차단한다.
+         */
+        if (buildMode != BuildMode.FULL) {
+            log.warn(
+                    "[CACHE] READY publish blocked. buildMode is not FULL. runId={}, cacheKey={}, buildMode={}",
+                    run.getRunId(),
+                    abbreviate(cacheKey),
+                    buildMode == null ? "UNKNOWN" : buildMode
+            );
+            return false;
+        }
 
         Map<ArtifactKind, Artifact> requiredArtifacts = loadArtifacts(run.getRunId(), REQUIRED_READY_ARTIFACT_KINDS);
         List<ArtifactKind> missing = REQUIRED_READY_ARTIFACT_KINDS.stream()
@@ -153,6 +171,26 @@ public class AnalysisCachePublishService {
             artifact.ifPresent(value -> result.put(kind, value));
         }
         return result;
+    }
+
+    private BuildMode resolveBuildMode(String runId) {
+        Optional<Artifact> buildManifest = artifactRepository.findTopByRun_RunIdAndKindOrderByCreatedAtDesc(
+                runId,
+                ArtifactKind.BUILD_MANIFEST
+        );
+        if (buildManifest.isEmpty() || buildManifest.get().getMeta() == null) {
+            return null;
+        }
+        String raw = buildManifest.get().getMeta().path("buildMode").asText("");
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            return BuildMode.valueOf(raw.trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException e) {
+            log.warn("[CACHE] Invalid buildMode in build_manifest. runId={}, raw={}", runId, raw);
+            return null;
+        }
     }
 
     /**
