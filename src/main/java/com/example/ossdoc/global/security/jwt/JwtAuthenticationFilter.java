@@ -1,6 +1,8 @@
 package com.example.ossdoc.global.security.jwt;
 
 import com.example.ossdoc.domain.auth.exception.AuthException;
+import com.example.ossdoc.domain.user.entity.User;
+import com.example.ossdoc.domain.user.repository.UserRepository;
 import com.example.ossdoc.global.apiPayload.code.ReasonDTO;
 import com.example.ossdoc.global.properties.AuthProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -11,7 +13,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.MediaType;
-import org.springframework.security.core.Authentication;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
@@ -19,6 +21,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 @Component
@@ -26,6 +29,7 @@ import java.util.Map;
 public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
     private final JwtTokenProvider jwtTokenProvider;
+    private final UserRepository userRepository;
     private final AuthProperties authProperties;
     private final ObjectMapper objectMapper;
 
@@ -43,16 +47,32 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     }
 
     @Override
-    protected void doFilterInternal(HttpServletRequest request,
-                                    HttpServletResponse response,
-                                    FilterChain filterChain) throws ServletException, IOException {
+    protected void doFilterInternal(
+            HttpServletRequest request,
+            HttpServletResponse response,
+            FilterChain filterChain
+    ) throws ServletException, IOException {
 
         try {
             String token = resolveToken(request);
 
-            if (StringUtils.hasText(token)) {
-                Authentication authentication = jwtTokenProvider.getAuthentication(token);
-                SecurityContextHolder.getContext().setAuthentication(authentication);
+            if (StringUtils.hasText(token) && jwtTokenProvider.validateToken(token)) {
+                Long userId = jwtTokenProvider.getUserIdFromAccessToken(token);
+
+                userRepository.findById(userId)
+                        .filter(User::isActive)
+                        .ifPresent(user -> {
+                            AuthenticatedUser principal = AuthenticatedUser.from(user);
+
+                            UsernamePasswordAuthenticationToken authentication =
+                                    new UsernamePasswordAuthenticationToken(
+                                            principal,
+                                            null,
+                                            List.of()
+                                    );
+
+                            SecurityContextHolder.getContext().setAuthentication(authentication);
+                        });
             }
 
             filterChain.doFilter(request, response);
@@ -95,6 +115,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                 return cookie.getValue();
             }
         }
+
         return null;
     }
 }
