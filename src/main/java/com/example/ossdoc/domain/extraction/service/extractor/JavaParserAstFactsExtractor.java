@@ -103,6 +103,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
@@ -208,7 +209,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             } catch (Exception e) {
                 // JarTypeSolver throws NPE on modular JARs (module-info.class) in javaparser 3.x
                 sink.addWarning("failed to attach classpath entry to symbol solver: "
-                        + classpathEntry + " (" + e.getMessage() + ")");
+                        + classpathEntry + " (" + Objects.toString(e.getMessage(), "<null message>") + ")");
             }
         }
 
@@ -500,6 +501,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
 
         addCallableBodyRelations(declaration, methodSymbol, evidence.id(), sink);
         addMethodObservationsIfNeeded(context, declaration, methodSymbol, evidence.id(), sink);
+        addOverridesRelationIfPresent(declaration, methodSymbol, declaration.getNameAsString(), signature, evidence.id(), sink);
 
         if (isExampleFile(relativePath)) {
             collectExampleTypeRefs(relativePath, declaration, sink);
@@ -925,6 +927,120 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                 sink.addObservation(builder.build());
             }
         });
+    }
+
+    /**
+     * @Override 어노테이션이 있는 메서드에 대해 OVERRIDES edge를 생성한다.
+     *
+     * 1순위: Symbol Solver로 부모 타입을 특정해 RESOLVED edge를 생성한다.
+     * 2순위: Symbol Solver 실패 시 owner type의 선언된 supertypes(extends/implements)를
+     *        기반으로 PARTIAL edge를 생성한다.
+     * JDK 내장 타입(java.*, javax.* 등)으로의 override는 그래프 분석 가치가 없으므로 제외한다.
+     */
+    private void addOverridesRelationIfPresent(
+            MethodDeclaration declaration,
+            String methodSymbol,
+            String methodName,
+            SignatureFact signature,
+            String evidenceId,
+            ExtractionSink sink
+    ) {
+        boolean hasOverride = declaration.getAnnotations().stream()
+                .anyMatch(a -> "Override".equals(a.getNameAsString()));
+        if (!hasOverride) {
+            return;
+        }
+
+        // 1순위: Symbol Solver 기반 — 실제 부모 타입에서 메서드 확인 후 RESOLVED edge
+        try {
+            ResolvedMethodDeclaration resolved = declaration.resolve();
+            for (ResolvedReferenceType ancestor : resolved.declaringType().getAncestors()) {
+                String parentFqn;
+                try {
+                    parentFqn = ancestor.getQualifiedName();
+                } catch (Exception ignored) {
+                    continue;
+                }
+                if (isJdkType(parentFqn)) {
+                    continue;
+                }
+                boolean hasMethod;
+                try {
+                    hasMethod = ancestor.getDeclaredMethods().stream()
+                            .anyMatch(m -> methodName.equals(m.getName()));
+                } catch (Exception ignored) {
+                    hasMethod = true;
+                }
+                if (hasMethod) {
+                    sink.addRelation(RelationFact.builder()
+                            .kind(RelationKind.OVERRIDES)
+                            .srcSymbol(methodSymbol)
+                            .dstSymbol(SymbolIdFactory.method(parentFqn, methodName, signature))
+                            .evidenceIds(List.of(evidenceId))
+                            .resolution(RelationResolutionFactory.resolved())
+                            .origin(FactOriginKind.AST)
+                            .confidenceHint(ConfidenceHints.relation(ResolutionStatus.RESOLVED, FactOriginKind.AST))
+                            .build());
+                    return;
+                }
+            }
+            return;
+        } catch (Exception ignored) {
+            // Symbol Solver 실패 → fallback
+        }
+
+        // 2순위: 선언된 supertypes 기반 PARTIAL edge
+        declaration.findAncestor(TypeDeclaration.class).ifPresent(ownerType -> {
+            for (String parentFqn : collectDeclaredParentFqns(ownerType)) {
+                if (isJdkType(parentFqn)) {
+                    continue;
+                }
+                sink.addRelation(RelationFact.builder()
+                        .kind(RelationKind.OVERRIDES)
+                        .srcSymbol(methodSymbol)
+                        .dstSymbol(SymbolIdFactory.method(parentFqn, methodName, signature))
+                        .evidenceIds(List.of(evidenceId))
+                        .resolution(RelationResolutionFactory.partial("@Override present; parent from declared supertypes"))
+                        .origin(FactOriginKind.AST)
+                        .confidenceHint(ConfidenceHints.relation(ResolutionStatus.PARTIAL, FactOriginKind.AST))
+                        .build());
+            }
+        });
+    }
+
+    private List<String> collectDeclaredParentFqns(TypeDeclaration<?> ownerType) {
+        List<String> result = new ArrayList<>();
+        if (ownerType instanceof ClassOrInterfaceDeclaration coid) {
+            for (ClassOrInterfaceType t : coid.getExtendedTypes()) {
+                resolveParentFqn(t, result);
+            }
+            for (ClassOrInterfaceType t : coid.getImplementedTypes()) {
+                resolveParentFqn(t, result);
+            }
+        } else if (ownerType instanceof EnumDeclaration enumDecl) {
+            for (ClassOrInterfaceType t : enumDecl.getImplementedTypes()) {
+                resolveParentFqn(t, result);
+            }
+        }
+        return result;
+    }
+
+    private void resolveParentFqn(ClassOrInterfaceType type, List<String> result) {
+        try {
+            result.add(type.resolve().asReferenceType().getQualifiedName());
+        } catch (Exception ignored) {
+            String simple = type.getNameAsString();
+            if (!simple.isBlank()) {
+                result.add(simple);
+            }
+        }
+    }
+
+    private boolean isJdkType(String fqn) {
+        if (fqn == null) return true;
+        return fqn.startsWith("java.") || fqn.startsWith("javax.")
+                || fqn.startsWith("jakarta.") || fqn.startsWith("sun.")
+                || fqn.startsWith("com.sun.");
     }
 
     private String ensureModuleSymbol(ExtractionContext context, ExtractionSink sink) {

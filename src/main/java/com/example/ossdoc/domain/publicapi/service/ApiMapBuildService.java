@@ -2,6 +2,7 @@ package com.example.ossdoc.domain.publicapi.service;
 
 import com.example.ossdoc.domain.artifact.entity.Artifact;
 import com.example.ossdoc.domain.artifact.enums.ArtifactKind;
+import com.example.ossdoc.domain.artifact.repository.ArtifactRepository;
 import com.example.ossdoc.domain.artifact.service.ArtifactService;
 import com.example.ossdoc.domain.publicapi.dto.response.ApiMapBuildResponse;
 import com.example.ossdoc.domain.publicapi.model.EntryPointCandidate;
@@ -10,6 +11,7 @@ import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.exception.RunException;
 import com.example.ossdoc.domain.run.exception.code.RunErrorCode;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -19,7 +21,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -37,6 +42,7 @@ public class ApiMapBuildService {
     private final EntryPointDetectService     entryPointDetectService;
     private final ExtensionPointDetectService extensionPointDetectService;
     private final ArtifactService             artifactService;
+    private final ArtifactRepository          artifactRepository;
     private final ObjectMapper                objectMapper;
 
     @Transactional
@@ -198,7 +204,88 @@ public class ApiMapBuildService {
             xpArray.add(node);
         }
 
+        root.set("readme_mentions", buildReadmeMentionsJson(runId));
+
         return root;
+    }
+
+    /**
+     * facts.json의 observations.readme_mentions 버킷에서 README에 언급된 공개 타입 목록을 추출한다.
+     * - target_symbol: README에서 언급된 타입의 FQCN
+     * - readme_file: 언급이 발견된 README 파일의 경로 (evidence에서 역추적)
+     * - confidence: observation의 confidence_hint (README 신호는 0.6 고정)
+     * 동일 FQCN이 복수 존재하면 마지막 항목으로 덮어쓴다 (중복 제거).
+     */
+    private ArrayNode buildReadmeMentionsJson(String runId) {
+        ArrayNode out = objectMapper.createArrayNode();
+        Artifact factsArtifact = artifactRepository
+                .findTopByRun_RunIdAndKindOrderByCreatedAtDesc(runId, ArtifactKind.FACTS_JSON)
+                .orElse(null);
+        if (factsArtifact == null || factsArtifact.getMeta() == null) {
+            return out;
+        }
+
+        JsonNode meta = factsArtifact.getMeta();
+
+        // evidence 배열에서 rawId → filePath 인덱스 구성 (README 타입만 포함)
+        Map<String, String> readmePathByEvidenceId = new HashMap<>();
+        JsonNode evidenceArray = meta.path("evidence");
+        if (evidenceArray.isArray()) {
+            for (JsonNode ev : evidenceArray) {
+                if (!"README".equalsIgnoreCase(ev.path("type").asText(""))) {
+                    continue;
+                }
+                String evId = ev.path("id").asText("");
+                String path = ev.path("path").asText("");
+                if (!evId.isBlank() && !path.isBlank()) {
+                    readmePathByEvidenceId.put(evId, path);
+                }
+            }
+        }
+
+        // observations.readme_mentions 버킷 순회 — FQCN 기준 중복 제거
+        JsonNode mentions = meta.path("observations").path("readme_mentions");
+        if (!mentions.isArray()) {
+            return out;
+        }
+        Map<String, ObjectNode> byFqn = new LinkedHashMap<>();
+        for (JsonNode obs : mentions) {
+            String qualifiedName = obs.path("target_symbol").asText("").trim();
+            if (qualifiedName.isBlank()) {
+                continue;
+            }
+            String simpleName = extractSimpleName(qualifiedName);
+            double confidence = obs.path("confidence_hint").asDouble(0.6);
+
+            // evidence_ids 첫 번째 항목에서 README 파일 경로 역추적
+            String readmeFile = "";
+            JsonNode evIds = obs.path("evidence_ids");
+            if (evIds.isArray() && !evIds.isEmpty()) {
+                String evId = evIds.get(0).asText("");
+                readmeFile = readmePathByEvidenceId.getOrDefault(evId, "");
+            }
+
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("qualified_name", qualifiedName);
+            node.put("simple_name", simpleName);
+            node.put("confidence", confidence);
+            if (!readmeFile.isBlank()) {
+                node.put("readme_file", readmeFile);
+            }
+            byFqn.put(qualifiedName, node);
+        }
+
+        byFqn.values().forEach(out::add);
+        log.info("[PUBLICAPI] readme_mentions={} for runId={}", out.size(), runId);
+        return out;
+    }
+
+    private String extractSimpleName(String qualifiedName) {
+        if (qualifiedName == null || qualifiedName.isBlank()) {
+            return "";
+        }
+        int dot = qualifiedName.lastIndexOf('.');
+        return dot >= 0 ? qualifiedName.substring(dot + 1) : qualifiedName;
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

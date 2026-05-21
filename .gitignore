@@ -52,8 +52,9 @@ workspace/
 *.md
 !**/README.md
 
-### Markdown output directory ###
+### jurutang's file ###
 MarkDownFile/
+artifacts/
 
 ### Application config ###
 src/main/resources/application.yml
