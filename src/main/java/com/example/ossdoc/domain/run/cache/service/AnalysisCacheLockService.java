@@ -23,6 +23,14 @@ public class AnalysisCacheLockService {
     private final AnalysisCacheRedisStore redisStore;
 
     /**
+     * lock owner token 표준 규칙입니다.
+     * runId 기반으로 고정해, enqueue 시점과 worker 종료 시점이 같은 토큰으로 해제 검증할 수 있게 합니다.
+     */
+    public static String ownerTokenForRun(String runId) {
+        return "run:" + runId;
+    }
+
+    /**
      * cacheKey 단위 락 획득을 시도합니다.
      *
      * @return 획득 성공 여부

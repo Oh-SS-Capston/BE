@@ -259,7 +259,14 @@ public class RepoRunService {
          *   2) 타사용자 활성 run + buildMode=FULL(또는 미확정) -> 내 소유 WAIT run 생성 후 캐시 대기
          *   3) 타사용자 활성 run + buildMode!=FULL -> 조기 탈출(독립 분석 즉시 enqueue)
          */
-        String lockOwnerToken = buildLockOwnerToken(userId);
+        /*
+         * 락 owner token을 runId 기반으로 고정해 둡니다.
+         * 이유:
+         * - enqueue 시점에 획득한 락을 worker 종료 시점에서 같은 토큰으로 안전 해제해야
+         *   TTL 만료 전에도 다음 동일 요청이 즉시 캐시 hit 경로를 탈 수 있습니다.
+         */
+        String runId = generateRunId();
+        String lockOwnerToken = buildLockOwnerToken(runId);
         boolean lockAcquired = analysisCacheLockService.tryAcquire(analysisCacheKey, lockOwnerToken);
         if (!lockAcquired) {
             RepoRun activeRun = resolveActiveRunForSameRepoAndSha(
@@ -314,8 +321,6 @@ public class RepoRunService {
                 }
             }
         }
-
-        String runId = generateRunId();
 
         Path wsRoot = workspaceManager.workspaceRoot(runId);
 
@@ -665,8 +670,8 @@ public class RepoRunService {
      * Redis lock value(owner token) 생성 규칙입니다.
      * owner 검증 해제 시에 "누가 획득한 락인지"를 식별하기 위해 사용합니다.
      */
-    private String buildLockOwnerToken(Long userId) {
-        return "user:" + userId + ":" + UUID.randomUUID();
+    private String buildLockOwnerToken(String runId) {
+        return AnalysisCacheLockService.ownerTokenForRun(runId);
     }
 
     private String generateRunId() {

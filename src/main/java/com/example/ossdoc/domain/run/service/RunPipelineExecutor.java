@@ -16,12 +16,18 @@ import com.example.ossdoc.domain.graphstore.dto.request.GraphStoreIngestRequest;
 import com.example.ossdoc.domain.graphstore.service.GraphStoreIngestService;
 import com.example.ossdoc.domain.rule.dto.request.RuleCandidateMineRequest;
 import com.example.ossdoc.domain.rule.service.RuleCandidateMiningService;
+import com.example.ossdoc.domain.run.cache.service.AnalysisCacheLockService;
 import com.example.ossdoc.domain.run.cache.service.AnalysisCachePublishService;
+import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.entity.RunPipelineJob;
 import com.example.ossdoc.domain.run.enums.RunStage;
 import com.example.ossdoc.domain.run.exception.RunException;
 import com.example.ossdoc.domain.run.exception.code.RunErrorCode;
+import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.example.ossdoc.domain.run.repository.RunPipelineJobRepository;
+import com.example.ossdoc.domain.run.support.RunAnalysisCacheKeyFactory;
+import com.example.ossdoc.domain.run.support.RunAnalysisCacheKeySeed;
+import com.example.ossdoc.global.properties.AnalysisCacheProperties;
 import com.example.ossdoc.global.llm.dto.request.LlmRequest;
 import com.example.ossdoc.global.llm.service.LlmService;
 import lombok.RequiredArgsConstructor;
@@ -65,6 +71,10 @@ public class RunPipelineExecutor {
     private final RuleCandidateMiningService ruleCandidateMiningService;
     private final LlmService llmService;
     private final AnalysisCachePublishService analysisCachePublishService;
+    private final AnalysisCacheLockService analysisCacheLockService;
+    private final RepoRunRepository repoRunRepository;
+    private final RunAnalysisCacheKeyFactory runAnalysisCacheKeyFactory;
+    private final AnalysisCacheProperties analysisCacheProperties;
 
     public void execute(Long jobId) {
         RunPipelineJob job = jobRepository.findById(jobId)
@@ -266,6 +276,8 @@ public class RunPipelineExecutor {
                     internalError
             );
             publishFailedCacheSafely(job, internalError);
+        } finally {
+            releaseAnalysisLockSafely(runId);
         }
     }
 
@@ -420,7 +432,7 @@ public class RunPipelineExecutor {
      */
     private void publishReadyCacheSafely(RunPipelineJob job) {
         try {
-            boolean published = analysisCachePublishService.publishReady(job.getRun());
+            boolean published = analysisCachePublishService.publishReady(job.getRun().getRunId());
             if (!published) {
                 log.warn(
                         "[CACHE] READY publish skipped. runId={}, reason=REQUIRED_ARTIFACT_MISSING_OR_INVALID",
@@ -445,7 +457,7 @@ public class RunPipelineExecutor {
      */
     private void publishFailedCacheSafely(RunPipelineJob job, String reason) {
         try {
-            analysisCachePublishService.publishFailed(job.getRun(), reason);
+            analysisCachePublishService.publishFailed(job.getRun().getRunId(), reason);
         } catch (Exception e) {
             log.warn(
                     "[CACHE] FAILED publish failed. runId={}",
@@ -453,6 +465,44 @@ public class RunPipelineExecutor {
                     e
             );
         }
+    }
+
+    /**
+     * W09 보강:
+     * - enqueue 시 획득한 분석 락을 파이프라인 종료(성공/부분성공/실패) 시점에 즉시 해제합니다.
+     * - TTL 만료를 기다리지 않고 다음 동일 요청이 READY hit로 바로 전환되도록 지연을 줄입니다.
+     * - owner token 검증 해제를 사용해, 다른 실행이 선점한 락은 지우지 않도록 보호합니다.
+     */
+    private void releaseAnalysisLockSafely(String runId) {
+        try {
+            RepoRun run = repoRunRepository.findById(runId).orElse(null);
+            if (run == null) {
+                log.warn("[CACHE][LOCK] release skipped. run not found. runId={}", runId);
+                return;
+            }
+
+            String cacheKey = buildCacheKey(run);
+            String ownerToken = AnalysisCacheLockService.ownerTokenForRun(runId);
+            analysisCacheLockService.releaseIfOwned(cacheKey, ownerToken);
+        } catch (Exception e) {
+            log.warn("[CACHE][LOCK] release failed. runId={}", runId, e);
+        }
+    }
+
+    /**
+     * RepoRun 정보를 캐시 키 시드로 직렬화해 enqueue 시점과 동일한 cacheKey를 재구성합니다.
+     */
+    private String buildCacheKey(RepoRun run) {
+        RunAnalysisCacheKeySeed seed = RunAnalysisCacheKeySeed.builder()
+                .repoUrl(run.getRepoUrl())
+                .commitSha(run.getCommitSha())
+                .pipelineContractVersion(analysisCacheProperties.getPipelineContractVersion())
+                .llmProfileVersion(analysisCacheProperties.getLlmProfileVersion())
+                .promptTemplateVersion(analysisCacheProperties.getPromptTemplateVersion())
+                .outputSchemaVersion(analysisCacheProperties.getOutputSchemaVersion())
+                .runOptionsSignature(analysisCacheProperties.getDefaultRunOptionsSignature())
+                .build();
+        return runAnalysisCacheKeyFactory.buildKey(seed);
     }
 
     /**
