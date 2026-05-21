@@ -120,12 +120,21 @@ public class RepoRunService {
                 abbreviateSha(commitSha),
                 abbreviateCacheKey(analysisCacheKey)
         );
+        boolean forceRebuild = req.isForceRebuild();
+        if (forceRebuild) {
+            log.info(
+                    "[CACHE] forceRebuild requested. read bypass enabled. sha={}, key={}",
+                    abbreviateSha(commitSha),
+                    abbreviateCacheKey(analysisCacheKey)
+            );
+        }
 
-        AnalysisCacheLookupResult cacheLookupResult = analysisCacheLookupService.lookupReady(
-                analysisCacheKey,
-                normalizedRepoUrl,
-                commitSha
-        );
+        if (!forceRebuild) {
+            AnalysisCacheLookupResult cacheLookupResult = analysisCacheLookupService.lookupReady(
+                    analysisCacheKey,
+                    normalizedRepoUrl,
+                    commitSha
+            );
 
         if (cacheLookupResult.hit()) {
             RepoRun ownedCachedRun = resolveOwnedCachedRun(cacheLookupResult.sourceRunId(), userId);
@@ -250,6 +259,7 @@ public class RepoRunService {
                     failedCooldownResult.sourceRunId()
             );
         }
+        }
 
         /*
          * W09 확장:
@@ -269,6 +279,17 @@ public class RepoRunService {
         String lockOwnerToken = buildLockOwnerToken(runId);
         boolean lockAcquired = analysisCacheLockService.tryAcquire(analysisCacheKey, lockOwnerToken);
         if (!lockAcquired) {
+            if (forceRebuild) {
+                /*
+                 * W11:
+                 * - forceRebuild는 기존 실행 재사용보다 "신규 재분석" 의도가 우선입니다.
+                 * - 락 경합 시 attach/wait로 붙지 않고, 아래 신규 분석 enqueue 경로로 폴백합니다.
+                 */
+                log.info(
+                        "[CACHE][LOCK] contention ignored by forceRebuild. fallback=NEW_ANALYSIS, cacheKey={}",
+                        abbreviateCacheKey(analysisCacheKey)
+                );
+            } else {
             RepoRun activeRun = resolveActiveRunForSameRepoAndSha(
                     parsed.getOwner(),
                     parsed.getRepo(),
@@ -319,6 +340,7 @@ public class RepoRunService {
                             activeRun.getRunId()
                     );
                 }
+            }
             }
         }
 

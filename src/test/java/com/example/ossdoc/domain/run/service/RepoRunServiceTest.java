@@ -484,10 +484,36 @@ class RepoRunServiceTest {
         verify(pipelineQueueService).enqueue(any(RepoRun.class), eq(userId));
     }
 
+    @Test
+    void forceRebuild_true면_ready_hit이_있어도_캐시를_우회하고_신규분석을_시작한다() {
+        Long userId = 1L;
+        RepoRunCreateRequest request = request("https://github.com/apache/commons-cli", "master", true);
+        User owner = user(userId);
+
+        when(userRepository.findById(userId)).thenReturn(Optional.of(owner));
+        when(githubClient.resolveCommitSha("apache", "commons-cli", "master")).thenReturn("e717fd63");
+        when(analysisCacheLockService.tryAcquire(any(), any())).thenReturn(true);
+        when(workspaceManager.workspaceRoot(any())).thenReturn(Path.of("C:/data/ossdoc/run_force_001"));
+
+        RepoRunCreateResponse response = repoRunService.createRun(request, userId);
+
+        assertThat(response.isCacheHit()).isFalse();
+        assertThat(response.getRunId()).startsWith("run_");
+        verify(analysisCacheLookupService, never()).lookupReady(any(), any(), any());
+        verify(analysisCacheLookupService, never()).lookupFailedCooldown(any(), any(), any());
+        verify(repoRunRepository).save(any(RepoRun.class));
+        verify(pipelineQueueService).enqueue(any(RepoRun.class), eq(userId));
+    }
+
     private RepoRunCreateRequest request(String repoUrl, String ref) {
+        return request(repoUrl, ref, false);
+    }
+
+    private RepoRunCreateRequest request(String repoUrl, String ref, boolean forceRebuild) {
         RepoRunCreateRequest request = new RepoRunCreateRequest();
         ReflectionTestUtils.setField(request, "repoUrl", repoUrl);
         ReflectionTestUtils.setField(request, "ref", ref);
+        ReflectionTestUtils.setField(request, "forceRebuild", forceRebuild);
         return request;
     }
 
