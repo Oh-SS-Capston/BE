@@ -120,13 +120,13 @@ public class ClusterParameterRecommendService {
             }
             case MEDIUM -> {
                 resolution = 0.17;
-                iterations = 10;
+                iterations = 12;
                 minClusterSize = 3;
                 topK = 30;
             }
             case LARGE -> {
                 resolution = 0.12;
-                iterations = 12;
+                iterations = 20;
                 minClusterSize = 5;
                 topK = 50;
             }
@@ -137,7 +137,7 @@ public class ClusterParameterRecommendService {
             topK = Math.min(topK + 5, 100);
         } else if (edgePerType <= 20.0) {
             resolution = Math.min(resolution + 0.03, 0.35);
-            minClusterSize = Math.max(minClusterSize - 1, 1);
+            minClusterSize = Math.max(minClusterSize - 1, 2);
         }
 
         return ClusterParameterRecommendResponse.ClusterRecommended.builder()

@@ -31,7 +31,7 @@ public class ClusterBuildService {
 
     private final RepoRunRepository repoRunRepository;
     private final GraphProjectionService graphProjectionService;
-    private final LeidenCommunityService leidenCommunityService;
+    private final ResolutionProbeService resolutionProbeService;
     private final SubsystemAssembler subsystemAssembler;
     private final RankingService rankingService;
     private final ClusterArtifactPublisher clusterArtifactPublisher;
@@ -61,11 +61,11 @@ public class ClusterBuildService {
             throw new ClusterException(ClusterErrorCode.CLUSTER_GRAPH_EMPTY);
         }
 
-        CommunityResult communityResult;
+        ResolutionProbeService.ProbeResult probeResult;
         try {
-            communityResult = leidenCommunityService.detect(
+            probeResult = resolutionProbeService.findBest(
                     projectedGraph,
-                    request.getResolution(),
+                    request.getMinClusterSize(),
                     request.getIterations()
             );
         } catch (ClusterException e) {
@@ -74,11 +74,15 @@ public class ClusterBuildService {
             throw new ClusterException(ClusterErrorCode.CLUSTER_LEIDEN_FAILED);
         }
 
+        if (probeResult == null) {
+            throw new ClusterException(ClusterErrorCode.CLUSTER_LEIDEN_FAILED);
+        }
+
         List<Subsystem> subsystems;
         try {
             subsystems = subsystemAssembler.assemble(
                     projectedGraph,
-                    communityResult.getClusters(),
+                    probeResult.communityResult().getClusters(),
                     request.getMinClusterSize()
             );
         } catch (Exception e) {
@@ -113,9 +117,11 @@ public class ClusterBuildService {
                     .generatedAt(OffsetDateTime.now())
                     .algorithm(Map.of(
                             "name", "Leiden",
-                            "resolution", request.getResolution(),
+                            "resolution", probeResult.resolution(),
                             "iterations", request.getIterations(),
-                            "graphMode", "UNDIRECTED_WEIGHTED_TYPE_GRAPH"
+                            "graphMode", "UNDIRECTED_WEIGHTED_TYPE_GRAPH",
+                            "modularity", probeResult.modularity(),
+                            "clusterCount", probeResult.clusterCount()
                     ))
                     .subsystems(subsystems)
                     .build();
