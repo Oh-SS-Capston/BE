@@ -4,6 +4,7 @@ import com.example.ossdoc.domain.artifact.entity.Artifact;
 import com.example.ossdoc.domain.artifact.enums.ArtifactKind;
 import com.example.ossdoc.domain.artifact.repository.ArtifactRepository;
 import com.example.ossdoc.domain.run.cache.entity.AnalysisCache;
+import com.example.ossdoc.domain.run.cache.enums.AnalysisCacheStatus;
 import com.example.ossdoc.domain.run.cache.repository.AnalysisCacheRepository;
 import com.example.ossdoc.domain.run.cache.support.AnalysisCacheRedisKeyPolicy;
 import com.example.ossdoc.domain.run.cache.support.AnalysisCacheRedisStore;
@@ -148,6 +149,50 @@ class AnalysisCachePublishServiceTest {
         assertThat(published).isFalse();
         verify(analysisCacheRepository, never()).save(any());
         verify(redisStore, never()).set(any(), any(), any());
+    }
+
+    @Test
+    void publishFailed는_READY가_없으면_FAILED와_retryAfter를_기록한다() {
+        RepoRun run = run("run_004");
+        String cacheKey = cacheKeyOf(run);
+        properties.setFailedCooldownSeconds(30);
+
+        when(analysisCacheRepository.findById(cacheKey)).thenReturn(Optional.empty());
+
+        publishService.publishFailed(run, "RULE 단계 실패");
+
+        ArgumentCaptor<AnalysisCache> cacheCaptor = ArgumentCaptor.forClass(AnalysisCache.class);
+        verify(analysisCacheRepository).save(cacheCaptor.capture());
+
+        AnalysisCache saved = cacheCaptor.getValue();
+        assertThat(saved.getStatus()).isEqualTo(AnalysisCacheStatus.FAILED);
+        assertThat(saved.getSourceRunId()).isEqualTo("run_004");
+        assertThat(saved.getArtifactBundleJson()).isNull();
+        assertThat(saved.getQualityHash()).isNull();
+        assertThat(saved.getExpiresAt()).isNotNull();
+
+        verify(redisStore).delete("analysis:ready:" + cacheKey);
+    }
+
+    @Test
+    void publishFailed는_기존_READY를_덮어쓰지_않는다() {
+        RepoRun run = run("run_005");
+        String cacheKey = cacheKeyOf(run);
+
+        AnalysisCache readyCache = new AnalysisCache(cacheKey, "github://apache/commons-cli", "e717fd63");
+        readyCache.markReady(
+                "run_ready_005",
+                objectMapper.createObjectNode().put("artifactId", 1L),
+                "quality-hash",
+                null
+        );
+
+        when(analysisCacheRepository.findById(cacheKey)).thenReturn(Optional.of(readyCache));
+
+        publishService.publishFailed(run, "NETWORK_ERROR");
+
+        verify(analysisCacheRepository, never()).save(any(AnalysisCache.class));
+        verify(redisStore, never()).delete(any());
     }
 
     private RepoRun run(String runId) {

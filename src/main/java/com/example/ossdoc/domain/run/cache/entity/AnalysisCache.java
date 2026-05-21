@@ -140,12 +140,15 @@ public class AnalysisCache extends BaseAuditedEntity {
 
     /**
      * 분석 실패 시 FAILED로 전환합니다.
-     * 이후 짧은 쿨다운 정책과 함께 재시도를 제어할 수 있습니다.
+     *
+     * W10 정책:
+     * - sourceRunId를 남겨 두어 "어떤 실패 실행을 근거로 쿨다운을 거는지" 추적합니다.
+     * - expiresAt은 FAILED 쿨다운 만료 시각(retryAfter)로 사용합니다.
      */
-    public void markFailed(LocalDateTime expiresAt) {
+    public void markFailed(String sourceRunId, LocalDateTime expiresAt) {
         this.status = AnalysisCacheStatus.FAILED;
         this.expiresAt = expiresAt;
-        this.sourceRunId = null;
+        this.sourceRunId = sourceRunId;
         this.artifactBundleJson = null;
         this.qualityHash = null;
     }

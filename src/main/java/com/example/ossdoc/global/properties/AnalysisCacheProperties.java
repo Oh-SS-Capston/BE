@@ -77,4 +77,13 @@ public class AnalysisCacheProperties {
      * 기본 20분(권장 범위 10~30분)으로 두고 운영 환경에서 조정합니다.
      */
     private long redisLockTtlMinutes = 20;
+
+    /**
+     * FAILED 캐시 쿨다운(초)입니다.
+     *
+     * W10 완화 정책:
+     * - 사용자 체감을 해치지 않도록 짧은 30초 디바운스만 둡니다.
+     * - 동일 key가 직전 FAILED일 때 아주 짧은 폭주만 막고 빠르게 재시도를 허용합니다.
+     */
+    private long failedCooldownSeconds = 30;
 }

@@ -3,6 +3,7 @@ package com.example.ossdoc.domain.run.service;
 import com.example.ossdoc.domain.artifact.entity.Artifact;
 import com.example.ossdoc.domain.artifact.enums.ArtifactKind;
 import com.example.ossdoc.domain.artifact.repository.ArtifactRepository;
+import com.example.ossdoc.domain.run.cache.model.AnalysisCacheFailedCooldownResult;
 import com.example.ossdoc.domain.run.cache.model.AnalysisCacheLookupResult;
 import com.example.ossdoc.domain.run.cache.service.AnalysisCacheLockService;
 import com.example.ossdoc.domain.run.cache.service.AnalysisCacheLookupService;
@@ -39,6 +40,7 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -92,6 +94,9 @@ class RepoRunServiceTest {
                 runPipelineStepExecutionRepository,
                 artifactRepository
         );
+
+        lenient().when(analysisCacheLookupService.lookupFailedCooldown(any(), any(), any()))
+                .thenReturn(AnalysisCacheFailedCooldownResult.inactive("FAILED_COOLDOWN_NOT_ACTIVE"));
     }
 
     @Test
@@ -388,6 +393,95 @@ class RepoRunServiceTest {
         verify(repoRunRepository).save(any(RepoRun.class));
         verify(pipelineQueueService).enqueue(any(RepoRun.class), eq(userId));
         verify(runPipelineStepExecutionRepository, never()).save(any(RunPipelineStepExecution.class));
+    }
+
+    @Test
+    void ready_miss_후_failed_쿨다운_중이면_신규_enqueue_없이_기존_실패_run을_반환한다() {
+        Long userId = 1L;
+        RepoRunCreateRequest request = request("https://github.com/apache/commons-cli", "master");
+        User requester = user(userId);
+
+        RepoRun failedRun = new RepoRun(
+                "run_failed_001",
+                requester,
+                "https://github.com/apache/commons-cli",
+                "apache",
+                "commons-cli",
+                "master",
+                "e717fd63",
+                "C:/data/ossdoc/run_failed_001"
+        );
+        failedRun.markFailed();
+
+        when(userRepository.findById(userId)).thenReturn(Optional.of(requester));
+        when(githubClient.resolveCommitSha("apache", "commons-cli", "master")).thenReturn("e717fd63");
+        when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63")))
+                .thenReturn(AnalysisCacheLookupResult.miss("CACHE_MISS"));
+        when(analysisCacheLookupService.lookupFailedCooldown(any(), eq("github://apache/commons-cli"), eq("e717fd63")))
+                .thenReturn(AnalysisCacheFailedCooldownResult.active(
+                        "cache-key-failed",
+                        "run_failed_001",
+                        java.time.LocalDateTime.now().plusMinutes(3),
+                        "FAILED_COOLDOWN_BY_KEY"
+                ));
+        when(repoRunRepository.findByRunIdAndOwner_Id("run_failed_001", userId))
+                .thenReturn(Optional.of(failedRun));
+
+        RepoRunCreateResponse response = repoRunService.createRun(request, userId);
+
+        assertThat(response.getRunId()).isEqualTo("run_failed_001");
+        assertThat(response.isCacheHit()).isFalse();
+        assertThat(response.getCacheKey()).isEqualTo("cache-key-failed");
+        assertThat(response.getSourceRunId()).isEqualTo("run_failed_001");
+        verify(repoRunRepository, never()).save(any(RepoRun.class));
+        verify(pipelineQueueService, never()).enqueue(any(RepoRun.class), eq(userId));
+        verify(analysisCacheLockService, never()).tryAcquire(any(), any());
+    }
+
+    @Test
+    void ready_miss_후_failed_쿨다운_중이어도_타사용자_실패면_내_신규분석으로_진행한다() {
+        Long userId = 1L;
+        RepoRunCreateRequest request = request("https://github.com/apache/commons-cli", "master");
+        User requester = user(userId);
+        User anotherUser = user(2L);
+
+        RepoRun failedRunOfAnotherUser = new RepoRun(
+                "run_failed_002",
+                anotherUser,
+                "https://github.com/apache/commons-cli",
+                "apache",
+                "commons-cli",
+                "master",
+                "e717fd63",
+                "C:/data/ossdoc/run_failed_002"
+        );
+        failedRunOfAnotherUser.markFailed();
+
+        when(userRepository.findById(userId)).thenReturn(Optional.of(requester));
+        when(githubClient.resolveCommitSha("apache", "commons-cli", "master")).thenReturn("e717fd63");
+        when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63")))
+                .thenReturn(AnalysisCacheLookupResult.miss("CACHE_MISS"));
+        when(analysisCacheLookupService.lookupFailedCooldown(any(), eq("github://apache/commons-cli"), eq("e717fd63")))
+                .thenReturn(AnalysisCacheFailedCooldownResult.active(
+                        "cache-key-failed",
+                        "run_failed_002",
+                        java.time.LocalDateTime.now().plusSeconds(30),
+                        "FAILED_COOLDOWN_BY_KEY"
+                ));
+        when(repoRunRepository.findByRunIdAndOwner_Id("run_failed_002", userId))
+                .thenReturn(Optional.empty());
+        when(repoRunRepository.findById("run_failed_002"))
+                .thenReturn(Optional.of(failedRunOfAnotherUser));
+        when(analysisCacheLockService.tryAcquire(any(), any())).thenReturn(true);
+        when(workspaceManager.workspaceRoot(any())).thenReturn(Path.of("C:/data/ossdoc/run_new_after_foreign_failed"));
+
+        RepoRunCreateResponse response = repoRunService.createRun(request, userId);
+
+        assertThat(response.getRunId()).startsWith("run_");
+        assertThat(response.getRunId()).isNotEqualTo("run_failed_002");
+        assertThat(response.isCacheHit()).isFalse();
+        verify(repoRunRepository).save(any(RepoRun.class));
+        verify(pipelineQueueService).enqueue(any(RepoRun.class), eq(userId));
     }
 
     private RepoRunCreateRequest request(String repoUrl, String ref) {

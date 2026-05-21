@@ -233,6 +233,7 @@ public class RunPipelineExecutor {
                         "빌드 분석에 실패해 전체 분석을 완료할 수 없습니다.",
                         "buildMode=FAILED"
                 );
+                publishFailedCacheSafely(job, "buildMode=FAILED");
                 return;
             }
 
@@ -253,15 +254,18 @@ public class RunPipelineExecutor {
                         jobId,
                         String.join(" / ", partialReasons)
                 );
+                publishFailedCacheSafely(job, String.join(" / ", partialReasons));
             }
         } catch (Exception e) {
             log.error("[PIPELINE] Required step failed. jobId={}, runId={}", jobId, runId, e);
 
+            String internalError = safeInternalError(e);
             stepService.markRunFailed(
                     jobId,
                     "필수 분석 단계 실행 중 오류가 발생했습니다.",
-                    safeInternalError(e)
+                    internalError
             );
+            publishFailedCacheSafely(job, internalError);
         }
     }
 
@@ -426,6 +430,25 @@ public class RunPipelineExecutor {
         } catch (Exception e) {
             log.warn(
                     "[CACHE] READY publish failed. runId={}",
+                    job.getRun().getRunId(),
+                    e
+            );
+        }
+    }
+
+    /**
+     * W10: 파이프라인 실패/부분성공 시 FAILED 캐시를 안전하게 발행합니다.
+     *
+     * 실패 처리 정책:
+     * - FAILED 캐시 발행 실패가 본 파이프라인 상태를 뒤집지 않도록 예외는 삼킵니다.
+     * - 본 분석 상태는 stepService가 이미 기록했으므로, 여기서는 쿨다운 메타만 보강합니다.
+     */
+    private void publishFailedCacheSafely(RunPipelineJob job, String reason) {
+        try {
+            analysisCachePublishService.publishFailed(job.getRun(), reason);
+        } catch (Exception e) {
+            log.warn(
+                    "[CACHE] FAILED publish failed. runId={}",
                     job.getRun().getRunId(),
                     e
             );

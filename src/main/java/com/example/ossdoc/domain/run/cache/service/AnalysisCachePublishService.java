@@ -5,6 +5,7 @@ import com.example.ossdoc.domain.artifact.enums.ArtifactKind;
 import com.example.ossdoc.domain.artifact.repository.ArtifactRepository;
 import com.example.ossdoc.domain.build.enums.BuildMode;
 import com.example.ossdoc.domain.run.cache.entity.AnalysisCache;
+import com.example.ossdoc.domain.run.cache.enums.AnalysisCacheStatus;
 import com.example.ossdoc.domain.run.cache.repository.AnalysisCacheRepository;
 import com.example.ossdoc.domain.run.cache.support.AnalysisCacheRedisKeyPolicy;
 import com.example.ossdoc.domain.run.cache.support.AnalysisCacheRedisStore;
@@ -92,6 +93,21 @@ public class AnalysisCachePublishService {
         return publishReady(run);
     }
 
+    /**
+     * W10: 파이프라인 실패(또는 부분 성공) 시 FAILED 캐시를 발행합니다.
+     * runId 기반 오버로드는 호출부를 단순화하기 위한 진입점입니다.
+     */
+    @Transactional
+    public void publishFailed(String runId, String reason) {
+        RepoRun run = repoRunRepository.findById(runId)
+                .orElse(null);
+        if (run == null) {
+            log.warn("[CACHE] FAILED publish skipped. run not found. runId={}", runId);
+            return;
+        }
+        publishFailed(run, reason);
+    }
+
     @Transactional
     public boolean publishReady(RepoRun run) {
         String cacheKey = buildCacheKey(run);
@@ -149,6 +165,48 @@ public class AnalysisCachePublishService {
                 optionalArtifacts.size()
         );
         return true;
+    }
+
+    /**
+     * W10: FAILED 캐시 upsert 처리입니다.
+     *
+     * 정책:
+     * - 이미 READY 캐시가 있으면 덮어쓰지 않습니다. (기존 고품질 캐시 보호)
+     * - READY가 없으면 FAILED + retryAfter(expiresAt)를 기록합니다.
+     * - stale ready key가 남아 있지 않도록 Redis READY 키를 정리합니다.
+     */
+    @Transactional
+    public void publishFailed(RepoRun run, String reason) {
+        String cacheKey = buildCacheKey(run);
+        String repoUrlNorm = runAnalysisCacheKeyFactory.normalizeRepoUrlForCache(run.getRepoUrl());
+
+        AnalysisCache cache = analysisCacheRepository.findById(cacheKey)
+                .orElseGet(() -> new AnalysisCache(cacheKey, repoUrlNorm, run.getCommitSha()));
+
+        if (cache.getStatus() == AnalysisCacheStatus.READY) {
+            log.info(
+                    "[CACHE] FAILED publish skipped. existing READY is kept. runId={}, cacheKey={}",
+                    run.getRunId(),
+                    abbreviate(cacheKey)
+            );
+            return;
+        }
+
+        long cooldownSeconds = Math.max(1L, analysisCacheProperties.getFailedCooldownSeconds());
+        LocalDateTime retryAfter = LocalDateTime.now().plusSeconds(cooldownSeconds);
+
+        cache.markFailed(run.getRunId(), retryAfter);
+        analysisCacheRepository.save(cache);
+
+        redisStore.delete(redisKeyPolicy.readyKey(cacheKey));
+
+        log.warn(
+                "[CACHE] FAILED published. runId={}, cacheKey={}, retryAfter={}, reason={}",
+                run.getRunId(),
+                abbreviate(cacheKey),
+                retryAfter,
+                reason == null || reason.isBlank() ? "<none>" : reason
+        );
     }
 
     private String buildCacheKey(RepoRun run) {

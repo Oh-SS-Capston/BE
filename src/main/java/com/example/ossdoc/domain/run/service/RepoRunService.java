@@ -6,6 +6,7 @@ import com.example.ossdoc.domain.artifact.repository.ArtifactRepository;
 import com.example.ossdoc.domain.auth.exception.AuthException;
 import com.example.ossdoc.domain.auth.exception.code.AuthErrorCode;
 import com.example.ossdoc.domain.build.enums.BuildMode;
+import com.example.ossdoc.domain.run.cache.model.AnalysisCacheFailedCooldownResult;
 import com.example.ossdoc.domain.run.cache.model.AnalysisCacheLookupResult;
 import com.example.ossdoc.domain.run.cache.service.AnalysisCacheLockService;
 import com.example.ossdoc.domain.run.cache.service.AnalysisCacheLookupService;
@@ -185,6 +186,68 @@ public class RepoRunService {
                 "[CACHE] miss. sha={}, reason={}",
                 abbreviateSha(commitSha),
                 cacheLookupResult.reason()
+            );
+        }
+
+        /*
+         * W10(완화):
+         * - READY miss 이후, 직전 FAILED 캐시의 짧은 쿨다운(기본 30초) 여부를 확인합니다.
+         * - 동일 사용자의 실패 run이면 재사용해 즉시 응답합니다.
+         * - 타사용자 실패 run은 내 요청을 막지 않고, 아래 신규 분석 경로로 그대로 진행합니다.
+         */
+        AnalysisCacheFailedCooldownResult failedCooldownResult =
+                analysisCacheLookupService.lookupFailedCooldown(
+                        analysisCacheKey,
+                        normalizedRepoUrl,
+                        commitSha
+                );
+        if (failedCooldownResult.coolingDown()) {
+            log.info(
+                    "[CACHE][FAILED] cooldown active. cacheKey={}, sourceRunId={}, retryAfter={}, reason={}",
+                    abbreviateCacheKey(failedCooldownResult.cacheKey()),
+                    failedCooldownResult.sourceRunId(),
+                    failedCooldownResult.retryAfter(),
+                    failedCooldownResult.reason()
+            );
+
+            RepoRun ownedFailedRun = resolveOwnedCachedRun(failedCooldownResult.sourceRunId(), userId);
+            if (ownedFailedRun != null) {
+                return toCreateResponse(
+                        ownedFailedRun,
+                        false,
+                        failedCooldownResult.cacheKey(),
+                        failedCooldownResult.sourceRunId()
+                );
+            }
+
+            RepoRun sourceFailedRun = resolveAnyCachedRun(failedCooldownResult.sourceRunId());
+            if (sourceFailedRun != null) {
+                /*
+                 * 타사용자 실패는 공유 복제로 막지 않습니다.
+                 * 사용자 관점에서 "남의 실패 때문에 못 도는" 답답함을 없애기 위해
+                 * 내 분석 run으로 재시도할 수 있게 아래 enqueue 경로로 폴백합니다.
+                 */
+                if (sourceFailedRun.getOwner() != null
+                        && sourceFailedRun.getOwner().getId() != null
+                        && sourceFailedRun.getOwner().getId().equals(userId)) {
+                    return toCreateResponse(
+                            sourceFailedRun,
+                            false,
+                            failedCooldownResult.cacheKey(),
+                            sourceFailedRun.getRunId()
+                    );
+                }
+                log.info(
+                        "[CACHE][FAILED] cooldown source belongs to another user. fallback=NEW_ANALYSIS, sourceRunId={}, ownerId={}, requestUserId={}",
+                        sourceFailedRun.getRunId(),
+                        sourceFailedRun.getOwner() == null ? null : sourceFailedRun.getOwner().getId(),
+                        userId
+                );
+            }
+
+            log.warn(
+                    "[CACHE][FAILED] cooldown source run missing. fallback=NEW_ANALYSIS, sourceRunId={}",
+                    failedCooldownResult.sourceRunId()
             );
         }
 

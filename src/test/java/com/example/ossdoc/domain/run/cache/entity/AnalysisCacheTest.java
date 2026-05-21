@@ -69,10 +69,10 @@ class AnalysisCacheTest {
         );
 
         LocalDateTime failedExpiresAt = LocalDateTime.now().plusMinutes(30);
-        cache.markFailed(failedExpiresAt);
+        cache.markFailed("run_20260520_failed", failedExpiresAt);
 
         assertThat(cache.getStatus()).isEqualTo(AnalysisCacheStatus.FAILED);
-        assertThat(cache.getSourceRunId()).isNull();
+        assertThat(cache.getSourceRunId()).isEqualTo("run_20260520_failed");
         assertThat(cache.getArtifactBundleJson()).isNull();
         assertThat(cache.getQualityHash()).isNull();
         assertThat(cache.getExpiresAt()).isEqualTo(failedExpiresAt);

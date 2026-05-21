@@ -2,6 +2,7 @@ package com.example.ossdoc.domain.run.cache.service;
 
 import com.example.ossdoc.domain.run.cache.entity.AnalysisCache;
 import com.example.ossdoc.domain.run.cache.enums.AnalysisCacheStatus;
+import com.example.ossdoc.domain.run.cache.model.AnalysisCacheFailedCooldownResult;
 import com.example.ossdoc.domain.run.cache.model.AnalysisCacheLookupResult;
 import com.example.ossdoc.domain.run.cache.repository.AnalysisCacheRepository;
 import com.example.ossdoc.domain.run.cache.support.AnalysisCacheRedisKeyPolicy;
@@ -93,11 +94,76 @@ public class AnalysisCacheLookupService {
         return AnalysisCacheLookupResult.miss("CACHE_MISS");
     }
 
+    /**
+     * W10: FAILED 캐시 쿨다운 상태를 조회합니다.
+     *
+     * 조회 정책:
+     * 1) 동일 cacheKey FAILED 우선 확인
+     * 2) 없으면 동일 repo+sha 기준 최신 FAILED 확인
+     * 3) expiresAt(retryAfter) 이전이면 쿨다운 활성으로 판단
+     */
+    @Transactional(readOnly = true)
+    public AnalysisCacheFailedCooldownResult lookupFailedCooldown(
+            String cacheKey,
+            String repoUrlNorm,
+            String commitSha
+    ) {
+        LocalDateTime now = LocalDateTime.now();
+
+        Optional<AnalysisCache> failedByKey = analysisCacheRepository.findByCacheKeyAndStatus(
+                cacheKey,
+                AnalysisCacheStatus.FAILED
+        );
+        if (failedByKey.isPresent() && isCoolingDownFailed(failedByKey.get(), now)) {
+            AnalysisCache cache = failedByKey.get();
+            return AnalysisCacheFailedCooldownResult.active(
+                    cache.getCacheKey(),
+                    cache.getSourceRunId(),
+                    cache.getExpiresAt(),
+                    "FAILED_COOLDOWN_BY_KEY"
+            );
+        }
+
+        Optional<AnalysisCache> failedByRepoSha = analysisCacheRepository
+                .findTopByRepoUrlNormAndCommitShaAndStatusOrderByUpdatedAtDesc(
+                        repoUrlNorm,
+                        commitSha,
+                        AnalysisCacheStatus.FAILED
+                );
+        if (failedByRepoSha.isPresent() && isCoolingDownFailed(failedByRepoSha.get(), now)) {
+            AnalysisCache cache = failedByRepoSha.get();
+            return AnalysisCacheFailedCooldownResult.active(
+                    cache.getCacheKey(),
+                    cache.getSourceRunId(),
+                    cache.getExpiresAt(),
+                    cache.getCacheKey().equals(cacheKey)
+                            ? "FAILED_COOLDOWN_DB_BY_KEY"
+                            : "FAILED_COOLDOWN_DB_BY_REPO_SHA"
+            );
+        }
+
+        return AnalysisCacheFailedCooldownResult.inactive("FAILED_COOLDOWN_NOT_ACTIVE");
+    }
+
     private boolean isUsableReady(AnalysisCache cache) {
         return cache.getStatus() == AnalysisCacheStatus.READY
                 && cache.getSourceRunId() != null
                 && !cache.getSourceRunId().isBlank()
                 && cache.getArtifactBundleJson() != null;
+    }
+
+    /**
+     * FAILED 캐시가 아직 쿨다운 구간인지 판정합니다.
+     * expiresAt이 비어 있으면 쿨다운 정책을 적용하지 않습니다.
+     */
+    private boolean isCoolingDownFailed(AnalysisCache cache, LocalDateTime now) {
+        if (cache.getStatus() != AnalysisCacheStatus.FAILED) {
+            return false;
+        }
+        if (cache.getExpiresAt() == null) {
+            return false;
+        }
+        return now.isBefore(cache.getExpiresAt());
     }
 
     /**

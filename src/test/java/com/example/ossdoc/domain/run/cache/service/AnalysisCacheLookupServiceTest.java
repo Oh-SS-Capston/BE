@@ -2,6 +2,7 @@ package com.example.ossdoc.domain.run.cache.service;
 
 import com.example.ossdoc.domain.run.cache.entity.AnalysisCache;
 import com.example.ossdoc.domain.run.cache.enums.AnalysisCacheStatus;
+import com.example.ossdoc.domain.run.cache.model.AnalysisCacheFailedCooldownResult;
 import com.example.ossdoc.domain.run.cache.model.AnalysisCacheLookupResult;
 import com.example.ossdoc.domain.run.cache.repository.AnalysisCacheRepository;
 import com.example.ossdoc.domain.run.cache.support.AnalysisCacheRedisKeyPolicy;
@@ -124,6 +125,50 @@ class AnalysisCacheLookupServiceTest {
         verify(redisStore, never()).set(any(), any(), any());
     }
 
+    @Test
+    void failed_쿨다운_활성_구간이면_재시도_차단_신호를_반환한다() {
+        String cacheKey = "cache-key-failed";
+        AnalysisCache failed = failedCache(cacheKey, "run_failed_1", 5);
+
+        when(analysisCacheRepository.findByCacheKeyAndStatus(cacheKey, AnalysisCacheStatus.FAILED))
+                .thenReturn(Optional.of(failed));
+
+        AnalysisCacheFailedCooldownResult result = lookupService.lookupFailedCooldown(
+                cacheKey,
+                "github://apache/commons-cli",
+                "e717fd63"
+        );
+
+        assertThat(result.coolingDown()).isTrue();
+        assertThat(result.cacheKey()).isEqualTo(cacheKey);
+        assertThat(result.sourceRunId()).isEqualTo("run_failed_1");
+        assertThat(result.retryAfter()).isEqualTo(failed.getExpiresAt());
+        assertThat(result.reason()).isEqualTo("FAILED_COOLDOWN_BY_KEY");
+    }
+
+    @Test
+    void failed_쿨다운이_끝났으면_즉시_재시도_가능_상태를_반환한다() {
+        String cacheKey = "cache-key-failed-expired";
+        AnalysisCache failed = failedCache(cacheKey, "run_failed_2", -1);
+
+        when(analysisCacheRepository.findByCacheKeyAndStatus(cacheKey, AnalysisCacheStatus.FAILED))
+                .thenReturn(Optional.of(failed));
+        when(analysisCacheRepository.findTopByRepoUrlNormAndCommitShaAndStatusOrderByUpdatedAtDesc(
+                "github://apache/commons-cli",
+                "e717fd63",
+                AnalysisCacheStatus.FAILED
+        )).thenReturn(Optional.of(failed));
+
+        AnalysisCacheFailedCooldownResult result = lookupService.lookupFailedCooldown(
+                cacheKey,
+                "github://apache/commons-cli",
+                "e717fd63"
+        );
+
+        assertThat(result.coolingDown()).isFalse();
+        assertThat(result.reason()).isEqualTo("FAILED_COOLDOWN_NOT_ACTIVE");
+    }
+
     private AnalysisCache readyCache(String cacheKey, String sourceRunId) {
         AnalysisCache cache = new AnalysisCache(
                 cacheKey,
@@ -135,6 +180,19 @@ class AnalysisCacheLookupServiceTest {
                 new ObjectMapper().createObjectNode().put("artifactId", 101L),
                 "quality-hash",
                 null
+        );
+        return cache;
+    }
+
+    private AnalysisCache failedCache(String cacheKey, String sourceRunId, long minutesOffset) {
+        AnalysisCache cache = new AnalysisCache(
+                cacheKey,
+                "github://apache/commons-cli",
+                "e717fd63"
+        );
+        cache.markFailed(
+                sourceRunId,
+                java.time.LocalDateTime.now().plusMinutes(minutesOffset)
         );
         return cache;
     }

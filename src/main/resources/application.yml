@@ -87,6 +87,7 @@ ossdoc:
     redis-lock-key-prefix: ${OSSDOC_CACHE_REDIS_LOCK_KEY_PREFIX:analysis:lock}
     redis-ready-ttl-hours: ${OSSDOC_CACHE_REDIS_READY_TTL_HOURS:24}
     redis-lock-ttl-minutes: ${OSSDOC_CACHE_REDIS_LOCK_TTL_MINUTES:20}
+    failed-cooldown-seconds: ${OSSDOC_CACHE_FAILED_COOLDOWN_SECONDS:30}
   pipeline:
     worker:
       fixed-delay-ms: ${PIPELINE_WORKER_FIXED_DELAY_MS:2000}
