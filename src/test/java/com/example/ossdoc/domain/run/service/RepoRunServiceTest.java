@@ -1,13 +1,17 @@
 package com.example.ossdoc.domain.run.service;
 
+import com.example.ossdoc.domain.artifact.entity.Artifact;
+import com.example.ossdoc.domain.artifact.enums.ArtifactKind;
 import com.example.ossdoc.domain.artifact.repository.ArtifactRepository;
 import com.example.ossdoc.domain.run.cache.model.AnalysisCacheLookupResult;
+import com.example.ossdoc.domain.run.cache.service.AnalysisCacheLockService;
 import com.example.ossdoc.domain.run.cache.service.AnalysisCacheLookupService;
+import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.dto.request.RepoRunCreateRequest;
 import com.example.ossdoc.domain.run.dto.response.RepoRunCreateResponse;
-import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.entity.RunPipelineJob;
 import com.example.ossdoc.domain.run.entity.RunPipelineStepExecution;
+import com.example.ossdoc.domain.run.enums.PipelineJobStatus;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.example.ossdoc.domain.run.repository.RunPipelineJobRepository;
 import com.example.ossdoc.domain.run.repository.RunPipelineStepExecutionRepository;
@@ -19,6 +23,7 @@ import com.example.ossdoc.domain.user.enums.AuthProvider;
 import com.example.ossdoc.domain.user.enums.UserRole;
 import com.example.ossdoc.domain.user.repository.UserRepository;
 import com.example.ossdoc.global.properties.AnalysisCacheProperties;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -54,6 +59,8 @@ class RepoRunServiceTest {
     @Mock
     private AnalysisCacheLookupService analysisCacheLookupService;
     @Mock
+    private AnalysisCacheLockService analysisCacheLockService;
+    @Mock
     private RunPipelineJobRepository runPipelineJobRepository;
     @Mock
     private RunPipelineStepExecutionRepository runPipelineStepExecutionRepository;
@@ -79,6 +86,7 @@ class RepoRunServiceTest {
                 pipelineQueueService,
                 new RunAnalysisCacheKeyFactory(),
                 analysisCacheLookupService,
+                analysisCacheLockService,
                 cacheProperties,
                 runPipelineJobRepository,
                 runPipelineStepExecutionRepository,
@@ -204,6 +212,7 @@ class RepoRunServiceTest {
                 .thenReturn(Optional.empty());
         when(repoRunRepository.findById("run_source_partial_001"))
                 .thenReturn(Optional.of(sourceRun));
+        when(analysisCacheLockService.tryAcquire(any(), any())).thenReturn(true);
         when(workspaceManager.workspaceRoot(any())).thenReturn(Path.of("C:/data/ossdoc/run_new_after_partial"));
 
         RepoRunCreateResponse response = repoRunService.createRun(request, userId);
@@ -229,6 +238,7 @@ class RepoRunServiceTest {
         when(githubClient.resolveCommitSha("apache", "commons-cli", "master")).thenReturn("e717fd63");
         when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63")))
                 .thenReturn(AnalysisCacheLookupResult.miss("CACHE_MISS"));
+        when(analysisCacheLockService.tryAcquire(any(), any())).thenReturn(true);
         when(workspaceManager.workspaceRoot(any())).thenReturn(Path.of("C:/data/ossdoc/run_new_001"));
 
         RepoRunCreateResponse response = repoRunService.createRun(request, userId);
@@ -243,6 +253,141 @@ class RepoRunServiceTest {
         ArgumentCaptor<RepoRun> runCaptor = ArgumentCaptor.forClass(RepoRun.class);
         verify(repoRunRepository).save(runCaptor.capture());
         verify(pipelineQueueService).enqueue(runCaptor.getValue(), userId);
+    }
+
+    @Test
+    void cache_miss_락_경합이고_내_진행중_run이_있으면_신규_생성_없이_attach_반환한다() {
+        Long userId = 1L;
+        RepoRunCreateRequest request = request("https://github.com/apache/commons-cli", "master");
+        User owner = user(userId);
+
+        RepoRun activeRun = new RepoRun(
+                "run_active_001",
+                owner,
+                "https://github.com/apache/commons-cli",
+                "apache",
+                "commons-cli",
+                "master",
+                "e717fd63",
+                "C:/data/ossdoc/run_active_001"
+        );
+
+        when(userRepository.findById(userId)).thenReturn(Optional.of(owner));
+        when(githubClient.resolveCommitSha("apache", "commons-cli", "master")).thenReturn("e717fd63");
+        when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63")))
+                .thenReturn(AnalysisCacheLookupResult.miss("CACHE_MISS"));
+        when(analysisCacheLockService.tryAcquire(any(), any())).thenReturn(false);
+        when(runPipelineJobRepository.findActiveJobsByRepoAndSha(
+                eq("apache"),
+                eq("commons-cli"),
+                eq("e717fd63"),
+                any(),
+                any()
+        )).thenReturn(List.of(activeJob(activeRun, userId)));
+
+        RepoRunCreateResponse response = repoRunService.createRun(request, userId);
+
+        assertThat(response.getRunId()).isEqualTo("run_active_001");
+        assertThat(response.isCacheHit()).isFalse();
+        verify(repoRunRepository, never()).save(any(RepoRun.class));
+        verify(pipelineQueueService, never()).enqueue(any(RepoRun.class), eq(userId));
+    }
+
+    @Test
+    void cache_miss_락_경합이고_타사용자_진행중_run이_FULL계열이면_WAIT_run을_생성한다() {
+        Long userId = 1L;
+        RepoRunCreateRequest request = request("https://github.com/apache/commons-cli", "master");
+        User requester = user(userId);
+
+        User anotherUser = user(2L);
+        RepoRun activeRun = new RepoRun(
+                "run_active_002",
+                anotherUser,
+                "https://github.com/apache/commons-cli",
+                "apache",
+                "commons-cli",
+                "master",
+                "e717fd63",
+                "C:/data/ossdoc/run_active_002"
+        );
+
+        when(userRepository.findById(userId)).thenReturn(Optional.of(requester));
+        when(githubClient.resolveCommitSha("apache", "commons-cli", "master")).thenReturn("e717fd63");
+        when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63")))
+                .thenReturn(AnalysisCacheLookupResult.miss("CACHE_MISS"));
+        when(analysisCacheLockService.tryAcquire(any(), any())).thenReturn(false);
+        when(runPipelineJobRepository.findActiveJobsByRepoAndSha(
+                eq("apache"),
+                eq("commons-cli"),
+                eq("e717fd63"),
+                any(),
+                any()
+        )).thenReturn(List.of(activeJob(activeRun, anotherUser.getId())));
+        when(workspaceManager.workspaceRoot(any())).thenReturn(Path.of("C:/data/ossdoc/run_waiting_001"));
+
+        RepoRunCreateResponse response = repoRunService.createRun(request, userId);
+
+        assertThat(response.getRunId()).startsWith("run_");
+        assertThat(response.getSourceRunId()).isEqualTo("run_active_002");
+        assertThat(response.isCacheHit()).isFalse();
+        verify(repoRunRepository).save(any(RepoRun.class));
+        verify(pipelineQueueService, never()).enqueue(any(RepoRun.class), eq(userId));
+        verify(runPipelineJobRepository).save(any(RunPipelineJob.class));
+        verify(runPipelineStepExecutionRepository).save(any(RunPipelineStepExecution.class));
+    }
+
+    @Test
+    void cache_miss_락_경합이고_source_buildMode가_NON_FULL이면_즉시_조기탈출_분석을_시작한다() {
+        Long userId = 1L;
+        RepoRunCreateRequest request = request("https://github.com/apache/commons-cli", "master");
+        User requester = user(userId);
+
+        User anotherUser = user(2L);
+        RepoRun activeRun = new RepoRun(
+                "run_active_003",
+                anotherUser,
+                "https://github.com/apache/commons-cli",
+                "apache",
+                "commons-cli",
+                "master",
+                "e717fd63",
+                "C:/data/ossdoc/run_active_003"
+        );
+
+        Artifact buildManifest = new Artifact(
+                1L,
+                activeRun,
+                ArtifactKind.BUILD_MANIFEST,
+                "1.0",
+                "application/json",
+                "build_manifest.json",
+                new ObjectMapper().createObjectNode().put("buildMode", "COMPILE_ONLY")
+        );
+
+        when(userRepository.findById(userId)).thenReturn(Optional.of(requester));
+        when(githubClient.resolveCommitSha("apache", "commons-cli", "master")).thenReturn("e717fd63");
+        when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63")))
+                .thenReturn(AnalysisCacheLookupResult.miss("CACHE_MISS"));
+        when(analysisCacheLockService.tryAcquire(any(), any())).thenReturn(false);
+        when(runPipelineJobRepository.findActiveJobsByRepoAndSha(
+                eq("apache"),
+                eq("commons-cli"),
+                eq("e717fd63"),
+                any(),
+                any()
+        )).thenReturn(List.of(activeJob(activeRun, anotherUser.getId())));
+        when(artifactRepository.findTopByRun_RunIdAndKindOrderByCreatedAtDesc("run_active_003", ArtifactKind.BUILD_MANIFEST))
+                .thenReturn(Optional.of(buildManifest));
+        when(workspaceManager.workspaceRoot(any())).thenReturn(Path.of("C:/data/ossdoc/run_new_after_escape"));
+
+        RepoRunCreateResponse response = repoRunService.createRun(request, userId);
+
+        assertThat(response.getRunId()).startsWith("run_");
+        assertThat(response.getSourceRunId()).isNull();
+        assertThat(response.isCacheHit()).isFalse();
+        verify(repoRunRepository).save(any(RepoRun.class));
+        verify(pipelineQueueService).enqueue(any(RepoRun.class), eq(userId));
+        verify(runPipelineStepExecutionRepository, never()).save(any(RunPipelineStepExecution.class));
     }
 
     private RepoRunCreateRequest request(String repoUrl, String ref) {
@@ -267,6 +412,12 @@ class RepoRunServiceTest {
     private RunPipelineJob successJob(RepoRun run, Long userId) {
         RunPipelineJob job = RunPipelineJob.create(run, userId);
         job.markSuccess();
+        return job;
+    }
+
+    private RunPipelineJob activeJob(RepoRun run, Long userId) {
+        RunPipelineJob job = RunPipelineJob.create(run, userId);
+        ReflectionTestUtils.setField(job, "status", PipelineJobStatus.RUNNING);
         return job;
     }
 

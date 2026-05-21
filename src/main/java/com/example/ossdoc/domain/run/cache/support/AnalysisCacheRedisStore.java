@@ -17,4 +17,18 @@ public interface AnalysisCacheRedisStore {
     void set(String key, String value, Duration ttl);
 
     void delete(String key);
+
+    /**
+     * key가 없을 때만 값을 저장합니다(SET NX).
+     *
+     * @return 저장 성공(true), 이미 key 존재/실패(false)
+     */
+    boolean setIfAbsent(String key, String value, Duration ttl);
+
+    /**
+     * key 현재 값이 expectedValue와 일치할 때만 삭제합니다.
+     *
+     * @return 삭제 성공(true), 값 불일치/미존재/실패(false)
+     */
+    boolean deleteIfValueMatches(String key, String expectedValue);
 }

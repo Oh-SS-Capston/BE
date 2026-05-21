@@ -7,12 +7,16 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
+import org.springframework.data.redis.core.script.RedisScript;
 
 import java.time.Duration;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatNoException;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -87,5 +91,74 @@ class RedisAnalysisCacheRedisStoreTest {
 
         assertThatNoException()
                 .isThrownBy(() -> store.delete("analysis:ready:key6"));
+    }
+
+    @Test
+    void setIfAbsent_성공_시_true를_반환한다() {
+        when(stringRedisTemplate.opsForValue()).thenReturn(valueOperations);
+        when(valueOperations.setIfAbsent("analysis:lock:key1", "owner-1", Duration.ofMinutes(10)))
+                .thenReturn(Boolean.TRUE);
+
+        boolean acquired = store.setIfAbsent("analysis:lock:key1", "owner-1", Duration.ofMinutes(10));
+
+        assertThat(acquired).isTrue();
+    }
+
+    @Test
+    void setIfAbsent_경합_시_false를_반환한다() {
+        when(stringRedisTemplate.opsForValue()).thenReturn(valueOperations);
+        when(valueOperations.setIfAbsent("analysis:lock:key2", "owner-2", Duration.ofMinutes(10)))
+                .thenReturn(Boolean.FALSE);
+
+        boolean acquired = store.setIfAbsent("analysis:lock:key2", "owner-2", Duration.ofMinutes(10));
+
+        assertThat(acquired).isFalse();
+    }
+
+    @Test
+    void deleteIfValueMatches_삭제_성공_시_true를_반환한다() {
+        when(stringRedisTemplate.execute(
+                org.mockito.ArgumentMatchers.<RedisScript<Long>>any(),
+                anyList(),
+                any()
+        ))
+                .thenReturn(1L);
+
+        boolean released = store.deleteIfValueMatches("analysis:lock:key3", "owner-3");
+
+        assertThat(released).isTrue();
+        verify(stringRedisTemplate).execute(
+                org.mockito.ArgumentMatchers.<RedisScript<Long>>any(),
+                eq(java.util.Collections.singletonList("analysis:lock:key3")),
+                eq("owner-3")
+        );
+    }
+
+    @Test
+    void deleteIfValueMatches_삭제_실패_시_false를_반환한다() {
+        when(stringRedisTemplate.execute(
+                org.mockito.ArgumentMatchers.<RedisScript<Long>>any(),
+                anyList(),
+                any()
+        ))
+                .thenReturn(0L);
+
+        boolean released = store.deleteIfValueMatches("analysis:lock:key4", "owner-4");
+
+        assertThat(released).isFalse();
+    }
+
+    @Test
+    void deleteIfValueMatches_중_예외가_나도_false로_폴백한다() {
+        when(stringRedisTemplate.execute(
+                org.mockito.ArgumentMatchers.<RedisScript<Long>>any(),
+                anyList(),
+                any()
+        ))
+                .thenThrow(new IllegalStateException("unlock fail"));
+
+        boolean released = store.deleteIfValueMatches("analysis:lock:key5", "owner-5");
+
+        assertThat(released).isFalse();
     }
 }

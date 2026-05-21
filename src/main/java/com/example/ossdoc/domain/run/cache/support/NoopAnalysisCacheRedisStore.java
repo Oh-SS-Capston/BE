@@ -35,4 +35,16 @@ public class NoopAnalysisCacheRedisStore implements AnalysisCacheRedisStore {
     public void delete(String key) {
         // no-op
     }
+
+    @Override
+    public boolean setIfAbsent(String key, String value, Duration ttl) {
+        // Redis 미연동 환경에서는 중복 실행 방지를 강제하지 않고 항상 획득 성공으로 처리한다.
+        return true;
+    }
+
+    @Override
+    public boolean deleteIfValueMatches(String key, String expectedValue) {
+        // no-op
+        return true;
+    }
 }

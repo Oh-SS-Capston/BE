@@ -4,9 +4,11 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
+import java.util.Collections;
 import java.util.Optional;
 
 /**
@@ -21,6 +23,11 @@ import java.util.Optional;
 @RequiredArgsConstructor
 @ConditionalOnProperty(prefix = "ossdoc.analysis-cache", name = "redis-enabled", havingValue = "true")
 public class RedisAnalysisCacheRedisStore implements AnalysisCacheRedisStore {
+
+    private static final DefaultRedisScript<Long> UNLOCK_SCRIPT = new DefaultRedisScript<>(
+            "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
+            Long.class
+    );
 
     private final StringRedisTemplate stringRedisTemplate;
 
@@ -57,6 +64,37 @@ public class RedisAnalysisCacheRedisStore implements AnalysisCacheRedisStore {
         } catch (Exception e) {
             // stale 정리 실패도 치명 오류로 승격하지 않고 다음 조회에서 복구되게 둡니다.
             log.warn("[CACHE][REDIS] delete failed. key={}", abbreviate(key), e);
+        }
+    }
+
+    @Override
+    public boolean setIfAbsent(String key, String value, Duration ttl) {
+        try {
+            Boolean acquired;
+            if (ttl == null || ttl.isNegative() || ttl.isZero()) {
+                acquired = stringRedisTemplate.opsForValue().setIfAbsent(key, value);
+            } else {
+                acquired = stringRedisTemplate.opsForValue().setIfAbsent(key, value, ttl);
+            }
+            return Boolean.TRUE.equals(acquired);
+        } catch (Exception e) {
+            log.warn("[CACHE][REDIS] setIfAbsent failed. key={}, ttl={}", abbreviate(key), ttl, e);
+            return false;
+        }
+    }
+
+    @Override
+    public boolean deleteIfValueMatches(String key, String expectedValue) {
+        try {
+            Long deleted = stringRedisTemplate.execute(
+                    UNLOCK_SCRIPT,
+                    Collections.singletonList(key),
+                    expectedValue
+            );
+            return deleted != null && deleted > 0;
+        } catch (Exception e) {
+            log.warn("[CACHE][REDIS] deleteIfValueMatches failed. key={}", abbreviate(key), e);
+            return false;
         }
     }
 

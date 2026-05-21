@@ -1,10 +1,13 @@
 package com.example.ossdoc.domain.run.service;
 
 import com.example.ossdoc.domain.artifact.entity.Artifact;
+import com.example.ossdoc.domain.artifact.enums.ArtifactKind;
 import com.example.ossdoc.domain.artifact.repository.ArtifactRepository;
 import com.example.ossdoc.domain.auth.exception.AuthException;
 import com.example.ossdoc.domain.auth.exception.code.AuthErrorCode;
+import com.example.ossdoc.domain.build.enums.BuildMode;
 import com.example.ossdoc.domain.run.cache.model.AnalysisCacheLookupResult;
+import com.example.ossdoc.domain.run.cache.service.AnalysisCacheLockService;
 import com.example.ossdoc.domain.run.cache.service.AnalysisCacheLookupService;
 import com.example.ossdoc.domain.run.dto.request.RepoRunCreateRequest;
 import com.example.ossdoc.domain.run.dto.response.RepoRunCreateResponse;
@@ -14,6 +17,7 @@ import com.example.ossdoc.domain.run.entity.RunPipelineJob;
 import com.example.ossdoc.domain.run.entity.RunPipelineStepExecution;
 import com.example.ossdoc.domain.run.enums.PipelineJobStatus;
 import com.example.ossdoc.domain.run.enums.PipelineStepStatus;
+import com.example.ossdoc.domain.run.enums.RunStage;
 import com.example.ossdoc.domain.run.enums.RunStatus;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.example.ossdoc.domain.run.repository.RunPipelineJobRepository;
@@ -29,18 +33,28 @@ import com.example.ossdoc.domain.user.repository.UserRepository;
 import com.example.ossdoc.global.properties.AnalysisCacheProperties;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.file.Path;
 import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class RepoRunService {
+
+    private static final List<PipelineJobStatus> ACTIVE_PIPELINE_JOB_STATUSES = List.of(
+            PipelineJobStatus.QUEUED,
+            PipelineJobStatus.RUNNING,
+            PipelineJobStatus.RETRYING
+    );
+    private static final String CACHE_WAIT_STATUS_MESSAGE =
+            "[CACHE_WAIT] 동일 커밋 FULL 분석 결과를 기다리는 중입니다.";
 
     private final RepoRunRepository repoRunRepository;
     private final UserRepository userRepository;
@@ -49,6 +63,7 @@ public class RepoRunService {
     private final RunPipelineQueueService pipelineQueueService;
     private final RunAnalysisCacheKeyFactory runAnalysisCacheKeyFactory;
     private final AnalysisCacheLookupService analysisCacheLookupService;
+    private final AnalysisCacheLockService analysisCacheLockService;
     private final AnalysisCacheProperties analysisCacheProperties;
     private final RunPipelineJobRepository runPipelineJobRepository;
     private final RunPipelineStepExecutionRepository runPipelineStepExecutionRepository;
@@ -167,10 +182,74 @@ public class RepoRunService {
             }
         } else {
             log.info(
-                    "[CACHE] miss. sha={}, reason={}",
-                    abbreviateSha(commitSha),
-                    cacheLookupResult.reason()
+                "[CACHE] miss. sha={}, reason={}",
+                abbreviateSha(commitSha),
+                cacheLookupResult.reason()
             );
+        }
+
+        /*
+         * W09 확장:
+         * - 락 획득 성공: 기존처럼 즉시 신규 분석 enqueue
+         * - 락 경합:
+         *   1) 내 활성 run이면 attach
+         *   2) 타사용자 활성 run + buildMode=FULL(또는 미확정) -> 내 소유 WAIT run 생성 후 캐시 대기
+         *   3) 타사용자 활성 run + buildMode!=FULL -> 조기 탈출(독립 분석 즉시 enqueue)
+         */
+        String lockOwnerToken = buildLockOwnerToken(userId);
+        boolean lockAcquired = analysisCacheLockService.tryAcquire(analysisCacheKey, lockOwnerToken);
+        if (!lockAcquired) {
+            RepoRun activeRun = resolveActiveRunForSameRepoAndSha(
+                    parsed.getOwner(),
+                    parsed.getRepo(),
+                    commitSha
+            );
+
+            if (activeRun == null) {
+                log.info(
+                        "[CACHE][LOCK] contention but active run not found. fallback=EARLY_ESCAPE, cacheKey={}",
+                        abbreviateCacheKey(analysisCacheKey)
+                );
+            } else if (activeRun.getOwner() != null && activeRun.getOwner().getId() != null
+                    && activeRun.getOwner().getId().equals(userId)) {
+                log.info(
+                        "[CACHE][LOCK] contention resolved by attach. requestUserId={}, runId={}, status={}",
+                        userId,
+                        activeRun.getRunId(),
+                        activeRun.getStatus()
+                );
+                return toCreateResponse(
+                        activeRun,
+                        false,
+                        analysisCacheKey,
+                        null
+                );
+            } else {
+                BuildMode sourceBuildMode = resolveBuildMode(activeRun.getRunId());
+                if (sourceBuildMode != null && sourceBuildMode != BuildMode.FULL) {
+                    log.info(
+                            "[CACHE][LOCK] early-escape triggered. sourceRunId={}, sourceBuildMode={}",
+                            activeRun.getRunId(),
+                            sourceBuildMode
+                    );
+                    // 조기 탈출: 아래 신규 분석 enqueue 경로로 폴백합니다.
+                } else {
+                    RepoRun waitingRun = createCacheWaitingRun(req, owner, parsed, ref, commitSha, userId);
+                    log.info(
+                            "[CACHE][LOCK] waiting run created. requestUserId={}, runId={}, sourceRunId={}, sourceBuildMode={}",
+                            userId,
+                            waitingRun.getRunId(),
+                            activeRun.getRunId(),
+                            sourceBuildMode
+                    );
+                    return toCreateResponse(
+                            waitingRun,
+                            false,
+                            analysisCacheKey,
+                            activeRun.getRunId()
+                    );
+                }
+            }
         }
 
         String runId = generateRunId();
@@ -192,7 +271,16 @@ public class RepoRunService {
 
         repoRunRepository.save(run);
 
-        pipelineQueueService.enqueue(run, userId);
+        try {
+            pipelineQueueService.enqueue(run, userId);
+        } catch (RuntimeException e) {
+            /*
+             * enqueue 실패 시에는 현재 요청이 잡 생성에 실패했으므로 락을 즉시 해제합니다.
+             * 정상 경로에서는 worker가 진행하는 동안 TTL로 자연 만료되도록 유지합니다.
+             */
+            analysisCacheLockService.releaseIfOwned(analysisCacheKey, lockOwnerToken);
+            throw e;
+        }
 
         log.info(
                 "Run queued runId={}, status={}, sha={}",
@@ -423,6 +511,99 @@ public class RepoRunService {
             return "<empty>";
         }
         return cacheKey.length() <= 12 ? cacheKey : cacheKey.substring(0, 12);
+    }
+
+    /**
+     * 타사용자 FULL 분석을 기다리기 위한 요청자 소유 run/job/step을 생성합니다.
+     *
+     * 구현 이유:
+     * - 409 재시도 UX 대신 "내 runId"를 즉시 반환해 polling 흐름을 유지합니다.
+     * - worker가 곧바로 실행하지 않도록 job은 RUNNING+무락(lock null) 대기 상태로 둡니다.
+     */
+    private RepoRun createCacheWaitingRun(
+            RepoRunCreateRequest req,
+            User owner,
+            GithubRepoRef parsed,
+            String ref,
+            String commitSha,
+            Long userId
+    ) {
+        String waitingRunId = generateRunId();
+        Path waitingWsRoot = workspaceManager.workspaceRoot(waitingRunId);
+
+        RepoRun waitingRun = new RepoRun(
+                waitingRunId,
+                owner,
+                req.getRepoUrl(),
+                parsed.getOwner(),
+                parsed.getRepo(),
+                ref,
+                commitSha,
+                waitingWsRoot.toString()
+        );
+        repoRunRepository.save(waitingRun);
+
+        RunPipelineJob waitingJob = RunPipelineJob.create(waitingRun, userId);
+        waitingJob.markCacheWaiting(CACHE_WAIT_STATUS_MESSAGE);
+        runPipelineJobRepository.save(waitingJob);
+
+        RunPipelineStepExecution waitingStep = RunPipelineStepExecution.create(
+                waitingJob,
+                waitingRun,
+                RunStage.QUEUED
+        );
+        waitingStep.start(CACHE_WAIT_STATUS_MESSAGE);
+        runPipelineStepExecutionRepository.save(waitingStep);
+
+        return waitingRun;
+    }
+
+    /**
+     * W09 락 경합 시, 동일 repo/sha의 진행중 job을 찾아 attach 가능 여부를 판단합니다.
+     */
+    private RepoRun resolveActiveRunForSameRepoAndSha(String repoOwner, String repoName, String commitSha) {
+        return runPipelineJobRepository
+                .findActiveJobsByRepoAndSha(
+                        repoOwner,
+                        repoName,
+                        commitSha,
+                        ACTIVE_PIPELINE_JOB_STATUSES,
+                        PageRequest.of(0, 1)
+                )
+                .stream()
+                .findFirst()
+                .map(RunPipelineJob::getRun)
+                .orElse(null);
+    }
+
+    /**
+     * build_manifest meta의 buildMode를 읽어 FULL 여부를 판단합니다.
+     */
+    private BuildMode resolveBuildMode(String runId) {
+        return artifactRepository.findTopByRun_RunIdAndKindOrderByCreatedAtDesc(runId, ArtifactKind.BUILD_MANIFEST)
+                .map(Artifact::getMeta)
+                .map(meta -> meta.path("buildMode").asText(null))
+                .map(this::toBuildMode)
+                .orElse(null);
+    }
+
+    private BuildMode toBuildMode(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            return BuildMode.valueOf(raw.trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Redis lock value(owner token) 생성 규칙입니다.
+     * owner 검증 해제 시에 "누가 획득한 락인지"를 식별하기 위해 사용합니다.
+     */
+    private String buildLockOwnerToken(Long userId) {
+        return "user:" + userId + ":" + UUID.randomUUID();
     }
 
     private String generateRunId() {
