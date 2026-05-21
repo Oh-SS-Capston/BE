@@ -2,6 +2,7 @@ package com.example.ossdoc.domain.run.entity;
 
 import com.example.ossdoc.domain.run.enums.RunStatus;
 import com.example.ossdoc.domain.user.entity.User;
+import com.example.ossdoc.domain.membership.enums.AnalysisAccessType;
 import com.example.ossdoc.global.apiPayload.code.BaseAuditedEntity;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.persistence.*;
@@ -66,6 +67,10 @@ public class RepoRun extends BaseAuditedEntity {
     @Column(name = "workspace_root")
     private String workspaceRoot;
 
+    @Enumerated(EnumType.STRING)
+    @Column(name = "analysis_access_type", length = 30)
+    private AnalysisAccessType analysisAccessType;
+
     public RepoRun(
             String runId,
             User owner,
@@ -74,7 +79,8 @@ public class RepoRun extends BaseAuditedEntity {
             String repoName,
             String resolvedRef,
             String commitSha,
-            String workspaceRoot
+            String workspaceRoot,
+            AnalysisAccessType analysisAccessType
     ) {
         this.runId = runId;
         this.owner = owner;
@@ -84,11 +90,15 @@ public class RepoRun extends BaseAuditedEntity {
         this.resolvedRef = resolvedRef;
         this.commitSha = commitSha;
         this.workspaceRoot = workspaceRoot;
+        this.analysisAccessType = analysisAccessType;
         this.status = RunStatus.QUEUED;
     }
 
     public void assignOwner(User owner) {
         this.owner = owner;
+    }
+    public void assignAnalysisAccessType(AnalysisAccessType analysisAccessType){
+        this.analysisAccessType = analysisAccessType;
     }
 
     public void markRunning() {
