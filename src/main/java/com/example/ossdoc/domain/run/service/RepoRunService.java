@@ -2,6 +2,7 @@ package com.example.ossdoc.domain.run.service;
 
 import com.example.ossdoc.domain.auth.exception.AuthException;
 import com.example.ossdoc.domain.auth.exception.code.AuthErrorCode;
+import com.example.ossdoc.domain.membership.service.MembershipAccessService;
 import com.example.ossdoc.domain.run.dto.request.RepoRunCreateRequest;
 import com.example.ossdoc.domain.run.dto.response.RepoRunCreateResponse;
 import com.example.ossdoc.domain.run.dto.response.RepoRunRecentResponse;
@@ -13,6 +14,8 @@ import com.example.ossdoc.domain.run.support.GithubUrlParser;
 import com.example.ossdoc.domain.run.support.WorkspaceManager;
 import com.example.ossdoc.domain.user.entity.User;
 import com.example.ossdoc.domain.user.repository.UserRepository;
+import com.example.ossdoc.domain.membership.enums.AnalysisAccessType;
+import com.example.ossdoc.domain.membership.service.MembershipAccessService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -33,6 +36,7 @@ public class RepoRunService {
     private final GithubClient githubClient;
     private final WorkspaceManager workspaceManager;
     private final RunPipelineQueueService pipelineQueueService;
+    private final MembershipAccessService membershipAccessService;
 
     @Transactional
     public RepoRunCreateResponse createRun(RepoRunCreateRequest req, Long userId) {
@@ -85,6 +89,12 @@ public class RepoRunService {
 
         log.info("Workspace prepared runId={}, workspaceRoot={}", runId, wsRoot);
 
+        /**
+         * 여기서 무료 분석권 또는 멤버십 권한을 판단합니다.
+         * 이 시점 이전의 URL 파싱/commit resolve 실패는 무료권을 차감하지 않습니다.
+         */
+        AnalysisAccessType analysisAccessType = membershipAccessService.grantAnalysisStart(owner);
+
         RepoRun run = new RepoRun(
                 runId,
                 owner,
@@ -93,7 +103,8 @@ public class RepoRunService {
                 parsed.getRepo(),
                 ref,
                 commitSha,
-                wsRoot.toString()
+                wsRoot.toString(),
+                analysisAccessType
         );
 
         repoRunRepository.save(run);
