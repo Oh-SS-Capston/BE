@@ -14,4 +14,7 @@ public class ProjectedGraph {
     private List<ProjectedEdge> edges;
 
     private Map<String, Integer> nodeIndexMap;
+
+    // refactplan.md 2~5순위: 가상 엣지 신호 provider별 baseline 메타 (algorithm.signals 로 기록)
+    private Map<String, Object> signalMeta;
 }

@@ -33,6 +33,7 @@ public class ClusterBuildService {
     private final GraphProjectionService graphProjectionService;
     private final ResolutionProbeService resolutionProbeService;
     private final SubsystemAssembler subsystemAssembler;
+    private final SubsystemRefinerService subsystemRefinerService;
     private final RankingService rankingService;
     private final ClusterArtifactPublisher clusterArtifactPublisher;
     private final PublicApiEntrySyncService publicApiEntrySyncService;
@@ -89,6 +90,20 @@ public class ClusterBuildService {
             throw new ClusterException(ClusterErrorCode.CLUSTER_ASSEMBLY_FAILED);
         }
 
+        // Leiden 결과를 결정적 구조 규칙(owner 흡수 / exception 계보)으로 후처리한다.
+        SubsystemRefinerService.RefineOutcome refineOutcome;
+        try {
+            refineOutcome = subsystemRefinerService.refine(
+                    subsystems,
+                    projectedGraph.getNodes(),
+                    run.getRunId()
+            );
+            subsystems = refineOutcome.subsystems();
+        } catch (Exception e) {
+            log.error("[CLUSTER] subsystem refine failed. runId={}", run.getRunId(), e);
+            throw new ClusterException(ClusterErrorCode.CLUSTER_REFINE_FAILED);
+        }
+
         RankingService.RankingResult rankingResult;
         try {
             rankingResult = rankingService.rank(
@@ -111,6 +126,36 @@ public class ClusterBuildService {
         }
 
         try {
+            int totalNodeCount = subsystems.stream()
+                    .mapToInt(s -> s.getMemberSymbolIds().size())
+                    .sum();
+            int miscNodeCount = subsystems.stream()
+                    .filter(s -> "misc".equals(s.getName()))
+                    .mapToInt(s -> s.getMemberSymbolIds().size())
+                    .sum();
+            double miscRatio = totalNodeCount == 0 ? 0.0 : (double) miscNodeCount / totalNodeCount;
+            double avgSize = subsystems.stream()
+                    .mapToInt(s -> s.getMemberSymbolIds().size())
+                    .average()
+                    .orElse(0.0);
+            double stddevSize = subsystems.isEmpty() ? 0.0 : Math.sqrt(
+                    subsystems.stream()
+                            .mapToDouble(s -> Math.pow(s.getMemberSymbolIds().size() - avgSize, 2))
+                            .average()
+                            .orElse(0.0));
+
+            Map<String, Object> metricsMap = Map.of(
+                    "misc_node_count", miscNodeCount,
+                    "total_node_count", totalNodeCount,
+                    "misc_ratio", Math.round(miscRatio * 1000.0) / 1000.0,
+                    "subsystem_count", subsystems.size(),
+                    "avg_subsystem_size", Math.round(avgSize * 10.0) / 10.0,
+                    "stddev_subsystem_size", Math.round(stddevSize * 100.0) / 100.0,
+                    "modularity", probeResult.modularity(),
+                    "leiden_resolution", probeResult.resolution(),
+                    "leiden_iterations", request.getIterations()
+            );
+
             SubsystemsJson subsystemsJson = SubsystemsJson.builder()
                     .schemaVersion("1.0")
                     .runId(run.getRunId())
@@ -121,7 +166,12 @@ public class ClusterBuildService {
                             "iterations", request.getIterations(),
                             "graphMode", "UNDIRECTED_WEIGHTED_TYPE_GRAPH",
                             "modularity", probeResult.modularity(),
-                            "clusterCount", probeResult.clusterCount()
+                            "clusterCount", probeResult.clusterCount(),
+                            "refiner", refineOutcome.refinerMeta(),
+                            "signals", projectedGraph.getSignalMeta() == null
+                                    ? Map.of()
+                                    : projectedGraph.getSignalMeta(),
+                            "metrics", metricsMap
                     ))
                     .subsystems(subsystems)
                     .build();

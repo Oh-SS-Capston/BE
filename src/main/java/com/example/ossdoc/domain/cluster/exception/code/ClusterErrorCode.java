@@ -18,7 +18,8 @@ public enum ClusterErrorCode implements BaseCode {
     CLUSTER_LEIDEN_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "CLUSTER500_2", "Leiden 군집화에 실패했습니다."),
     CLUSTER_ASSEMBLY_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "CLUSTER500_3", "subsystem 조립에 실패했습니다."),
     CLUSTER_RANKING_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "CLUSTER500_4", "중요도 산정에 실패했습니다."),
-    CLUSTER_ARTIFACT_SAVE_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "CLUSTER500_5", "cluster 산출물 저장에 실패했습니다.");
+    CLUSTER_ARTIFACT_SAVE_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "CLUSTER500_5", "cluster 산출물 저장에 실패했습니다."),
+    CLUSTER_REFINE_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "CLUSTER500_6", "subsystem 보정에 실패했습니다.");
 
     private final HttpStatus httpStatus;
     private final String code;
