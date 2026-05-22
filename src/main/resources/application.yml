@@ -5,6 +5,14 @@ spring:
   profiles:
     active: ${SPRING_PROFILES_ACTIVE:local}
 
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 3s
+      repositories:
+        enabled: false
+
   datasource:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/ossdoc_db}
     username: ${DB_USER:postgres}
@@ -65,6 +73,21 @@ build:
 ossdoc:
   workspace:
     base-dir: ${OSSDOC_WORKSPACE_BASE_DIR:C:/data/ossdoc}
+  analysis-cache:
+    # 구조 분석/LLM/출력 계약이 바뀌면 아래 버전값을 올려서 캐시를 분리합니다.
+    pipeline-contract-version: ${OSSDOC_CACHE_PIPELINE_CONTRACT_VERSION:pipeline-v1}
+    llm-profile-version: ${OSSDOC_CACHE_LLM_PROFILE_VERSION:llm-profile-v1}
+    prompt-template-version: ${OSSDOC_CACHE_PROMPT_TEMPLATE_VERSION:prompt-v1}
+    output-schema-version: ${OSSDOC_CACHE_OUTPUT_SCHEMA_VERSION:schema-v1}
+    default-run-options-signature: ${OSSDOC_CACHE_DEFAULT_RUN_OPTIONS_SIGNATURE:options-default-v1}
+    # true면 실제 Redis 저장소, false면 Noop 저장소를 사용합니다.
+    redis-enabled: ${OSSDOC_CACHE_REDIS_ENABLED:false}
+    # Redis 키 네이밍/TTL 정책
+    redis-ready-key-prefix: ${OSSDOC_CACHE_REDIS_READY_KEY_PREFIX:analysis:ready}
+    redis-lock-key-prefix: ${OSSDOC_CACHE_REDIS_LOCK_KEY_PREFIX:analysis:lock}
+    redis-ready-ttl-hours: ${OSSDOC_CACHE_REDIS_READY_TTL_HOURS:24}
+    redis-lock-ttl-minutes: ${OSSDOC_CACHE_REDIS_LOCK_TTL_MINUTES:20}
+    failed-cooldown-seconds: ${OSSDOC_CACHE_FAILED_COOLDOWN_SECONDS:30}
   pipeline:
     worker:
       fixed-delay-ms: ${PIPELINE_WORKER_FIXED_DELAY_MS:2000}

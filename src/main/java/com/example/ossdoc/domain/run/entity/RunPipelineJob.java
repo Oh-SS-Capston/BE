@@ -162,6 +162,45 @@ public class RunPipelineJob extends BaseAuditedEntity {
         clearLock();
     }
 
+    /**
+     * 캐시 대기 전용 상태로 전환합니다.
+     *
+     * 왜 필요한가:
+     * - 동일 커밋을 다른 요청이 이미 분석 중일 때 중복 실행을 막고 결과를 기다립니다.
+     * - lock 필드를 비워 worker claim SQL 조건(RUNNING + locked_until < now)에서 제외되게 합니다.
+     */
+    public void markCacheWaiting(String message) {
+        this.status = PipelineJobStatus.RUNNING;
+        this.currentStage = RunStage.QUEUED;
+        this.progress = RunStage.QUEUED.getProgress();
+        this.statusMessage = normalizeMessage(message, "동일 분석 결과를 대기 중입니다.", 500);
+        this.failureMessage = null;
+        this.lastError = null;
+        this.nextRunAt = LocalDateTime.now();
+        clearLock();
+
+        this.run.markRunning();
+    }
+
+    /**
+     * 캐시 대기를 종료하고 독립 분석 큐(RETRYING)로 1회 재진입시킵니다.
+     *
+     * 완화 모드 정책:
+     * - 원본 FULL 분석이 실패/미발행이면 대기 run이 직접 분석을 한 번 수행합니다.
+     */
+    public void scheduleRetryFromCacheWait(String message) {
+        this.status = PipelineJobStatus.RETRYING;
+        this.currentStage = RunStage.QUEUED;
+        this.progress = RunStage.QUEUED.getProgress();
+        this.statusMessage = normalizeMessage(message, "캐시 대기에서 독립 분석으로 전환했습니다.", 500);
+        this.failureMessage = null;
+        this.lastError = this.statusMessage;
+        this.nextRunAt = LocalDateTime.now();
+        clearLock();
+
+        this.run.markRunning();
+    }
+
     private void clearLock() {
         this.lockedBy = null;
         this.lockedAt = null;

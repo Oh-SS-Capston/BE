@@ -1,6 +1,8 @@
 package com.example.ossdoc.domain.run.service;
 
 import com.example.ossdoc.domain.build.service.BuildResolveService;
+import com.example.ossdoc.domain.build.dto.response.BuildResolveResponse;
+import com.example.ossdoc.domain.build.enums.BuildMode;
 import com.example.ossdoc.domain.classmap.dto.request.ClassMapBuildRequest;
 import com.example.ossdoc.domain.classmap.service.ClassMapBuildService;
 import com.example.ossdoc.domain.cluster.dto.request.ClusterBuildRequest;
@@ -14,11 +16,18 @@ import com.example.ossdoc.domain.graphstore.dto.request.GraphStoreIngestRequest;
 import com.example.ossdoc.domain.graphstore.service.GraphStoreIngestService;
 import com.example.ossdoc.domain.rule.dto.request.RuleCandidateMineRequest;
 import com.example.ossdoc.domain.rule.service.RuleCandidateMiningService;
+import com.example.ossdoc.domain.run.cache.service.AnalysisCacheLockService;
+import com.example.ossdoc.domain.run.cache.service.AnalysisCachePublishService;
+import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.entity.RunPipelineJob;
 import com.example.ossdoc.domain.run.enums.RunStage;
 import com.example.ossdoc.domain.run.exception.RunException;
 import com.example.ossdoc.domain.run.exception.code.RunErrorCode;
+import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.example.ossdoc.domain.run.repository.RunPipelineJobRepository;
+import com.example.ossdoc.domain.run.support.RunAnalysisCacheKeyFactory;
+import com.example.ossdoc.domain.run.support.RunAnalysisCacheKeySeed;
+import com.example.ossdoc.global.properties.AnalysisCacheProperties;
 import com.example.ossdoc.global.llm.dto.request.LlmRequest;
 import com.example.ossdoc.global.llm.service.LlmService;
 import lombok.RequiredArgsConstructor;
@@ -27,6 +36,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 /*
  * 실제 파이프라인 실행 오케스트레이터입니다.
@@ -60,6 +70,11 @@ public class RunPipelineExecutor {
 
     private final RuleCandidateMiningService ruleCandidateMiningService;
     private final LlmService llmService;
+    private final AnalysisCachePublishService analysisCachePublishService;
+    private final AnalysisCacheLockService analysisCacheLockService;
+    private final RepoRunRepository repoRunRepository;
+    private final RunAnalysisCacheKeyFactory runAnalysisCacheKeyFactory;
+    private final AnalysisCacheProperties analysisCacheProperties;
 
     public void execute(Long jobId) {
         RunPipelineJob job = jobRepository.findById(jobId)
@@ -71,6 +86,7 @@ public class RunPipelineExecutor {
         log.info("[PIPELINE] execute start. jobId={}, runId={}", jobId, runId);
 
         List<String> optionalFailures = new ArrayList<>();
+        AtomicReference<BuildMode> buildModeRef = new AtomicReference<>(null);
 
         try {
             executeRequired(
@@ -84,7 +100,10 @@ public class RunPipelineExecutor {
                     jobId,
                     RunStage.BUILD,
                     "빌드 환경을 분석 중입니다.",
-                    () -> buildResolveService.resolve(runId)
+                    () -> {
+                        BuildResolveResponse response = buildResolveService.resolve(runId);
+                        buildModeRef.set(response == null ? null : response.getBuildMode());
+                    }
             );
 
             executeRequired(
@@ -217,22 +236,48 @@ public class RunPipelineExecutor {
                 );
             }
 
-            if (optionalFailures.isEmpty()) {
+            BuildMode buildMode = buildModeRef.get();
+            if (buildMode == BuildMode.FAILED) {
+                stepService.markRunFailed(
+                        jobId,
+                        "빌드 분석에 실패해 전체 분석을 완료할 수 없습니다.",
+                        "buildMode=FAILED"
+                );
+                publishFailedCacheSafely(job, "buildMode=FAILED");
+                return;
+            }
+
+            /*
+             * 최종 상태 정책:
+             * - FULL + 선택 단계 전부 성공 => SUCCESS
+             * - COMPILE_ONLY/SOURCE_ONLY/UNKNOWN 또는 선택 단계 일부 실패 => PARTIAL_SUCCESS
+             */
+            if (optionalFailures.isEmpty() && buildMode == BuildMode.FULL) {
                 stepService.markRunSuccess(jobId);
+                publishReadyCacheSafely(job);
             } else {
+                List<String> partialReasons = new ArrayList<>(optionalFailures);
+                if (buildMode != BuildMode.FULL) {
+                    partialReasons.add(buildModeToPartialReason(buildMode));
+                }
                 stepService.markRunPartialSuccess(
                         jobId,
-                        String.join(" / ", optionalFailures)
+                        String.join(" / ", partialReasons)
                 );
+                publishFailedCacheSafely(job, String.join(" / ", partialReasons));
             }
         } catch (Exception e) {
             log.error("[PIPELINE] Required step failed. jobId={}, runId={}", jobId, runId, e);
 
+            String internalError = safeInternalError(e);
             stepService.markRunFailed(
                     jobId,
                     "필수 분석 단계 실행 중 오류가 발생했습니다.",
-                    safeInternalError(e)
+                    internalError
             );
+            publishFailedCacheSafely(job, internalError);
+        } finally {
+            releaseAnalysisLockSafely(runId);
         }
     }
 
@@ -364,6 +409,100 @@ public class RunPipelineExecutor {
         }
 
         return e.getMessage();
+    }
+
+    private String buildModeToPartialReason(BuildMode buildMode) {
+        if (buildMode == null) {
+            return "빌드 품질을 확인할 수 없어 부분 성공으로 처리했습니다.";
+        }
+        return switch (buildMode) {
+            case COMPILE_ONLY -> "빌드 결과가 COMPILE_ONLY라 부분 성공으로 처리했습니다.";
+            case SOURCE_ONLY -> "빌드 결과가 SOURCE_ONLY라 부분 성공으로 처리했습니다.";
+            case FAILED -> "빌드 결과가 FAILED라 부분 성공으로 처리했습니다.";
+            case FULL -> "빌드 결과가 FULL입니다.";
+        };
+    }
+
+    /**
+     * W08: 파이프라인이 풀 성공한 경우 READY 캐시를 발행합니다.
+     *
+     * 실패 처리 정책:
+     * - 캐시 발행 실패는 파이프라인 본 성공 상태를 뒤집지 않습니다.
+     * - 대신 경고 로그를 남기고 다음 요청에서 miss -> 재분석 경로로 안전 폴백합니다.
+     */
+    private void publishReadyCacheSafely(RunPipelineJob job) {
+        try {
+            boolean published = analysisCachePublishService.publishReady(job.getRun().getRunId());
+            if (!published) {
+                log.warn(
+                        "[CACHE] READY publish skipped. runId={}, reason=REQUIRED_ARTIFACT_MISSING_OR_INVALID",
+                        job.getRun().getRunId()
+                );
+            }
+        } catch (Exception e) {
+            log.warn(
+                    "[CACHE] READY publish failed. runId={}",
+                    job.getRun().getRunId(),
+                    e
+            );
+        }
+    }
+
+    /**
+     * W10: 파이프라인 실패/부분성공 시 FAILED 캐시를 안전하게 발행합니다.
+     *
+     * 실패 처리 정책:
+     * - FAILED 캐시 발행 실패가 본 파이프라인 상태를 뒤집지 않도록 예외는 삼킵니다.
+     * - 본 분석 상태는 stepService가 이미 기록했으므로, 여기서는 쿨다운 메타만 보강합니다.
+     */
+    private void publishFailedCacheSafely(RunPipelineJob job, String reason) {
+        try {
+            analysisCachePublishService.publishFailed(job.getRun().getRunId(), reason);
+        } catch (Exception e) {
+            log.warn(
+                    "[CACHE] FAILED publish failed. runId={}",
+                    job.getRun().getRunId(),
+                    e
+            );
+        }
+    }
+
+    /**
+     * W09 보강:
+     * - enqueue 시 획득한 분석 락을 파이프라인 종료(성공/부분성공/실패) 시점에 즉시 해제합니다.
+     * - TTL 만료를 기다리지 않고 다음 동일 요청이 READY hit로 바로 전환되도록 지연을 줄입니다.
+     * - owner token 검증 해제를 사용해, 다른 실행이 선점한 락은 지우지 않도록 보호합니다.
+     */
+    private void releaseAnalysisLockSafely(String runId) {
+        try {
+            RepoRun run = repoRunRepository.findById(runId).orElse(null);
+            if (run == null) {
+                log.warn("[CACHE][LOCK] release skipped. run not found. runId={}", runId);
+                return;
+            }
+
+            String cacheKey = buildCacheKey(run);
+            String ownerToken = AnalysisCacheLockService.ownerTokenForRun(runId);
+            analysisCacheLockService.releaseIfOwned(cacheKey, ownerToken);
+        } catch (Exception e) {
+            log.warn("[CACHE][LOCK] release failed. runId={}", runId, e);
+        }
+    }
+
+    /**
+     * RepoRun 정보를 캐시 키 시드로 직렬화해 enqueue 시점과 동일한 cacheKey를 재구성합니다.
+     */
+    private String buildCacheKey(RepoRun run) {
+        RunAnalysisCacheKeySeed seed = RunAnalysisCacheKeySeed.builder()
+                .repoUrl(run.getRepoUrl())
+                .commitSha(run.getCommitSha())
+                .pipelineContractVersion(analysisCacheProperties.getPipelineContractVersion())
+                .llmProfileVersion(analysisCacheProperties.getLlmProfileVersion())
+                .promptTemplateVersion(analysisCacheProperties.getPromptTemplateVersion())
+                .outputSchemaVersion(analysisCacheProperties.getOutputSchemaVersion())
+                .runOptionsSignature(analysisCacheProperties.getDefaultRunOptionsSignature())
+                .build();
+        return runAnalysisCacheKeyFactory.buildKey(seed);
     }
 
     /**
