@@ -175,7 +175,8 @@ public class RepoRunService {
                             sharedCachedRun,
                             true,
                             cacheLookupResult.cacheKey(),
-                            sourceRun.getRunId()
+                            sourceRun.getRunId(),
+                            sourceRun
                     );
                 }
 
@@ -585,6 +586,18 @@ public class RepoRunService {
             String cacheKey,
             String sourceRunId
     ) {
+        return toCreateResponse(run, cacheHit, cacheKey, sourceRunId, null);
+    }
+
+    private RepoRunCreateResponse toCreateResponse(
+            RepoRun run,
+            boolean cacheHit,
+            String cacheKey,
+            String sourceRunId,
+            RepoRun analyzedSourceRun
+    ) {
+        RepoRun analyzedAtBaseRun = analyzedSourceRun != null ? analyzedSourceRun : run;
+
         return RepoRunCreateResponse.builder()
                 .runId(run.getRunId())
                 .status(run.getStatus())
@@ -593,6 +606,8 @@ public class RepoRunService {
                 .cacheHit(cacheHit)
                 .cacheKey(cacheKey)
                 .sourceRunId(sourceRunId)
+                .createdAt(analyzedAtBaseRun.getCreatedAt())
+                .updatedAt(analyzedAtBaseRun.getUpdatedAt())
                 .build();
     }
 
