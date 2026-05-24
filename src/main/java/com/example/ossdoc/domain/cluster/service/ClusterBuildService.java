@@ -3,6 +3,8 @@ package com.example.ossdoc.domain.cluster.service;
 import com.example.ossdoc.domain.artifact.entity.Artifact;
 import com.example.ossdoc.domain.cluster.artifact.output.RankingsJson;
 import com.example.ossdoc.domain.cluster.artifact.output.SubsystemsJson;
+import com.example.ossdoc.domain.artifact.enums.ArtifactKind;
+import com.example.ossdoc.domain.artifact.repository.ArtifactRepository;
 import com.example.ossdoc.domain.cluster.config.ClusterSignalProperties;
 import com.example.ossdoc.domain.cluster.dto.request.ClusterBuildRequest;
 import com.example.ossdoc.domain.cluster.dto.response.ClusterBuildResponse;
@@ -12,9 +14,8 @@ import com.example.ossdoc.domain.cluster.model.CommunityResult;
 import com.example.ossdoc.domain.cluster.model.ProjectedGraph;
 import com.example.ossdoc.domain.cluster.model.subsystem.Subsystem;
 import com.example.ossdoc.domain.cluster.support.SubsystemAssembler;
-import com.example.ossdoc.domain.publicapi.model.EntryPointCandidate;
-import com.example.ossdoc.domain.publicapi.service.EntryPointDetectService;
 import com.example.ossdoc.domain.publicapi.service.PublicApiEntrySyncService;
+import com.example.ossdoc.domain.publicapi.support.EntryPointJsonCodec;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import lombok.RequiredArgsConstructor;
@@ -26,7 +27,6 @@ import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -42,7 +42,8 @@ public class ClusterBuildService {
     private final RankingService rankingService;
     private final ClusterArtifactPublisher clusterArtifactPublisher;
     private final PublicApiEntrySyncService publicApiEntrySyncService;
-    private final EntryPointDetectService entryPointDetectService;
+    private final ArtifactRepository artifactRepository;
+    private final EntryPointJsonCodec entryPointJsonCodec;
     private final ClusterSignalProperties clusterSignalProperties;
 
     /**
@@ -211,24 +212,24 @@ public class ClusterBuildService {
     }
 
     /**
-     * 탐지 실패 시 빈 set을 반환해 5순위 provider가 auto-disable되도록 한다.
+     * ENTRY_POINTS_JSON artifact에서 minConfidence 이상 symbolId를 읽는다.
+     * artifact 부재 시(ENTRYPOINT 단계 실패/스킵) 빈 set을 반환해 5순위 provider가 auto-disable되도록 한다.
      */
     private Set<String> resolveRefinedEntryPoints(String runId) {
         ClusterSignalProperties.ApiFlowSignal apiFlow =
                 clusterSignalProperties.getSignals().getApiFlow();
 
-        try {
-            int minRank = EntryPointDetectService.confidenceRank(apiFlow.getMinConfidence());
-            Set<String> ids = entryPointDetectService.detect(runId).stream()
-                    .filter(c -> EntryPointDetectService.confidenceRank(c.getConfidence()) >= minRank)
-                    .map(EntryPointCandidate::getSymbolId)
-                    .collect(Collectors.toSet());
-            log.info("[CLUSTER] refined entry points resolved. runId={}, count={}", runId, ids.size());
-            return ids;
-        } catch (Exception e) {
-            log.warn("[CLUSTER] refined entry point resolution failed. api-flow signal will auto-disable. runId={}",
-                    runId, e);
-            return Set.of();
-        }
+        return artifactRepository
+                .findTopByRun_RunIdAndKindOrderByCreatedAtDesc(runId, ArtifactKind.ENTRY_POINTS_JSON)
+                .map(a -> {
+                    Set<String> ids = entryPointJsonCodec.readSymbolIds(
+                            a.getMeta(), apiFlow.getMinConfidence());
+                    log.info("[CLUSTER] ENTRY_POINTS_JSON loaded. runId={}, refinedEntryCount={}", runId, ids.size());
+                    return ids;
+                })
+                .orElseGet(() -> {
+                    log.warn("[CLUSTER] ENTRY_POINTS_JSON not found. api-flow signal will auto-disable. runId={}", runId);
+                    return Set.of();
+                });
     }
 }

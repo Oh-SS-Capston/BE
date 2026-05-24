@@ -82,7 +82,6 @@ public class EntryPointDetectService {
                 countReturnedByPublicApi(runId, publicSymbolIds, childMaps.methodOwnerIndex());
 
         FactsSignals factsSignals = loadFactsSignals(runId);
-        SubsystemMaps subsystemMaps = loadSubsystemMaps(runId);
         Set<String> exportedPackages = loadExportedPackages(allSymbols);
         Set<String> implementorSymbolIds = loadSymbolsWithOutboundInheritance(runId);
 
@@ -97,10 +96,6 @@ public class EntryPointDetectService {
                     symbol, childMaps, returnedByPublicApi, factsSignals, implementorSymbolIds);
             if ("NONE".equals(result.confidence())) continue;
 
-            String subsystemId    = subsystemMaps.memberToSubsystem().get(symbol.getSymbolId());
-            String subsystemLabel = subsystemId != null
-                    ? subsystemMaps.labelBySubsystem().get(subsystemId) : null;
-
             candidates.add(EntryPointCandidate.builder()
                     .symbolId(symbol.getSymbolId())
                     .qualifiedName(symbol.getQualifiedName())
@@ -110,8 +105,6 @@ public class EntryPointDetectService {
                     .sourceFile(resolveSourceFilePath(symbol))
                     .startLine(symbol.getSourceStartLine())
                     .endLine(symbol.getSourceEndLine())
-                    .subsystemId(subsystemId)
-                    .subsystemLabel(subsystemLabel)
                     .role(result.role())
                     .confidence(result.confidence())
                     .signals(List.copyOf(result.signals()))
@@ -228,33 +221,6 @@ public class EntryPointDetectService {
         return new FactsSignals(
                 Set.copyOf(readmeMentioned),
                 Set.copyOf(exampleReferenced));
-    }
-
-    private SubsystemMaps loadSubsystemMaps(String runId) {
-        Optional<Artifact> opt = artifactRepository
-                .findTopByRun_RunIdAndKindOrderByCreatedAtDesc(runId, ArtifactKind.SUBSYSTEMS_JSON);
-        if (opt.isEmpty()) return new SubsystemMaps(Map.of(), Map.of());
-
-        JsonNode meta       = opt.get().getMeta();
-        JsonNode subsystems = meta.path("subsystems");
-        if (!subsystems.isArray()) return new SubsystemMaps(Map.of(), Map.of());
-
-        Map<String, String> memberToSubsystem = new HashMap<>();
-        Map<String, String> labelBySubsystem  = new HashMap<>();
-
-        for (JsonNode ss : subsystems) {
-            String subsystemId = ss.path("subsystemId").asText(null);
-            String name        = ss.path("name").asText(null);
-            if (subsystemId == null) continue;
-            if (name != null) labelBySubsystem.put(subsystemId, name);
-            JsonNode members = ss.path("memberSymbolIds");
-            if (members.isArray()) {
-                for (JsonNode m : members) {
-                    memberToSubsystem.put(m.asText(), subsystemId);
-                }
-            }
-        }
-        return new SubsystemMaps(memberToSubsystem, labelBySubsystem);
     }
 
     /**
@@ -633,11 +599,6 @@ public class EntryPointDetectService {
     private record FactsSignals(
             Set<String> readmeMentionedSimpleNames,
             Set<String> exampleReferencedSimpleNames
-    ) {}
-
-    private record SubsystemMaps(
-            Map<String, String> memberToSubsystem,
-            Map<String, String> labelBySubsystem
     ) {}
 
     private record PhaseResult(

@@ -36,6 +36,12 @@ public enum RunStage {
             "코드 구조 그래프를 저장 중입니다."
     ),
 
+    ENTRYPOINT(
+            72,
+            false,
+            "공개 API 진입점을 탐지 중입니다."
+    ),
+
     CLUSTER(
             78,
             false,

@@ -7,6 +7,8 @@ import com.example.ossdoc.domain.artifact.service.ArtifactService;
 import com.example.ossdoc.domain.publicapi.dto.response.ApiMapBuildResponse;
 import com.example.ossdoc.domain.publicapi.model.EntryPointCandidate;
 import com.example.ossdoc.domain.publicapi.model.ExtensionPointCandidate;
+import com.example.ossdoc.domain.publicapi.support.EntryPointJsonCodec;
+import com.example.ossdoc.domain.publicapi.support.EntryPointSubsystemLabeler;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.exception.RunException;
 import com.example.ossdoc.domain.run.exception.code.RunErrorCode;
@@ -43,6 +45,8 @@ public class ApiMapBuildService {
     private final ExtensionPointDetectService extensionPointDetectService;
     private final ArtifactService             artifactService;
     private final ArtifactRepository          artifactRepository;
+    private final EntryPointJsonCodec         entryPointJsonCodec;
+    private final EntryPointSubsystemLabeler  entryPointSubsystemLabeler;
     private final ObjectMapper                objectMapper;
 
     @Transactional
@@ -52,7 +56,17 @@ public class ApiMapBuildService {
 
         publicApiEntrySyncService.ensureTypeEntries(run);
 
-        List<EntryPointCandidate>   entryPoints     = entryPointDetectService.detect(runId);
+        // 정상 경로: ENTRY_POINTS_JSON(라벨 없음) 읽기 → subsystem 라벨 join
+        // fallback: ENTRYPOINT 단계 실패/스킵 시 detect() 직접 호출 (이 시점에 SUBSYSTEMS_JSON이 존재하므로 라벨 포함)
+        List<EntryPointCandidate> entryPoints = artifactRepository
+                .findTopByRun_RunIdAndKindOrderByCreatedAtDesc(runId, ArtifactKind.ENTRY_POINTS_JSON)
+                .map(a -> entryPointSubsystemLabeler.label(
+                        runId, entryPointJsonCodec.deserialize(a.getMeta())))
+                .orElseGet(() -> {
+                    log.warn("[PUBLICAPI] ENTRY_POINTS_JSON not found. falling back to detect(). runId={}", runId);
+                    return entryPointDetectService.detect(runId);
+                });
+
         List<ExtensionPointCandidate> extensionPoints = extensionPointDetectService.detect(runId);
 
         // Extension Point 우선 원칙: 동일 symbolId가 양쪽에 존재하면 entry_points에서 제거

@@ -9,6 +9,7 @@ import com.example.ossdoc.domain.cluster.service.ClusterBuildService;
 import com.example.ossdoc.domain.cluster.service.ClusterParameterRecommendService;
 import com.example.ossdoc.domain.extraction.dto.request.FactsExtractRequest;
 import com.example.ossdoc.domain.publicapi.service.ApiMapBuildService;
+import com.example.ossdoc.domain.publicapi.service.EntryPointBuildService;
 import com.example.ossdoc.domain.extraction.facade.FactsExtractionFacade;
 import com.example.ossdoc.domain.graphstore.dto.request.GraphStoreIngestRequest;
 import com.example.ossdoc.domain.graphstore.service.GraphStoreIngestService;
@@ -54,6 +55,7 @@ public class RunPipelineExecutor {
     private final GraphStoreIngestService graphStoreIngestService;
 
     private final ClusterParameterRecommendService clusterParameterRecommendService;
+    private final EntryPointBuildService entryPointBuildService;
     private final ClusterBuildService clusterBuildService;
     private final ApiMapBuildService apiMapBuildService;
     private final ClassMapBuildService classMapBuildService;
@@ -124,6 +126,15 @@ public class RunPipelineExecutor {
              */
             PipelineAnalysisParameters parameters =
                     resolveRecommendedParameters(runId);
+
+            executeOptional(
+                    jobId,
+                    RunStage.ENTRYPOINT,
+                    "공개 API 진입점을 탐지 중입니다.",
+                    "공개 API 진입점 탐지에 실패했습니다.",
+                    optionalFailures,
+                    () -> entryPointBuildService.build(runId)
+            );
 
             executeOptional(
                     jobId,

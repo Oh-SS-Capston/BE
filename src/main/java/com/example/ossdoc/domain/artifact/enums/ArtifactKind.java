@@ -25,5 +25,8 @@ public enum ArtifactKind {
 
     // Public API Surface 결과물
     API_SURFACE_JSON,
-    API_MAP_JSON
+    API_MAP_JSON,
+
+    // 진입점 탐지 결과물 (B안: ENTRYPOINT 파이프라인 단계)
+    ENTRY_POINTS_JSON
 }

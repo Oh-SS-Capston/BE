@@ -1,7 +1,9 @@
 package com.example.ossdoc.domain.cluster.service;
 
-import com.example.ossdoc.domain.cluster.artifact.output.SubsystemsJson;
 import com.example.ossdoc.domain.artifact.entity.Artifact;
+import com.example.ossdoc.domain.artifact.enums.ArtifactKind;
+import com.example.ossdoc.domain.artifact.repository.ArtifactRepository;
+import com.example.ossdoc.domain.cluster.artifact.output.SubsystemsJson;
 import com.example.ossdoc.domain.cluster.config.ClusterSignalProperties;
 import com.example.ossdoc.domain.cluster.dto.request.ClusterBuildRequest;
 import com.example.ossdoc.domain.cluster.dto.response.ClusterBuildResponse;
@@ -10,9 +12,8 @@ import com.example.ossdoc.domain.cluster.model.ProjectedGraph;
 import com.example.ossdoc.domain.cluster.model.ProjectedNode;
 import com.example.ossdoc.domain.cluster.model.subsystem.Subsystem;
 import com.example.ossdoc.domain.cluster.support.SubsystemAssembler;
-import com.example.ossdoc.domain.publicapi.model.EntryPointCandidate;
-import com.example.ossdoc.domain.publicapi.service.EntryPointDetectService;
 import com.example.ossdoc.domain.publicapi.service.PublicApiEntrySyncService;
+import com.example.ossdoc.domain.publicapi.support.EntryPointJsonCodec;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -31,7 +32,10 @@ import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.*;
-import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class ClusterBuildServiceTest {
@@ -44,7 +48,8 @@ class ClusterBuildServiceTest {
     @Mock private RankingService rankingService;
     @Mock private ClusterArtifactPublisher clusterArtifactPublisher;
     @Mock private PublicApiEntrySyncService publicApiEntrySyncService;
-    @Mock private EntryPointDetectService entryPointDetectService;
+    @Mock private ArtifactRepository artifactRepository;
+    @Mock private EntryPointJsonCodec entryPointJsonCodec;
     @Mock private ClusterSignalProperties clusterSignalProperties;
 
     // 클래스 필드 mock으로 두면 @BeforeEach stub이 각 테스트에서 재사용됨
@@ -138,7 +143,7 @@ class ClusterBuildServiceTest {
     }
 
     @Test
-    @DisplayName("HIGH·MED candidate만 entrySymbolIds로 GraphProjectionService에 전달되고 LOW는 제외된다")
+    @DisplayName("ENTRY_POINTS_JSON에서 HIGH·MED만 GraphProjectionService에 전달되고 LOW는 제외된다")
     @SuppressWarnings("unchecked")
     void build_apiFlowEnabled_passesFilteredEntryPointsToProjection() {
         // given
@@ -155,12 +160,13 @@ class ClusterBuildServiceTest {
         when(repoRunRepository.findById("run-1")).thenReturn(Optional.of(run));
         when(publicApiEntrySyncService.ensureTypeEntries(run)).thenReturn(Set.of("H1"));
 
-        // HIGH → 포함, MED → 포함, LOW → 제외
-        when(entryPointDetectService.detect("run-1")).thenReturn(List.of(
-                EntryPointCandidate.builder().symbolId("sym-high").confidence("HIGH").build(),
-                EntryPointCandidate.builder().symbolId("sym-med").confidence("MED").build(),
-                EntryPointCandidate.builder().symbolId("sym-low").confidence("LOW").build()
-        ));
+        // ENTRY_POINTS_JSON artifact 가 있고, codec이 HIGH·MED symbolId를 반환한다
+        Artifact entryPointsArtifact = mock(Artifact.class);
+        when(artifactRepository.findTopByRun_RunIdAndKindOrderByCreatedAtDesc(
+                "run-1", ArtifactKind.ENTRY_POINTS_JSON))
+                .thenReturn(Optional.of(entryPointsArtifact));
+        when(entryPointJsonCodec.readSymbolIds(any(), eq("MED")))
+                .thenReturn(Set.of("sym-high", "sym-med"));
 
         ProjectedGraph projectedGraph = mock(ProjectedGraph.class);
         when(projectedGraph.getNodes()).thenReturn(List.of(mock(ProjectedNode.class)));
@@ -195,5 +201,60 @@ class ClusterBuildServiceTest {
         Set<String> passedIds = entryIdsCaptor.getValue();
         assertThat(passedIds).containsExactlyInAnyOrder("sym-high", "sym-med");
         assertThat(passedIds).doesNotContain("sym-low");
+    }
+
+    @Test
+    @DisplayName("ENTRY_POINTS_JSON 부재 시 빈 set이 GraphProjectionService에 전달되어 5순위가 auto-disable된다")
+    @SuppressWarnings("unchecked")
+    void build_entryPointsJsonMissing_passesEmptySetToProjection() {
+        // given — ENTRYPOINT 단계 실패/스킵 시나리오: artifact 부재
+        ClusterBuildRequest request = mock(ClusterBuildRequest.class);
+        when(request.getRunId()).thenReturn("run-1");
+        when(request.getIterations()).thenReturn(10);
+        when(request.getMinClusterSize()).thenReturn(3);
+        when(request.getTopK()).thenReturn(20);
+
+        RepoRun run = mock(RepoRun.class);
+        when(run.getRunId()).thenReturn("run-1");
+        when(repoRunRepository.findById("run-1")).thenReturn(Optional.of(run));
+        when(publicApiEntrySyncService.ensureTypeEntries(run)).thenReturn(Set.of("H1"));
+
+        // ENTRY_POINTS_JSON 부재 → fallback 경로
+        when(artifactRepository.findTopByRun_RunIdAndKindOrderByCreatedAtDesc(
+                "run-1", ArtifactKind.ENTRY_POINTS_JSON))
+                .thenReturn(Optional.empty());
+
+        ProjectedGraph projectedGraph = mock(ProjectedGraph.class);
+        when(projectedGraph.getNodes()).thenReturn(List.of(mock(ProjectedNode.class)));
+        when(graphProjectionService.loadProjectedGraph(eq("run-1"), any())).thenReturn(projectedGraph);
+
+        CommunityResult communityResult = new CommunityResult(new int[]{0});
+        when(resolutionProbeService.findBest(projectedGraph, 3, 10))
+                .thenReturn(new ResolutionProbeService.ProbeResult(0.012, communityResult, 0.71, 1));
+
+        List<Subsystem> subsystems = List.of(
+                Subsystem.builder().subsystemId("ss_001").name("core").score(0.0)
+                        .memberSymbolIds(List.of("H1")).entrySymbolIds(List.of("H1"))
+                        .coreSymbolIds(List.of()).packageRoots(List.of()).build()
+        );
+        when(subsystemAssembler.assemble(any(), any(), anyInt())).thenReturn(subsystems);
+        when(subsystemRefinerService.refine(any(), any(), anyString()))
+                .thenReturn(new SubsystemRefinerService.RefineOutcome(subsystems, Map.of()));
+        when(rankingService.rank(any(), any(), anyInt()))
+                .thenReturn(new RankingService.RankingResult(List.of(), List.of(), subsystems));
+
+        Artifact ra = mock(Artifact.class); when(ra.getArtifactId()).thenReturn(1L);
+        Artifact sa = mock(Artifact.class); when(sa.getArtifactId()).thenReturn(2L);
+        when(clusterArtifactPublisher.publishSubsystems(any(), any())).thenReturn(sa);
+        when(clusterArtifactPublisher.publishRankings(any(), any())).thenReturn(ra);
+
+        // when
+        clusterBuildService.build(request);
+
+        // then — 빈 set이 전달되고, codec.readSymbolIds는 호출되지 않는다 (Optional.empty().map() 단락)
+        ArgumentCaptor<Set<String>> entryIdsCaptor = ArgumentCaptor.forClass(Set.class);
+        verify(graphProjectionService).loadProjectedGraph(eq("run-1"), entryIdsCaptor.capture());
+        assertThat(entryIdsCaptor.getValue()).isEmpty();
+        verify(entryPointJsonCodec, never()).readSymbolIds(any(), anyString());
     }
 }
