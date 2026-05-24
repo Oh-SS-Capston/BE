@@ -4,6 +4,8 @@ import com.example.ossdoc.domain.run.enums.RunStatus;
 import lombok.Builder;
 import lombok.Getter;
 
+import java.time.LocalDateTime;
+
 @Getter
 @Builder
 public class RepoRunCreateResponse {
@@ -49,4 +51,10 @@ public class RepoRunCreateResponse {
      * - 전역 캐시 공유 hit면 원본 runId를 담고, 반환 runId는 복제된 공유 run이 됩니다.
      */
     private String sourceRunId;
+
+    /**
+     * FE에서 "최근 분석 n시간 전" 표시를 계산할 때 사용하는 시각 정보입니다.
+     */
+    private LocalDateTime createdAt;
+    private LocalDateTime updatedAt;
 }
