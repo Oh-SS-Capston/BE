@@ -14,7 +14,7 @@ import java.util.*;
  *
  * <p>동작 요약:
  * <ol>
- *   <li>{@code ProjectedNode.publicApi == true} 인 노드를 진입점으로 설정 (DB 재조회 없음)</li>
+ *   <li>{@code ProjectedNode.entryPoint == true} 인 노드를 진입점으로 설정 (DB 재조회 없음)</li>
  *   <li>코드 엣지(synthetic edge 제외)를 기반으로 BFS (깊이 cap = {@code maxBfsDepth})</li>
  *   <li>같은 진입점 flow set 에 속하는 노드 쌍에 가상 엣지: 가중치 = baseWeight / (depth_i + depth_j)</li>
  *   <li>다중 진입점에서 중복되는 쌍은 최대 가중치(최소 깊이) 하나만 보존 — 가중치 누적 방지</li>
@@ -55,10 +55,10 @@ public class PublicApiFlowSignalProvider implements SemanticSignalProvider {
         int maxBfsDepth = config.getMaxBfsDepth();
         int n = nodes.size();
 
-        // 1. publicApi == true 인 노드를 진입점으로 수집 (nodes 는 symbolId 정렬 보장 → 인덱스도 결정적)
+        // 1. entryPoint == true 인 노드를 진입점으로 수집 (nodes 는 symbolId 정렬 보장 → 인덱스도 결정적)
         List<Integer> entryIndices = new ArrayList<>();
         for (ProjectedNode node : nodes) {
-            if (node.isPublicApi()) {
+            if (node.isEntryPoint()) {
                 Integer idx = nodeIndexMap.get(node.getSymbolId());
                 if (idx != null) {
                     entryIndices.add(idx);

@@ -66,7 +66,7 @@ public class SubsystemAssembler {
                 .toList();
 
         List<String> entrySymbols = members.stream()
-                .filter(ProjectedNode::isPublicApi)
+                .filter(ProjectedNode::isEntryPoint)
                 .map(ProjectedNode::getSymbolId)
                 .filter(symbolId -> symbolId != null && !symbolId.isBlank())
                 .toList();

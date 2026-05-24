@@ -603,6 +603,17 @@ public class EntryPointDetectService {
         return colon >= 0 ? name.substring(colon + 1) : name;
     }
 
+    /** 강도 비교용 등급. HIGH > MED > LOW. 알 수 없는 값은 0. 대소문자·공백 무시. */
+    public static int confidenceRank(String confidence) {
+        if (confidence == null) return 0;
+        return switch (confidence.trim().toUpperCase(Locale.ROOT)) {
+            case "HIGH" -> 3;
+            case "MED"  -> 2;
+            case "LOW"  -> 1;
+            default     -> 0;
+        };
+    }
+
     private int confidenceOrder(String confidence) {
         return switch (confidence) {
             case "HIGH" -> 0;

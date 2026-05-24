@@ -48,7 +48,7 @@ public class SymbolScoringService {
                     bridgeMap.getOrDefault(node.getSymbolId(), 0.0),
                     maxBridge
             );
-            double api = node.isPublicApi() ? 1.0 : 0.0;
+            double api = node.isEntryPoint() ? 1.0 : 0.0;
             double evidence = scoreNormalizer.normalize(node.getEvidenceCount(), maxEvidence);
             // subsystem 내부 엣지 가중치 합을 정규화한 값: subsystem 안에서의 집중도를 측정한다.
             // bridge(서브시스템 간 연결)와 상보적 지표로, structural 중복을 제거한다.

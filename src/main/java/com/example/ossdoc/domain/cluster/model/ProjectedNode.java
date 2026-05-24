@@ -18,7 +18,7 @@ public class ProjectedNode {
     private String simpleName;
     private String packageName; // subsystem 라벨링 단위
     private String moduleId; // 동일 모듈 묶음 계산 시 사용
-    private boolean publicApi; // entry symbol 가중치 판단
+    private boolean entryPoint;  // 정제된 공개 API 진입점 — EntryPointDetectService 기반.
 
     // rankings.json 보강용 메타데이터
     private String symbolKind;

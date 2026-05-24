@@ -25,7 +25,7 @@ class SubsystemAssemblerTest {
                 .simpleName("AuthController")
                 .packageName("com.example.auth")
                 .moduleId(null)
-                .publicApi(true)
+                .entryPoint(true)
                 .build();
 
         ProjectedNode n2 = ProjectedNode.builder()
@@ -34,7 +34,6 @@ class SubsystemAssemblerTest {
                 .simpleName("AuthService")
                 .packageName("com.example.auth")
                 .moduleId(null)
-                .publicApi(false)
                 .build();
 
         ProjectedNode n3 = ProjectedNode.builder()
@@ -43,7 +42,7 @@ class SubsystemAssemblerTest {
                 .simpleName("PaymentClient")
                 .packageName("com.example.payment")
                 .moduleId(null)
-                .publicApi(true)
+                .entryPoint(true)
                 .build();
 
         ProjectedNode n4 = ProjectedNode.builder()
@@ -52,7 +51,6 @@ class SubsystemAssemblerTest {
                 .simpleName("MailSender")
                 .packageName("com.example.notification")
                 .moduleId(null)
-                .publicApi(false)
                 .build();
 
         ProjectedGraph graph = ProjectedGraph.builder()

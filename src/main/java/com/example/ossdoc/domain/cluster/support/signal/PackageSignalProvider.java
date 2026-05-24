@@ -136,7 +136,7 @@ public class PackageSignalProvider implements SemanticSignalProvider {
     /**
      * star 토폴로지의 허브를 cascade 우선순위로 결정한다.
      * <ol>
-     *   <li>publicApi == true (공식 진입점)</li>
+     *   <li>entryPoint == true (정제된 공개 API 진입점)</li>
      *   <li>evidenceCount 최대 (가장 많이 참조되는 노드)</li>
      *   <li>simpleName 토큰이 패키지 마지막 토큰과 자카드 ≥ 0.5</li>
      *   <li>symbolId 정렬상 첫 번째 (결정적 fallback)</li>
@@ -144,9 +144,9 @@ public class PackageSignalProvider implements SemanticSignalProvider {
      * 단계별 fallback 이라 항상 정확히 1개가 선택되며, 같은 입력 → 같은 허브가 보장된다.
      */
     private ProjectedNode selectHub(List<ProjectedNode> members, String packageName) {
-        // 1순위: 공식 진입점
+        // 1순위: 정제된 공개 API 진입점
         List<ProjectedNode> candidates = members.stream()
-                .filter(ProjectedNode::isPublicApi)
+                .filter(ProjectedNode::isEntryPoint)
                 .toList();
         if (candidates.isEmpty()) {
             candidates = members;

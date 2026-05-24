@@ -27,7 +27,6 @@ class LeidenCommunityServiceTest {
                         .simpleName("AuthController")
                         .packageName("com.example.auth")
                         .moduleId("mod-auth")
-                        .publicApi(true)
                         .build(),
                 ProjectedNode.builder()
                         .symbolId("A2")
@@ -35,7 +34,6 @@ class LeidenCommunityServiceTest {
                         .simpleName("AuthService")
                         .packageName("com.example.auth")
                         .moduleId("mod-auth")
-                        .publicApi(false)
                         .build(),
                 ProjectedNode.builder()
                         .symbolId("A3")
@@ -43,7 +41,6 @@ class LeidenCommunityServiceTest {
                         .simpleName("JwtProvider")
                         .packageName("com.example.auth")
                         .moduleId("mod-auth")
-                        .publicApi(false)
                         .build(),
 
                 ProjectedNode.builder()
@@ -52,7 +49,6 @@ class LeidenCommunityServiceTest {
                         .simpleName("UserController")
                         .packageName("com.example.user")
                         .moduleId("mod-user")
-                        .publicApi(true)
                         .build(),
                 ProjectedNode.builder()
                         .symbolId("B2")
@@ -60,7 +56,6 @@ class LeidenCommunityServiceTest {
                         .simpleName("UserService")
                         .packageName("com.example.user")
                         .moduleId("mod-user")
-                        .publicApi(false)
                         .build(),
                 ProjectedNode.builder()
                         .symbolId("B3")
@@ -68,7 +63,6 @@ class LeidenCommunityServiceTest {
                         .simpleName("UserRepository")
                         .packageName("com.example.user")
                         .moduleId("mod-user")
-                        .publicApi(false)
                         .build()
         );
 

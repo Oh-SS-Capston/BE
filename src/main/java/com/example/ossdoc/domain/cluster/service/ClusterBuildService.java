@@ -3,6 +3,7 @@ package com.example.ossdoc.domain.cluster.service;
 import com.example.ossdoc.domain.artifact.entity.Artifact;
 import com.example.ossdoc.domain.cluster.artifact.output.RankingsJson;
 import com.example.ossdoc.domain.cluster.artifact.output.SubsystemsJson;
+import com.example.ossdoc.domain.cluster.config.ClusterSignalProperties;
 import com.example.ossdoc.domain.cluster.dto.request.ClusterBuildRequest;
 import com.example.ossdoc.domain.cluster.dto.response.ClusterBuildResponse;
 import com.example.ossdoc.domain.cluster.exception.ClusterException;
@@ -11,6 +12,8 @@ import com.example.ossdoc.domain.cluster.model.CommunityResult;
 import com.example.ossdoc.domain.cluster.model.ProjectedGraph;
 import com.example.ossdoc.domain.cluster.model.subsystem.Subsystem;
 import com.example.ossdoc.domain.cluster.support.SubsystemAssembler;
+import com.example.ossdoc.domain.publicapi.model.EntryPointCandidate;
+import com.example.ossdoc.domain.publicapi.service.EntryPointDetectService;
 import com.example.ossdoc.domain.publicapi.service.PublicApiEntrySyncService;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
@@ -22,6 +25,8 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -37,6 +42,8 @@ public class ClusterBuildService {
     private final RankingService rankingService;
     private final ClusterArtifactPublisher clusterArtifactPublisher;
     private final PublicApiEntrySyncService publicApiEntrySyncService;
+    private final EntryPointDetectService entryPointDetectService;
+    private final ClusterSignalProperties clusterSignalProperties;
 
     /**
      * run 기준 public_api_entry를 보장한 뒤 군집화/랭킹 산출물을 생성한다.
@@ -49,9 +56,11 @@ public class ClusterBuildService {
             throw new ClusterException(ClusterErrorCode.CLUSTER_PUBLIC_API_EMPTY);
         }
 
+        Set<String> refinedEntryIds = resolveRefinedEntryPoints(request.getRunId());
+
         ProjectedGraph projectedGraph;
         try {
-            projectedGraph = graphProjectionService.loadProjectedGraph(request.getRunId());
+            projectedGraph = graphProjectionService.loadProjectedGraph(request.getRunId(), refinedEntryIds);
         } catch (ClusterException e) {
             throw e;
         } catch (Exception e) {
@@ -198,6 +207,28 @@ public class ClusterBuildService {
             throw e;
         } catch (Exception e) {
             throw new ClusterException(ClusterErrorCode.CLUSTER_ARTIFACT_SAVE_FAILED);
+        }
+    }
+
+    /**
+     * 탐지 실패 시 빈 set을 반환해 5순위 provider가 auto-disable되도록 한다.
+     */
+    private Set<String> resolveRefinedEntryPoints(String runId) {
+        ClusterSignalProperties.ApiFlowSignal apiFlow =
+                clusterSignalProperties.getSignals().getApiFlow();
+
+        try {
+            int minRank = EntryPointDetectService.confidenceRank(apiFlow.getMinConfidence());
+            Set<String> ids = entryPointDetectService.detect(runId).stream()
+                    .filter(c -> EntryPointDetectService.confidenceRank(c.getConfidence()) >= minRank)
+                    .map(EntryPointCandidate::getSymbolId)
+                    .collect(Collectors.toSet());
+            log.info("[CLUSTER] refined entry points resolved. runId={}, count={}", runId, ids.size());
+            return ids;
+        } catch (Exception e) {
+            log.warn("[CLUSTER] refined entry point resolution failed. api-flow signal will auto-disable. runId={}",
+                    runId, e);
+            return Set.of();
         }
     }
 }

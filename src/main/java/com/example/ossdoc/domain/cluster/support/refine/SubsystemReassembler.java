@@ -51,7 +51,7 @@ public class SubsystemReassembler {
             List<String> entrySymbols = sortedMembers.stream()
                     .filter(id -> {
                         ProjectedNode node = nodeById.get(id);
-                        return node != null && node.isPublicApi();
+                        return node != null && node.isEntryPoint();
                     })
                     .toList();
 

@@ -13,8 +13,6 @@ import com.example.ossdoc.domain.graphstore.enums.SymbolKind;
 import com.example.ossdoc.domain.graphstore.repository.EdgeRepository;
 import com.example.ossdoc.domain.graphstore.repository.SymbolEvidenceRepository;
 import com.example.ossdoc.domain.graphstore.repository.SymbolRepository;
-import com.example.ossdoc.domain.publicapi.entity.PublicApiEntry;
-import com.example.ossdoc.domain.publicapi.repository.PublicApiEntryRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -33,7 +31,6 @@ public class GraphProjectionService {
     private final SymbolRepository symbolRepository;
     private final EdgeRepository edgeRepository;
     private final SymbolEvidenceRepository symbolEvidenceRepository;
-    private final PublicApiEntryRepository publicApiEntryRepository;
     private final EdgeWeightPolicy edgeWeightPolicy;
     private final SemanticSignalAugmenter semanticSignalAugmenter;
 
@@ -54,8 +51,11 @@ public class GraphProjectionService {
 
     /**
      * graphstore와 public_api_entry를 합쳐 군집화용 투영 그래프를 구성한다.
+     *
+     * @param refinedEntrySymbolIds EntryPointDetectService 기반 정제 진입점 symbolId 집합.
+     *                              빈 set이면 모든 노드의 entryPoint = false.
      */
-    public ProjectedGraph loadProjectedGraph(String runId) {
+    public ProjectedGraph loadProjectedGraph(String runId, Set<String> refinedEntrySymbolIds) {
         List<SymbolEntity> typeSymbols;
         try {
             // 노드 인덱스를 매 실행 동일하게 만들기 위해 심볼 ID 기준 정렬 조회를 사용한다.
@@ -82,16 +82,6 @@ public class GraphProjectionService {
             throw new ClusterException(ClusterErrorCode.CLUSTER_GRAPH_EMPTY);
         }
 
-        Set<String> publicApiSymbolIds;
-        try {
-            publicApiSymbolIds = publicApiEntryRepository.findAllByRun_RunId(runId).stream()
-                    .map(PublicApiEntry::getSymbol)
-                    .map(SymbolEntity::getSymbolId)
-                    .collect(Collectors.toSet());
-        } catch (Exception e) {
-            throw new ClusterException(ClusterErrorCode.CLUSTER_PROJECTION_FAILED);
-        }
-
         Map<String, Integer> evidenceCountBySymbolId;
         try {
             evidenceCountBySymbolId = symbolEvidenceRepository.countBySymbolIdForRun(runId).stream()
@@ -116,7 +106,7 @@ public class GraphProjectionService {
                     .simpleName(symbol.getSimpleName())
                     .packageName(packageName)
                     .moduleId(symbol.getModule() == null ? null : symbol.getModule().getModuleId())
-                    .publicApi(publicApiSymbolIds.contains(symbol.getSymbolId()))
+                    .entryPoint(refinedEntrySymbolIds.contains(symbol.getSymbolId()))
                     // rankings.json에서 "설명 가능한 위치"를 만들기 위한 메타데이터를 함께 투영한다.
                     .symbolKind(symbol.getSymbolKind() == null ? null : symbol.getSymbolKind().name())
                     .ownerSymbol(symbol.getOwner() == null ? null : symbol.getOwner().getQualifiedName())

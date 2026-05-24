@@ -136,6 +136,8 @@ public class ClusterSignalProperties {
         private double baseWeight = 0.10;
         /** BFS 깊이 상한. 이 깊이를 초과하는 노드는 flow set 에서 제외한다. */
         private int maxBfsDepth = 4;
+        /** 진입점 seed 최소 confidence. 이 등급 미만은 seed에서 제외된다. HIGH|MED|LOW */
+        private String minConfidence = "MED";
     }
 
     /**
