@@ -30,13 +30,12 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * CACHE_WAIT 상태 run을 주기적으로 해소하는 서비스입니다.
+ * CACHE_WAIT ?곹깭 run??二쇨린?곸쑝濡??댁냼?섎뒗 ?쒕퉬?ㅼ엯?덈떎.
  *
- * 해소 정책:
- * 1) READY 캐시가 생기면 source 결과를 waiting run으로 복제 후 성공 처리
- * 2) source buildMode가 FULL이 아니면 즉시 조기 탈출(독립 분석 1회)
- * 3) source가 FULL 이후 실패/미발행이면 완화 모드로 독립 분석 1회
- */
+ * ?댁냼 ?뺤콉:
+ * 1) READY 罹먯떆媛 ?앷린硫?source 寃곌낵瑜?waiting run?쇰줈 蹂듭젣 ???깃났 泥섎━
+ * 2) source buildMode媛 FULL???꾨땲硫?利됱떆 議곌린 ?덉텧(?낅┰ 遺꾩꽍 1??
+ * 3) source媛 FULL ?댄썑 ?ㅽ뙣/誘몃컻?됱씠硫??꾪솕 紐⑤뱶濡??낅┰ 遺꾩꽍 1?? */
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -124,7 +123,7 @@ public class RunCacheWaitResolveService {
         if (activeSourceJob != null) {
             BuildMode sourceBuildMode = resolveBuildMode(activeSourceJob.getRun().getRunId());
             if (sourceBuildMode != null && sourceBuildMode != BuildMode.FULL) {
-                scheduleIndependentAnalysis(waitingJob, "원본 buildMode가 " + sourceBuildMode + "라 즉시 독립 분석으로 전환합니다.");
+                scheduleIndependentAnalysis(waitingJob, "?먮낯 buildMode媛 " + sourceBuildMode + "??利됱떆 ?낅┰ 遺꾩꽍?쇰줈 ?꾪솚?⑸땲??");
             }
             return;
         }
@@ -143,26 +142,26 @@ public class RunCacheWaitResolveService {
                 .orElse(null);
 
         if (latestFinishedSource == null) {
-            scheduleIndependentAnalysis(waitingJob, "원본 분석 상태를 찾을 수 없어 독립 분석으로 전환합니다.");
+            scheduleIndependentAnalysis(waitingJob, "?먮낯 遺꾩꽍 ?곹깭瑜?李얠쓣 ???놁뼱 ?낅┰ 遺꾩꽍?쇰줈 ?꾪솚?⑸땲??");
             return;
         }
 
         BuildMode latestBuildMode = resolveBuildMode(latestFinishedSource.getRun().getRunId());
         if (latestBuildMode == BuildMode.FULL) {
-            scheduleIndependentAnalysis(waitingJob, "원본 FULL 분석이 READY 미발행/실패하여 완화 모드 1회 재분석을 수행합니다.");
+            scheduleIndependentAnalysis(waitingJob, "?먮낯 FULL 遺꾩꽍??READY 誘몃컻???ㅽ뙣?섏뿬 ?꾪솕 紐⑤뱶 1???щ텇?앹쓣 ?섑뻾?⑸땲??");
             return;
         }
 
         scheduleIndependentAnalysis(
                 waitingJob,
-                "원본 buildMode가 " + (latestBuildMode == null ? "UNKNOWN" : latestBuildMode) + "라 독립 분석으로 전환합니다."
+                "?먮낯 buildMode媛 " + (latestBuildMode == null ? "UNKNOWN" : latestBuildMode) + "???낅┰ 遺꾩꽍?쇰줈 ?꾪솚?⑸땲??"
         );
     }
 
     /**
-     * READY 캐시를 waiting run으로 이관합니다.
-     * - job/run은 SUCCESS로 종료
-     * - 단계 스냅샷/산출물은 source 기준으로 복제
+     * READY 罹먯떆瑜?waiting run?쇰줈 ?닿??⑸땲??
+     * - job/run? SUCCESS濡?醫낅즺
+     * - ?④퀎 ?ㅻ깄???곗텧臾쇱? source 湲곗??쇰줈 蹂듭젣
      */
     private void applyReadyCache(RunPipelineJob waitingJob, RepoRun waitingRun, RepoRun sourceRun) {
         waitingJob.markSuccess();
@@ -177,7 +176,7 @@ public class RunCacheWaitResolveService {
     }
 
     /**
-     * 캐시 대기 run을 독립 분석 큐로 1회 재진입시킵니다.
+     * 罹먯떆 ?湲?run???낅┰ 遺꾩꽍 ?먮줈 1???ъ쭊?낆떆?듬땲??
      */
     private void scheduleIndependentAnalysis(RunPipelineJob waitingJob, String reason) {
         waitingJob.scheduleRetryFromCacheWait(reason);
@@ -193,7 +192,7 @@ public class RunCacheWaitResolveService {
     }
 
     private RunPipelineStepExecution findOrCreateQueuedStep(RunPipelineJob job) {
-        return runPipelineStepExecutionRepository.findByJobAndStage(job, RunStage.QUEUED)
+        return runPipelineStepExecutionRepository.findStepByJobAndStage(job, RunStage.QUEUED)
                 .orElseGet(() -> runPipelineStepExecutionRepository.save(
                         RunPipelineStepExecution.create(job, job.getRun(), RunStage.QUEUED)
                 ));
@@ -203,16 +202,16 @@ public class RunCacheWaitResolveService {
         if (run.getStatus() != RunStatus.SUCCESS) {
             return false;
         }
-        return runPipelineJobRepository.findByRun_RunId(run.getRunId())
+        return runPipelineJobRepository.findJobByRunId(run.getRunId())
                 .map(job -> job.getStatus() == PipelineJobStatus.SUCCESS)
                 .orElse(false);
     }
 
     private void copyStepExecutionSnapshots(String sourceRunId, RepoRun targetRun, RunPipelineJob targetJob) {
         List<RunPipelineStepExecution> sourceSteps =
-                runPipelineStepExecutionRepository.findAllByRun_RunIdOrderByStepIdAsc(sourceRunId);
+                runPipelineStepExecutionRepository.findStepsByRunId(sourceRunId);
         List<RunPipelineStepExecution> targetSteps =
-                runPipelineStepExecutionRepository.findAllByRun_RunIdOrderByStepIdAsc(targetRun.getRunId());
+                runPipelineStepExecutionRepository.findStepsByRunId(targetRun.getRunId());
 
         Map<RunStage, RunPipelineStepExecution> targetByStage = new EnumMap<>(RunStage.class);
         for (RunPipelineStepExecution step : targetSteps) {
@@ -241,7 +240,7 @@ public class RunCacheWaitResolveService {
         } else if (sourceStatus == PipelineStepStatus.RUNNING) {
             targetStep.succeed(sourceStep.getMessage());
         } else {
-            targetStep.skip("캐시 재사용으로 큐 대기 단계를 생략했습니다.");
+            targetStep.skip("罹먯떆 ?ъ궗?⑹쑝濡????湲??④퀎瑜??앸왂?덉뒿?덈떎.");
         }
     }
 
@@ -292,3 +291,4 @@ public class RunCacheWaitResolveService {
         }
     }
 }
+

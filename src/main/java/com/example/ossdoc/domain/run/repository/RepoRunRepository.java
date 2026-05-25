@@ -1,21 +1,46 @@
 package com.example.ossdoc.domain.run.repository;
 
 import com.example.ossdoc.domain.run.entity.RepoRun;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 
 import java.util.List;
 import java.util.Optional;
 
 public interface RepoRunRepository extends JpaRepository<RepoRun, String> {
 
-    /*
-     * 진행률 조회 시 현재 로그인 사용자가 소유한 run인지 검증합니다.
+    /**
+     * 요청 사용자가 소유한 run인지 확인합니다.
      */
-    Optional<RepoRun> findByRunIdAndOwner_Id(String runId, Long ownerId);
+    @Query("""
+            SELECT r
+            FROM RepoRun r
+            WHERE r.runId = :runId
+              AND r.owner.id = :ownerId
+            """)
+    Optional<RepoRun> findOwnedRun(
+            @Param("runId") String runId,
+            @Param("ownerId") Long ownerId
+    );
 
-    /*
-     * Recent Explorations용 사용자별 최근 분석 기록입니다.
-     * 브라우저 localStorage가 아니라 repo_run.owner_id 기준으로 조회합니다.
+    /**
+     * 사용자 최근 분석 기록 10개를 최신순으로 조회합니다.
      */
-    List<RepoRun> findTop10ByOwner_IdOrderByCreatedAtDesc(Long ownerId);
+    @Query("""
+            SELECT r
+            FROM RepoRun r
+            WHERE r.owner.id = :ownerId
+            ORDER BY r.createdAt DESC
+            """)
+    List<RepoRun> findRecentRunsByOwner(
+            @Param("ownerId") Long ownerId,
+            Pageable pageable
+    );
+
+    default List<RepoRun> findRecentRunsByOwner(Long ownerId) {
+        return findRecentRunsByOwner(ownerId, PageRequest.of(0, 10));
+    }
 }

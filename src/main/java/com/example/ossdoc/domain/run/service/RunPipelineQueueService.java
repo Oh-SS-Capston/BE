@@ -13,8 +13,7 @@ import java.time.LocalDateTime;
 import java.util.Optional;
 
 /*
- * 파이프라인 Job 큐 관리 서비스
- */
+ * ?뚯씠?꾨씪??Job ??愿由??쒕퉬?? */
 @Service
 @RequiredArgsConstructor
 public class RunPipelineQueueService {
@@ -25,7 +24,7 @@ public class RunPipelineQueueService {
 
     @Transactional
     public RunPipelineJob enqueue(RepoRun run, Long userId) {
-        if (jobRepository.existsByRun_RunId(run.getRunId())) {
+        if (jobRepository.existsByRunId(run.getRunId())) {
             throw new RunException(RunErrorCode.PIPELINE_ALREADY_EXISTS);
         }
 

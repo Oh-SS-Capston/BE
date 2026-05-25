@@ -22,7 +22,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.List;
 
 /*
- * 프론트 polling용 진행 상태 조회 서비스입니다.
+ * ?꾨줎??polling??吏꾪뻾 ?곹깭 議고쉶 ?쒕퉬?ㅼ엯?덈떎.
  */
 @Service
 @RequiredArgsConstructor
@@ -35,13 +35,13 @@ public class RunProgressQueryService {
 
     @Transactional(readOnly = true)
     public RepoRunProgressResponse getProgress(String runId, Long userId) {
-        RepoRun run = repoRunRepository.findByRunIdAndOwner_Id(runId, userId)
+        RepoRun run = repoRunRepository.findOwnedRun(runId, userId)
                 .orElseThrow(() -> new RunException(RunErrorCode.RUN_FORBIDDEN));
 
-        RunPipelineJob job = jobRepository.findByRun_RunId(runId)
+        RunPipelineJob job = jobRepository.findJobByRunId(runId)
                 .orElseThrow(() -> new RunException(RunErrorCode.PIPELINE_JOB_NOT_FOUND));
 
-        var stepEntities = stepRepository.findAllByRun_RunIdOrderByStepIdAsc(runId);
+        var stepEntities = stepRepository.findStepsByRunId(runId);
 
         List<RunStepProgressResponse> steps = stepEntities.stream()
                 .map(RunStepProgressResponse::from)
@@ -104,3 +104,4 @@ public class RunProgressQueryService {
                 .orElse(null);
     }
 }
+

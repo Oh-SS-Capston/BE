@@ -20,14 +20,12 @@ import java.time.LocalDateTime;
 import java.util.Optional;
 
 /**
- * W05: Redis -> DB 순으로 READY 캐시를 조회하는 서비스입니다.
+ * W05: Redis -> DB ?쒖쑝濡?READY 罹먯떆瑜?議고쉶?섎뒗 ?쒕퉬?ㅼ엯?덈떎.
  *
- * 조회 정책:
- * 1) Redis READY 키를 먼저 조회
- * 2) Redis hit여도 DB READY 레코드로 최소 무결성 검증
- * 3) 불일치면 Redis 정리 후 DB 재조회
- * 4) DB에서 READY를 찾으면 Redis를 재동기화하고 hit 처리
- * 5) 끝까지 없으면 miss 반환
+ * 議고쉶 ?뺤콉:
+ * 1) Redis READY ?ㅻ? 癒쇱? 議고쉶
+ * 2) Redis hit?щ룄 DB READY ?덉퐫?쒕줈 理쒖냼 臾닿껐??寃利? * 3) 遺덉씪移섎㈃ Redis ?뺣━ ??DB ?ъ“?? * 4) DB?먯꽌 READY瑜?李얠쑝硫?Redis瑜??щ룞湲고솕?섍퀬 hit 泥섎━
+ * 5) ?앷퉴吏 ?놁쑝硫?miss 諛섑솚
  */
 @Slf4j
 @Service
@@ -45,13 +43,13 @@ public class AnalysisCacheLookupService {
 
         Optional<String> redisPayload = redisStore.get(readyKey);
         if (redisPayload.isPresent()) {
-            Optional<AnalysisCache> byKeyReady = analysisCacheRepository.findByCacheKeyAndStatus(
+            Optional<AnalysisCache> byKeyReady = analysisCacheRepository.findByKeyAndStatus(
                     cacheKey,
                     AnalysisCacheStatus.READY
             );
             if (byKeyReady.isPresent() && isUsableReady(byKeyReady.get())) {
                 AnalysisCache cache = byKeyReady.get();
-                // Redis payload와 DB 레코드가 다르면 즉시 재동기화해 다음 조회부터 안정화합니다.
+                // Redis payload? DB ?덉퐫?쒓? ?ㅻⅤ硫?利됱떆 ?щ룞湲고솕???ㅼ쓬 議고쉶遺???덉젙?뷀빀?덈떎.
                 if (!matchesPayload(redisPayload.get(), cache)) {
                     syncRedisReady(cache);
                 }
@@ -63,13 +61,13 @@ public class AnalysisCacheLookupService {
                 );
             }
 
-            // Redis는 hit인데 DB READY가 없으면 stale 키이므로 정리하고 DB 재조회로 폴백합니다.
+            // Redis??hit?몃뜲 DB READY媛 ?놁쑝硫?stale ?ㅼ씠誘濡??뺣━?섍퀬 DB ?ъ“?뚮줈 ?대갚?⑸땲??
             redisStore.delete(readyKey);
             log.info("[CACHE] stale redis ready key removed. key={}", abbreviate(cacheKey));
         }
 
         Optional<AnalysisCache> dbReady = analysisCacheRepository
-                .findTopByRepoUrlNormAndCommitShaAndStatusOrderByUpdatedAtDesc(
+                .findLatestByRepoAndCommitAndStatus(
                         repoUrlNorm,
                         commitSha,
                         AnalysisCacheStatus.READY
@@ -95,12 +93,12 @@ public class AnalysisCacheLookupService {
     }
 
     /**
-     * W10: FAILED 캐시 쿨다운 상태를 조회합니다.
+     * W10: FAILED 罹먯떆 荑⑤떎???곹깭瑜?議고쉶?⑸땲??
      *
-     * 조회 정책:
-     * 1) 동일 cacheKey FAILED 우선 확인
-     * 2) 없으면 동일 repo+sha 기준 최신 FAILED 확인
-     * 3) expiresAt(retryAfter) 이전이면 쿨다운 활성으로 판단
+     * 議고쉶 ?뺤콉:
+     * 1) ?숈씪 cacheKey FAILED ?곗꽑 ?뺤씤
+     * 2) ?놁쑝硫??숈씪 repo+sha 湲곗? 理쒖떊 FAILED ?뺤씤
+     * 3) expiresAt(retryAfter) ?댁쟾?대㈃ 荑⑤떎???쒖꽦?쇰줈 ?먮떒
      */
     @Transactional(readOnly = true)
     public AnalysisCacheFailedCooldownResult lookupFailedCooldown(
@@ -110,7 +108,7 @@ public class AnalysisCacheLookupService {
     ) {
         LocalDateTime now = LocalDateTime.now();
 
-        Optional<AnalysisCache> failedByKey = analysisCacheRepository.findByCacheKeyAndStatus(
+        Optional<AnalysisCache> failedByKey = analysisCacheRepository.findByKeyAndStatus(
                 cacheKey,
                 AnalysisCacheStatus.FAILED
         );
@@ -125,7 +123,7 @@ public class AnalysisCacheLookupService {
         }
 
         Optional<AnalysisCache> failedByRepoSha = analysisCacheRepository
-                .findTopByRepoUrlNormAndCommitShaAndStatusOrderByUpdatedAtDesc(
+                .findLatestByRepoAndCommitAndStatus(
                         repoUrlNorm,
                         commitSha,
                         AnalysisCacheStatus.FAILED
@@ -153,8 +151,8 @@ public class AnalysisCacheLookupService {
     }
 
     /**
-     * FAILED 캐시가 아직 쿨다운 구간인지 판정합니다.
-     * expiresAt이 비어 있으면 쿨다운 정책을 적용하지 않습니다.
+     * FAILED 罹먯떆媛 ?꾩쭅 荑⑤떎??援ш컙?몄? ?먯젙?⑸땲??
+     * expiresAt??鍮꾩뼱 ?덉쑝硫?荑⑤떎???뺤콉???곸슜?섏? ?딆뒿?덈떎.
      */
     private boolean isCoolingDownFailed(AnalysisCache cache, LocalDateTime now) {
         if (cache.getStatus() != AnalysisCacheStatus.FAILED) {
@@ -167,8 +165,8 @@ public class AnalysisCacheLookupService {
     }
 
     /**
-     * Redis payload와 DB READY 핵심 식별값(cacheKey/sourceRunId)이 일치하는지 확인합니다.
-     * 파싱 실패 시 불일치로 간주하고 DB 기준으로 복구합니다.
+     * Redis payload? DB READY ?듭떖 ?앸퀎媛?cacheKey/sourceRunId)???쇱튂?섎뒗吏 ?뺤씤?⑸땲??
+     * ?뚯떛 ?ㅽ뙣 ??遺덉씪移섎줈 媛꾩＜?섍퀬 DB 湲곗??쇰줈 蹂듦뎄?⑸땲??
      */
     private boolean matchesPayload(String rawPayload, AnalysisCache cache) {
         try {
@@ -183,7 +181,7 @@ public class AnalysisCacheLookupService {
     }
 
     /**
-     * DB READY 레코드를 기준으로 Redis READY 키를 다시 기록합니다.
+     * DB READY ?덉퐫?쒕? 湲곗??쇰줈 Redis READY ?ㅻ? ?ㅼ떆 湲곕줉?⑸땲??
      */
     private void syncRedisReady(AnalysisCache cache) {
         try {
@@ -211,3 +209,4 @@ public class AnalysisCacheLookupService {
     }
 
 }
+
