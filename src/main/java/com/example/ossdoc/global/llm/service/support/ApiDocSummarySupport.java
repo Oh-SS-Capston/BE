@@ -123,33 +123,7 @@ public final class ApiDocSummarySupport {
     }
 
     private static String shortenForPreview(String text, int maxLength) {
-        String value = normalizeSentence(text);
-        if (value.length() <= maxLength) {
-            return value;
-        }
-
-        int sentenceBoundary = findSentenceBoundary(value, maxLength);
-        if (sentenceBoundary >= Math.max(1, maxLength / 2)) {
-            return value.substring(0, sentenceBoundary).trim() + "...";
-        }
-
-        int wordBoundary = value.lastIndexOf(' ', maxLength);
-        if (wordBoundary >= Math.max(1, maxLength / 2)) {
-            return value.substring(0, wordBoundary).trim() + "...";
-        }
-
-        return value.substring(0, maxLength).trim() + "...";
-    }
-
-    private static int findSentenceBoundary(String text, int limit) {
-        int scanLimit = Math.min(limit, text.length() - 1);
-        for (int i = scanLimit; i >= 0; i--) {
-            char current = text.charAt(i);
-            if (current == '.' || current == '!' || current == '?') {
-                return i + 1;
-            }
-        }
-        return -1;
+        return normalizeSentence(text);
     }
 
     public record SummaryView(

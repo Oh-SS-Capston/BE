@@ -1146,10 +1146,7 @@ public class LlmServiceBuildSupport {
             return "";
         }
         String value = text.trim();
-        if (value.length() <= maxLength) {
-            return value;
-        }
-        return value.substring(0, maxLength);
+        return value;
     }
 
     private String normalizeSentence(String text) {
