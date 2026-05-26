@@ -52,6 +52,8 @@ public class SecurityConfig {
 
                         .requestMatchers(HttpMethod.POST, "/api/v1/auth/refresh").permitAll()
 
+                        .requestMatchers(HttpMethod.POST, "/api/v1/payments/portone/webhook").permitAll()
+
                         .requestMatchers("/api/v1/auth/me/**").authenticated()
                         .requestMatchers("/api/v1/auth/nicknames/**").authenticated()
                         .requestMatchers("/api/v1/runs/**").authenticated()

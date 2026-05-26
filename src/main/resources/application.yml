@@ -141,6 +141,14 @@ github:
     cache-ttl-minutes: ${GITHUB_STATS_CACHE_TTL_MINUTES:360}
     api-timeout-seconds: ${GITHUB_STATS_API_TIMEOUT_SECONDS:30}
 
+portone:
+  env: ${PORTONE_ENV:test}
+  store-id: ${PORTONE_STORE_ID:}
+  channel-key: ${PORTONE_CHANNEL_KEY:}
+  api-secret: ${PORTONE_API_SECRET:}
+  webhook-secret: ${PORTONE_WEBHOOK_SECRET:}
+  api-base-url: ${PORTONE_API_BASE_URL:https://api.portone.io}
+
 logging:
   level:
     com:
