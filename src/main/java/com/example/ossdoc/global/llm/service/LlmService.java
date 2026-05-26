@@ -212,6 +212,7 @@ public class LlmService {
                 scenarioSpecs.path("scenarios")
         ));
         out.set("apiEntries", llmServiceBuildSupport.buildApiEntriesCompat(out.path("coreMethods")));
+        out.set("qualityGate", llmServiceBuildSupport.buildApiDocQualityGate(out.path("coreMethods")));
         out.put("fallbackApplied", false);
         out.put("deterministicSeedApplied", true);
         out.put("contractVersion", "guide-v1");

@@ -43,6 +43,7 @@ public class LlmServiceBuildSupport {
     private static final int MAX_EVIDENCE_LINKS = 3;
     private static final int MAX_API_ENTRY_OUTPUT = 14;
     private static final int MAX_METHOD_DESCRIPTION_PREVIEW = 140;
+    private static final int ACTIONABILITY_THRESHOLD = 70;
 
     private static final String MAIN_JAVA_MARKER = "/src/main/java/";
     private static final String MAIN_KOTLIN_MARKER = "/src/main/kotlin/";
@@ -661,31 +662,69 @@ public class LlmServiceBuildSupport {
             String fqn = seed.path("fqn").asText("");
             String methodName = seed.path("methodName").asText("");
             String classFqn = seed.path("classFqn").asText("");
+            String whenToUse = inferWhenToUse(methodName);
+            List<String> methodCautions = cautionByMethod.getOrDefault(fqn, List.of());
             ApiDocSummarySupport.SummaryView summary = ApiDocSummarySupport.fromMethodSeed(
                     seed,
                     classFqn,
                     methodName,
                     MAX_METHOD_DESCRIPTION_PREVIEW
             );
+            ApiDocGuideSupport.GuideView guide = ApiDocGuideSupport.buildGuide(
+                    classFqn,
+                    methodName,
+                    fqn,
+                    summary.summaryRaw(),
+                    whenToUse,
+                    methodCautions,
+                    seed.path("filePath").asText(""),
+                    seed.path("startLine").canConvertToInt() ? seed.path("startLine").asInt() : null,
+                    seed.path("endLine").canConvertToInt() ? seed.path("endLine").asInt() : null
+            );
 
             card.put("methodName", methodName);
             card.put("classFqn", classFqn);
             card.put("fqn", fqn);
-            card.put("summaryRaw", summary.summaryRaw());
-            card.put("summaryNarrative", summary.summaryNarrative());
-            card.put("summaryPreview", summary.summaryPreview());
-            card.put("summaryTruncated", summary.summaryTruncated());
-            card.put("whatItDoes", summary.summaryNarrative());
-            card.put("whatItDoesPreview", summary.summaryPreview());
-            card.put("whatItDoesFull", summary.summaryNarrative());
-            card.put("whatItDoesTruncated", summary.summaryTruncated());
-            card.put("whenToUse", inferWhenToUse(methodName));
+            card.put("summaryRaw", guide.summaryRaw());
+            card.put("summaryNarrative", guide.narrative());
+            card.put("summaryPreview", guide.narrative());
+            card.put("summaryTruncated", false);
+            card.put("whatItDoes", guide.narrative());
+            card.put("whatItDoesPreview", guide.narrative());
+            card.put("whatItDoesFull", guide.narrative());
+            card.put("whatItDoesTruncated", false);
+            card.put("guideNarrative", guide.narrative());
+            card.put("whenToUse", whenToUse);
+
+            ObjectNode guideSlots = card.putObject("guideSlots");
+            guideSlots.put("beforeCall", guide.slots().beforeCall());
+            guideSlots.put("doCall", guide.slots().doCall());
+            guideSlots.put("successCheck", guide.slots().successCheck());
+            guideSlots.put("failureSymptom", guide.slots().failureSymptom());
+            guideSlots.put("nextAction", guide.slots().nextAction());
+
+            ObjectNode guideQuality = card.putObject("guideQuality");
+            guideQuality.put("actionabilityScore", guide.quality().actionabilityScore());
+            guideQuality.put("slotCoverage", guide.quality().slotCoverage());
+            guideQuality.put("evidenceCoverage", guide.quality().evidenceCoverage());
+            guideQuality.put("forbiddenPhraseRate", guide.quality().forbiddenPhraseRate());
+            guideQuality.put("repetitionRate", guide.quality().repetitionRate());
+            guideQuality.put("threshold", ACTIONABILITY_THRESHOLD);
+            guideQuality.put("meetsThreshold", guide.quality().actionabilityScore() >= ACTIONABILITY_THRESHOLD);
+            card.put("actionabilityScore", guide.quality().actionabilityScore());
+
+            ObjectNode slotEvidence = card.putObject("slotEvidence");
+            putIfText(slotEvidence, "beforeCall", guide.evidenceAnchor());
+            putIfText(slotEvidence, "doCall", guide.evidenceAnchor());
+            putIfText(slotEvidence, "successCheck", guide.evidenceAnchor());
+            putIfText(slotEvidence, "failureSymptom", guide.evidenceAnchor());
+            putIfText(slotEvidence, "nextAction", guide.evidenceAnchor());
             card.put("inputs", extractInputs(seed.path("signatureHint").asText("")));
             card.put("returns", extractReturns(seed.path("signatureHint").asText("")));
             card.put("changesState", inferStateChange(methodName));
             card.set("pairedWith", inferPairedMethods(methodName, methodSeed));
             card.put("callOrderNotes", formatCallOrderNote(orderByMethod.get(fqn)));
-            card.set("cautions", toTextArray(cautionByMethod.getOrDefault(fqn, List.of())));
+            card.set("cautions", toTextArray(methodCautions));
             card.put("importance", seed.path("importance").asInt(0));
 
             ObjectNode evidence = card.putObject("evidence");
@@ -873,16 +912,93 @@ public class LlmServiceBuildSupport {
                     method,
                     MAX_METHOD_DESCRIPTION_PREVIEW
             );
-            entry.put("summary", summary.summaryNarrative());
+            entry.put("summary", firstNonBlank(
+                    method.path("guideNarrative").asText(""),
+                    summary.summaryNarrative()
+            ));
             entry.put("summaryRaw", summary.summaryRaw());
             entry.put("summaryNarrative", summary.summaryNarrative());
             entry.put("summaryPreview", summary.summaryPreview());
             entry.put("summaryFull", summary.summaryNarrative());
             entry.put("summaryTruncated", summary.summaryTruncated());
+            entry.put("guideNarrative", method.path("guideNarrative").asText(""));
+            if (method.path("guideSlots").isObject()) {
+                entry.set("guideSlots", method.path("guideSlots").deepCopy());
+            }
+            if (method.path("guideQuality").isObject()) {
+                entry.set("guideQuality", method.path("guideQuality").deepCopy());
+            }
+            if (method.path("slotEvidence").isObject()) {
+                entry.set("slotEvidence", method.path("slotEvidence").deepCopy());
+            }
+            entry.put("actionabilityScore", method.path("actionabilityScore").asInt(0));
             entry.put("subsystem", shortenText(method.path("classFqn").asText("core"), 80));
             ArrayNode relatedScenarios = entry.putArray("relatedScenarios");
             relatedScenarios.add("SCN-001");
         }
+        return out;
+    }
+
+    /**
+     * API 카드의 실전 가이드 품질 점수를 집계한다.
+     */
+    public ObjectNode buildApiDocQualityGate(JsonNode coreMethods) {
+        ObjectNode out = objectMapper.createObjectNode();
+        out.put("threshold", ACTIONABILITY_THRESHOLD);
+        out.put("metric", "actionabilityScore");
+
+        if (!coreMethods.isArray() || coreMethods.isEmpty()) {
+            out.put("methodCount", 0);
+            out.put("averageActionabilityScore", 0.0d);
+            out.put("minActionabilityScore", 0);
+            out.put("belowThresholdCount", 0);
+            out.put("slotCoverageAvg", 0.0d);
+            out.put("evidenceCoverageAvg", 0.0d);
+            out.put("forbiddenPhraseRateAvg", 0.0d);
+            out.put("repetitionRateAvg", 0.0d);
+            out.put("meetsThreshold", false);
+            return out;
+        }
+
+        int count = 0;
+        int totalScore = 0;
+        int minScore = Integer.MAX_VALUE;
+        int belowThreshold = 0;
+        double slotCoverageSum = 0.0d;
+        double evidenceCoverageSum = 0.0d;
+        double forbiddenRateSum = 0.0d;
+        double repetitionRateSum = 0.0d;
+
+        for (int i = 0; i < coreMethods.size(); i++) {
+            JsonNode method = coreMethods.get(i);
+            JsonNode quality = method.path("guideQuality");
+            int score = quality.path("actionabilityScore").asInt(method.path("actionabilityScore").asInt(0));
+            double slotCoverage = quality.path("slotCoverage").asDouble(0.0d);
+            double evidenceCoverage = quality.path("evidenceCoverage").asDouble(0.0d);
+            double forbiddenRate = quality.path("forbiddenPhraseRate").asDouble(0.0d);
+            double repetitionRate = quality.path("repetitionRate").asDouble(0.0d);
+
+            count++;
+            totalScore += score;
+            minScore = Math.min(minScore, score);
+            if (score < ACTIONABILITY_THRESHOLD) {
+                belowThreshold++;
+            }
+            slotCoverageSum += slotCoverage;
+            evidenceCoverageSum += evidenceCoverage;
+            forbiddenRateSum += forbiddenRate;
+            repetitionRateSum += repetitionRate;
+        }
+
+        out.put("methodCount", count);
+        out.put("averageActionabilityScore", round2((double) totalScore / count));
+        out.put("minActionabilityScore", minScore == Integer.MAX_VALUE ? 0 : minScore);
+        out.put("belowThresholdCount", belowThreshold);
+        out.put("slotCoverageAvg", round2(slotCoverageSum / count));
+        out.put("evidenceCoverageAvg", round2(evidenceCoverageSum / count));
+        out.put("forbiddenPhraseRateAvg", round2(forbiddenRateSum / count));
+        out.put("repetitionRateAvg", round2(repetitionRateSum / count));
+        out.put("meetsThreshold", belowThreshold == 0);
         return out;
     }
 
@@ -1111,6 +1227,10 @@ public class LlmServiceBuildSupport {
         if (value > 1.0d) {
             return 1.0d;
         }
+        return Math.round(value * 100.0d) / 100.0d;
+    }
+
+    private double round2(double value) {
         return Math.round(value * 100.0d) / 100.0d;
     }
 

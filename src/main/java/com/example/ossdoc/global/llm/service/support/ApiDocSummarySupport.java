@@ -34,6 +34,7 @@ public final class ApiDocSummarySupport {
                 method.path("whatItDoes").asText(DEFAULT_SUMMARY)
         ));
         String summaryNarrative = toNarrativeSummary(firstNonBlank(
+                method.path("guideNarrative").asText(""),
                 method.path("summaryNarrative").asText(""),
                 method.path("whatItDoesFull").asText(""),
                 summaryRaw
