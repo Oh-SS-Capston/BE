@@ -149,8 +149,10 @@ public class LlmService {
         );
 
         ObjectNode out = objectMapper.createObjectNode();
+        JsonNode ruleDocs = llmServiceBuildSupport.toRulesFromCautions(cautions.path("cautions"));
         out.set("cautions", cautions.path("cautions"));
-        out.set("rules", llmServiceBuildSupport.toRulesFromCautions(cautions.path("cautions")));
+        out.set("rules", ruleDocs);
+        out.set("qualityGate", llmServiceBuildSupport.buildRefinedRuleQualityGate(ruleDocs, cautions.path("cautions")));
         out.put("cautionCount", cautions.path("cautions").size());
         out.put("contractVersion", "guide-v1");
         return out;
@@ -228,10 +230,12 @@ public class LlmService {
         ObjectNode out = objectMapper.createObjectNode();
         out.set("directories", structure.path("directories").deepCopy());
         out.set("evidenceLocations", structure.path("evidenceIndex").deepCopy());
-        out.set("coreMethods", llmServiceBuildSupport.buildFileLocationMethods(
+        JsonNode coreMethods = llmServiceBuildSupport.buildFileLocationMethods(
                 structure.path("coreMethodSeed"),
                 llmServiceBuildSupport.buildClassSourceMap(structure.path("coreClassSeed"))
-        ));
+        );
+        out.set("coreMethods", coreMethods);
+        out.set("qualityGate", llmServiceBuildSupport.buildFileTreeDocQualityGate(coreMethods));
         out.put("fallbackApplied", false);
         out.put("deterministicSeedApplied", true);
         out.put("contractVersion", "guide-v1");

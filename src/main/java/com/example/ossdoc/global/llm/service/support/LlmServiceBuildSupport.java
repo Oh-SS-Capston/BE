@@ -44,6 +44,10 @@ public class LlmServiceBuildSupport {
     private static final int MAX_API_ENTRY_OUTPUT = 14;
     private static final int MAX_METHOD_DESCRIPTION_PREVIEW = 140;
     private static final int ACTIONABILITY_THRESHOLD = 70;
+    private static final List<String> GUIDE_FORBIDDEN_PHRASES = List.of(
+            "핵심 동작 수행",
+            "입력 조건 기반 로직"
+    );
 
     private static final String MAIN_JAVA_MARKER = "/src/main/java/";
     private static final String MAIN_KOTLIN_MARKER = "/src/main/kotlin/";
@@ -92,18 +96,75 @@ public class LlmServiceBuildSupport {
             if (filePath.isBlank() || !isUserFacingSourcePath(filePath)) {
                 continue;
             }
+            String methodFqn = seed.path("fqn").asText("");
+            String methodName = seed.path("methodName").asText("");
+            Integer startLine = seed.path("startLine").canConvertToInt() ? seed.path("startLine").asInt() : null;
+            Integer endLine = seed.path("endLine").canConvertToInt() ? seed.path("endLine").asInt() : null;
+            String summaryRaw = normalizeSentence(seed.path("summarySeed").asText(""));
+
+            ApiDocGuideSupport.GuideView guide = ApiDocGuideSupport.buildGuide(
+                    classFqn,
+                    methodName,
+                    methodFqn,
+                    summaryRaw,
+                    inferWhenToUse(methodName),
+                    List.of(),
+                    filePath,
+                    startLine,
+                    endLine
+            );
+
             ObjectNode item = out.addObject();
-            item.put("fqn", seed.path("fqn").asText(""));
-            item.put("methodName", seed.path("methodName").asText(""));
+            item.put("fqn", methodFqn);
+            item.put("methodName", methodName);
             item.put("classFqn", classFqn);
             item.put("filePath", filePath);
-            if (seed.path("startLine").canConvertToInt()) {
-                item.put("startLine", seed.path("startLine").asInt());
+            if (startLine != null) {
+                item.put("startLine", startLine);
             }
-            if (seed.path("endLine").canConvertToInt()) {
-                item.put("endLine", seed.path("endLine").asInt());
+            if (endLine != null) {
+                item.put("endLine", endLine);
             }
-            item.put("summary", shortenText(normalizeSentence(seed.path("summarySeed").asText("")), 120));
+            item.put("summary", guide.narrative());
+            item.put("summaryRaw", guide.summaryRaw());
+            item.put("summaryNarrative", guide.narrative());
+            item.put("summaryPreview", guide.narrative());
+            item.put("summaryFull", guide.narrative());
+            item.put("summaryTruncated", false);
+            item.put("guideNarrative", guide.narrative());
+
+            ObjectNode guideSlots = item.putObject("guideSlots");
+            guideSlots.put("beforeCall", guide.slots().beforeCall());
+            guideSlots.put("doCall", guide.slots().doCall());
+            guideSlots.put("successCheck", guide.slots().successCheck());
+            guideSlots.put("failureSymptom", guide.slots().failureSymptom());
+            guideSlots.put("nextAction", guide.slots().nextAction());
+
+            ObjectNode guideQuality = item.putObject("guideQuality");
+            guideQuality.put("actionabilityScore", guide.quality().actionabilityScore());
+            guideQuality.put("slotCoverage", guide.quality().slotCoverage());
+            guideQuality.put("evidenceCoverage", guide.quality().evidenceCoverage());
+            guideQuality.put("forbiddenPhraseRate", guide.quality().forbiddenPhraseRate());
+            guideQuality.put("repetitionRate", guide.quality().repetitionRate());
+            guideQuality.put("threshold", ACTIONABILITY_THRESHOLD);
+            guideQuality.put("meetsThreshold", guide.quality().actionabilityScore() >= ACTIONABILITY_THRESHOLD);
+            item.put("actionabilityScore", guide.quality().actionabilityScore());
+
+            ObjectNode slotEvidence = item.putObject("slotEvidence");
+            putIfText(slotEvidence, "beforeCall", guide.evidenceAnchor());
+            putIfText(slotEvidence, "doCall", guide.evidenceAnchor());
+            putIfText(slotEvidence, "successCheck", guide.evidenceAnchor());
+            putIfText(slotEvidence, "failureSymptom", guide.evidenceAnchor());
+            putIfText(slotEvidence, "nextAction", guide.evidenceAnchor());
+
+            ObjectNode evidence = item.putObject("evidence");
+            putIfText(evidence, "filePath", filePath);
+            if (startLine != null) {
+                evidence.put("startLine", startLine);
+            }
+            if (endLine != null) {
+                evidence.put("endLine", endLine);
+            }
             item.put("importance", seed.path("importance").asInt(0));
         }
         return out;
@@ -179,6 +240,7 @@ public class LlmServiceBuildSupport {
                     item.set("summary", seedSm);
                 }
             }
+            applyGuideToCaution(item);
         }
 
         if (cautions.isEmpty()) {
@@ -300,6 +362,7 @@ public class LlmServiceBuildSupport {
                     if (!act.isBlank())  sm.put("action", act);
                     caution.set("summary", sm);
                 }
+                applyGuideToCaution(caution);
             }
         }
 
@@ -311,6 +374,7 @@ public class LlmServiceBuildSupport {
             caution.put("when", "API 호출 전");
             caution.putArray("evidenceIds");
             caution.put("confidence", 0.60d);
+            applyGuideToCaution(caution);
         }
         return out;
     }
@@ -373,8 +437,189 @@ public class LlmServiceBuildSupport {
             rule.set("mergedFromGroups", mergedFrom.isArray() ? mergedFrom.deepCopy() : objectMapper.createArrayNode());
             rule.set("evidenceIds", limitEvidenceIdArray(caution.path("evidenceIds"), MAX_EVIDENCE_LINKS));
             rule.put("confidence", normalizeConfidence(caution.path("confidence").asDouble(0.70d)));
+            applyGuideToRule(rule, caution);
         }
         return rules;
+    }
+
+    /**
+     * caution 항목을 실전 가이드 슬롯 구조로 확장한다.
+     */
+    private void applyGuideToCaution(ObjectNode caution) {
+        if (caution == null) {
+            return;
+        }
+        String when = firstNonBlank(caution.path("when").asText(""), "API 호출 전");
+        String message = normalizeSentence(caution.path("message").asText(""));
+        String relatedMethod = caution.path("relatedMethod").asText("");
+        String action = caution.path("summary").path("action").asText("");
+        String evidenceAnchor = evidenceAnchorFromIds(caution.path("evidenceIds"));
+
+        String beforeCall = when;
+        String doCall = message;
+        String successCheck = relatedMethod.isBlank()
+                ? "호출 결과가 기대값과 일치하는지 확인한다."
+                : relatedMethod + " 호출 결과가 기대값과 일치하는지 확인한다.";
+        String failureSymptom = message;
+        String nextAction = firstNonBlank(action, "입력값을 보완하고 선행 검증을 추가한 뒤 재시도한다.");
+
+        attachGuideBundle(caution, beforeCall, doCall, successCheck, failureSymptom, nextAction, evidenceAnchor);
+    }
+
+    /**
+     * rule 항목을 실전 가이드 슬롯 구조로 확장한다.
+     */
+    private void applyGuideToRule(ObjectNode rule, JsonNode cautionSource) {
+        if (rule == null) {
+            return;
+        }
+        String classification = rule.path("classification").asText("");
+        String description = normalizeSentence(rule.path("description").asText(""));
+        String ruleName = firstNonBlank(rule.path("name").asText(""), rule.path("ruleId").asText("규칙"));
+        String evidenceAnchor = evidenceAnchorFromIds(rule.path("evidenceIds"));
+
+        String beforeCall = classification.isBlank()
+                ? "관련 호출 구간에서 규칙을 점검한다."
+                : classification + " 규칙이 적용되는 호출 구간에서 점검한다.";
+        String doCall = description.isBlank() ? ruleName + " 내용을 확인한다." : description;
+        String successCheck = evidenceAnchor.isBlank()
+                ? "테스트/로그에서 해당 규칙 위반 징후가 없는지 확인한다."
+                : evidenceAnchor + "를 기준으로 규칙 적용 여부를 확인한다.";
+        String failureSymptom = description.isBlank()
+                ? "규칙 위반 시 예외 또는 잘못된 분기가 발생할 수 있다."
+                : description;
+        String nextAction = "위반 조건을 만족하지 않도록 입력값/호출 순서를 보완하고 다시 검증한다.";
+
+        attachGuideBundle(rule, beforeCall, doCall, successCheck, failureSymptom, nextAction, evidenceAnchor);
+        if (cautionSource != null && cautionSource.path("summary").isObject()) {
+            rule.set("summary", cautionSource.path("summary").deepCopy());
+        }
+    }
+
+    /**
+     * 가이드 슬롯/품질 필드를 공통 형식으로 채운다.
+     */
+    private void attachGuideBundle(
+            ObjectNode target,
+            String beforeCall,
+            String doCall,
+            String successCheck,
+            String failureSymptom,
+            String nextAction,
+            String evidenceAnchor
+    ) {
+        String before = normalizeSentence(beforeCall);
+        String call = normalizeSentence(doCall);
+        String success = normalizeSentence(successCheck);
+        String failure = normalizeSentence(failureSymptom);
+        String next = normalizeSentence(nextAction);
+        String narrative = String.join(" ", before, call, success, failure, next).replaceAll("\\s+", " ").trim();
+
+        ObjectNode slots = target.putObject("guideSlots");
+        slots.put("beforeCall", before);
+        slots.put("doCall", call);
+        slots.put("successCheck", success);
+        slots.put("failureSymptom", failure);
+        slots.put("nextAction", next);
+
+        ObjectNode slotEvidence = target.putObject("slotEvidence");
+        putIfText(slotEvidence, "beforeCall", evidenceAnchor);
+        putIfText(slotEvidence, "doCall", evidenceAnchor);
+        putIfText(slotEvidence, "successCheck", evidenceAnchor);
+        putIfText(slotEvidence, "failureSymptom", evidenceAnchor);
+        putIfText(slotEvidence, "nextAction", evidenceAnchor);
+
+        double slotCoverage = computeSlotCoverage(before, call, success, failure, next);
+        double evidenceCoverage = evidenceAnchor.isBlank() ? 0.0d : 1.0d;
+        double forbiddenRate = computeForbiddenPhraseRate(narrative);
+        double repetitionRate = computeRepetitionRate(before, call, success, failure, next);
+        double weighted = 0.45d * slotCoverage
+                + 0.25d * evidenceCoverage
+                + 0.15d * (1.0d - forbiddenRate)
+                + 0.15d * (1.0d - repetitionRate);
+        int actionabilityScore = Math.max(0, Math.min(100, (int) Math.round(weighted * 100.0d)));
+
+        target.put("guideNarrative", narrative);
+        target.put("actionabilityScore", actionabilityScore);
+
+        ObjectNode quality = target.putObject("guideQuality");
+        quality.put("actionabilityScore", actionabilityScore);
+        quality.put("slotCoverage", round2(slotCoverage));
+        quality.put("evidenceCoverage", round2(evidenceCoverage));
+        quality.put("forbiddenPhraseRate", round2(forbiddenRate));
+        quality.put("repetitionRate", round2(repetitionRate));
+        quality.put("threshold", ACTIONABILITY_THRESHOLD);
+        quality.put("meetsThreshold", actionabilityScore >= ACTIONABILITY_THRESHOLD);
+    }
+
+    /**
+     * 5개 슬롯이 얼마나 채워졌는지(0~1) 계산한다.
+     */
+    private double computeSlotCoverage(String before, String call, String success, String failure, String next) {
+        int filled = 0;
+        for (String value : List.of(before, call, success, failure, next)) {
+            if (!safeText(value).isBlank()) {
+                filled++;
+            }
+        }
+        return (double) filled / 5.0d;
+    }
+
+    /**
+     * 금지 표현 포함 비율을 계산한다.
+     */
+    private double computeForbiddenPhraseRate(String narrative) {
+        String text = safeText(narrative);
+        if (text.isBlank()) {
+            return 1.0d;
+        }
+        int count = 0;
+        for (String phrase : GUIDE_FORBIDDEN_PHRASES) {
+            if (text.contains(phrase)) {
+                count++;
+            }
+        }
+        return Math.min(1.0d, count / 2.0d);
+    }
+
+    /**
+     * 슬롯 문장의 중복 비율을 계산한다.
+     */
+    private double computeRepetitionRate(String before, String call, String success, String failure, String next) {
+        Map<String, Integer> frequency = new LinkedHashMap<>();
+        for (String value : List.of(before, call, success, failure, next)) {
+            String key = safeText(value).replaceAll("\\s+", " ").toLowerCase(Locale.ROOT);
+            if (key.isBlank()) {
+                continue;
+            }
+            frequency.put(key, frequency.getOrDefault(key, 0) + 1);
+        }
+        int duplicates = 0;
+        for (int count : frequency.values()) {
+            if (count > 1) {
+                duplicates += (count - 1);
+            }
+        }
+        return Math.min(1.0d, (double) duplicates / 5.0d);
+    }
+
+    /**
+     * evidenceIds 배열을 UI 표시용 앵커 문자열로 변환한다.
+     */
+    private String evidenceAnchorFromIds(JsonNode evidenceIds) {
+        if (evidenceIds == null || !evidenceIds.isArray()) {
+            return "";
+        }
+        List<String> ids = new ArrayList<>();
+        for (int i = 0; i < evidenceIds.size() && ids.size() < 3; i++) {
+            JsonNode value = evidenceIds.get(i);
+            String id = value.isTextual() ? value.asText("").trim()
+                    : (value.canConvertToLong() ? String.valueOf(value.asLong()) : "");
+            if (!id.isBlank()) {
+                ids.add(id);
+            }
+        }
+        return ids.isEmpty() ? "" : "evidenceIds: " + String.join(", ", ids);
     }
 
     private ObjectNode normalizeOverview(JsonNode rawOverview, JsonNode structure) {
@@ -1000,6 +1245,37 @@ public class LlmServiceBuildSupport {
         out.put("repetitionRateAvg", round2(repetitionRateSum / count));
         out.put("meetsThreshold", belowThreshold == 0);
         return out;
+    }
+
+    /**
+     * file_tree_docs의 메서드 가이드 품질 점수를 집계한다.
+     */
+    public ObjectNode buildFileTreeDocQualityGate(JsonNode coreMethods) {
+        return buildApiDocQualityGate(coreMethods);
+    }
+
+    /**
+     * 정제 규칙(rules/cautions)의 가이드 품질 점수를 집계한다.
+     */
+    public ObjectNode buildRefinedRuleQualityGate(JsonNode rules, JsonNode cautions) {
+        ArrayNode merged = objectMapper.createArrayNode();
+        if (rules != null && rules.isArray()) {
+            merged.addAll((ArrayNode) rules);
+        }
+        if (cautions != null && cautions.isArray()) {
+            merged.addAll((ArrayNode) cautions);
+        }
+        ObjectNode gate = buildApiDocQualityGate(merged);
+        gate.put("ruleCount", countArray(rules));
+        gate.put("cautionCount", countArray(cautions));
+        return gate;
+    }
+
+    /**
+     * 배열 노드 개수를 안전하게 계산한다.
+     */
+    private int countArray(JsonNode source) {
+        return source != null && source.isArray() ? source.size() : 0;
     }
 
     private ArrayNode normalizeEvidenceLinks(JsonNode links, int maxCount) {
