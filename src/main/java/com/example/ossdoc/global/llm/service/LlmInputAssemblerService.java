@@ -1845,27 +1845,33 @@ public class LlmInputAssemblerService {
         return normalized.substring(0, idx);
     }
 
+    /**
+     * 클래스 이름 패턴으로 사용자 관점의 역할 문장을 만든다.
+     */
     private String inferClassRole(String className, String fqn) {
         String lower = (className + " " + fqn).toLowerCase(Locale.ROOT);
         if (lower.contains("parser")) {
             return "입력 인자를 해석해 결과를 생성하는 핵심 파서 클래스";
         }
         if (lower.contains("commandline")) {
-            return "파싱 결과를 조회하고 사용하는 결과 객체 클래스";
+            return "파싱 결과를 조회하고 옵션 값을 다루는 결과 객체 클래스";
         }
         if (lower.contains("option")) {
-            return "옵션 스키마를 정의하는 설정 클래스";
+            return "옵션 규격과 검증 규칙을 정의하는 설정 클래스";
         }
         if (lower.contains("help") || lower.contains("formatter")) {
-            return "사용법/도움말 출력을 담당하는 클래스";
+            return "사용법과 오류 안내를 출력하는 도움말 클래스";
         }
         return "공개 API 사용 흐름에서 핵심 동작을 담당하는 클래스";
     }
 
+    /**
+     * 클래스 이름 패턴으로 언제 사용하는지 한 줄 가이드를 만든다.
+     */
     private String inferClassUsage(String className, String fqn) {
         String lower = (className + " " + fqn).toLowerCase(Locale.ROOT);
         if (lower.contains("parser")) {
-            return "옵션 정의 후 실제 args를 파싱할 때 사용";
+            return "옵션 정의 후 실제 입력(args)을 파싱할 때 사용";
         }
         if (lower.contains("option")) {
             return "애플리케이션 시작 시 옵션 규격을 정의할 때 사용";
@@ -1894,24 +1900,28 @@ public class LlmInputAssemblerService {
         return bonus;
     }
 
+    /**
+     * 메서드 이름 패턴 기반으로 사용자 설명형 usage 문장을 만든다.
+     */
     private String inferMethodUsage(String methodName, String ownerClass, String signatureHint) {
         String lower = methodName.toLowerCase(Locale.ROOT);
         if (lower.contains("parse")) {
-            return "입력 인자를 해석해 결과 객체를 생성할 때 호출한다.";
+            return "입력 인자를 해석해 실행에 사용할 결과 객체를 만들 때 호출합니다.";
         }
         if (lower.contains("add") || lower.contains("required") || lower.contains("builder")) {
-            return "옵션 스키마를 정의하거나 필수 옵션을 지정할 때 호출한다.";
+            return "실행 전에 옵션/필수값을 설정하거나 구성할 때 호출합니다.";
         }
         if (lower.contains("get") || lower.contains("has")) {
-            return "파싱 완료 후 옵션 값/존재 여부를 조회할 때 호출한다.";
+            return "실행 결과에서 값 존재 여부를 확인하거나 값을 읽을 때 호출합니다.";
         }
         if (lower.contains("help") || lower.contains("print")) {
-            return "사용법 출력 또는 오류 안내를 보여줄 때 호출한다.";
+            return "사용법 또는 오류 안내를 출력할 때 호출합니다.";
         }
         if (!signatureHint.isBlank()) {
-            return ownerClass + " 기능 사용 시 호출한다. 시그니처: " + shortenText(signatureHint, 80);
+            return ownerClass + "의 핵심 기능을 연결할 때 호출합니다. 시그니처: "
+                    + normalizeSummarySeed(shortenText(signatureHint, 80));
         }
-        return ownerClass + " 기능 사용 시 호출한다.";
+        return ownerClass + "의 핵심 기능을 연결할 때 호출합니다.";
     }
 
     private String inferScenarioHint(String methodName) {
@@ -2025,10 +2035,25 @@ public class LlmInputAssemblerService {
         return value.substring(0, maxLength);
     }
 
+    /**
+     * 시드 요약문에서 내부 분석 토큰을 제거하고 사용자 설명형 문장으로 정리한다.
+     */
     private String normalizeSummarySeed(String text) {
         String normalized = safeText(text).replaceAll("\\s+", " ").trim();
+        normalized = normalized
+                .replace("메서드 method:", "메서드 ")
+                .replace("메서드 ctor:", "생성자 ")
+                .replace("method:", "")
+                .replace("type:", "")
+                .replace("ctor:", "")
+                .replace("guard return 후보", "입력 조건 기반 조기 반환 로직")
+                .replace("guard clause 후보", "입력 조건 기반 예외/반환 분기")
+                .replace("조건문 이후 return 또는 error response가 근접하게 나타나는", "입력 조건에 따라 조기 반환되거나 오류가 발생할 수 있는")
+                .replace("조건문 이후 예외 throw가 근접하게 나타나는", "입력 조건에 따라 예외가 발생할 수 있는")
+                .replace("require/assert/check 계열의 전제조건 검증 호출이 발견되었습니다.", "입력값 전제조건을 검증합니다.")
+                .replace("delete 성격의 repository/entity manager 호출이 발견되", "상태를 제거하거나 정리하는 호출이 포함되");
         if (normalized.isBlank()) {
-            return "핵심 동작을 수행한다.";
+            return "핵심 동작을 수행합니다.";
         }
         return normalized;
     }
@@ -2106,3 +2131,4 @@ public class LlmInputAssemblerService {
     ) {
     }
 }
+

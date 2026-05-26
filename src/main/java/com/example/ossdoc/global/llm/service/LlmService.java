@@ -948,14 +948,26 @@ public class LlmService {
 
             String fqn = seed.path("fqn").asText("");
             String methodName = seed.path("methodName").asText("");
+            String classFqn = seed.path("classFqn").asText("");
             String whatItDoesFull = normalizeSentence(seed.path("summarySeed").asText("핵심 동작을 수행한다."));
             String whatItDoesPreview = shortenForPreview(whatItDoesFull, MAX_METHOD_DESCRIPTION_PREVIEW);
             boolean whatItDoesTruncated = !whatItDoesPreview.equals(whatItDoesFull);
+            String summaryRaw = normalizeRawSummary(seed.path("summarySeed").asText(""));
+            String summaryNarrative = toNarrativeSummary(summaryRaw, classFqn, methodName);
+            String summaryPreview = shortenForPreview(summaryNarrative, MAX_METHOD_DESCRIPTION_PREVIEW);
+            boolean summaryTruncated = !summaryPreview.equals(summaryNarrative);
+            whatItDoesFull = summaryNarrative;
+            whatItDoesPreview = summaryPreview;
+            whatItDoesTruncated = summaryTruncated;
 
             card.put("methodName", methodName);
-            card.put("classFqn", seed.path("classFqn").asText(""));
+            card.put("classFqn", classFqn);
             card.put("fqn", fqn);
-            card.put("whatItDoes", whatItDoesPreview);
+            card.put("summaryRaw", summaryRaw);
+            card.put("summaryNarrative", summaryNarrative);
+            card.put("summaryPreview", summaryPreview);
+            card.put("summaryTruncated", summaryTruncated);
+            card.put("whatItDoes", summaryNarrative);
             card.put("whatItDoesPreview", whatItDoesPreview);
             card.put("whatItDoesFull", whatItDoesFull);
             card.put("whatItDoesTruncated", whatItDoesTruncated);
@@ -1143,15 +1155,29 @@ public class LlmService {
             JsonNode method = coreMethods.get(i);
             ObjectNode entry = out.addObject();
             entry.put("fqn", method.path("fqn").asText(""));
+            String classFqn = method.path("classFqn").asText("");
+            String methodName = method.path("methodName").asText("");
             String summaryFull = normalizeSentence(firstNonBlank(
                     method.path("whatItDoesFull").asText(""),
                     method.path("whatItDoes").asText("핵심 동작 수행")
             ));
-            String summaryPreview = shortenForPreview(summaryFull, MAX_METHOD_DESCRIPTION_PREVIEW);
-            boolean summaryTruncated = !summaryPreview.equals(summaryFull);
-            entry.put("summary", summaryPreview);
+            String summaryRaw = normalizeRawSummary(firstNonBlank(
+                    method.path("summaryRaw").asText(""),
+                    method.path("whatItDoesFull").asText(""),
+                    method.path("whatItDoes").asText("핵심 동작 수행")
+            ));
+            String summaryNarrative = toNarrativeSummary(firstNonBlank(
+                    method.path("summaryNarrative").asText(""),
+                    summaryFull,
+                    summaryRaw
+            ), classFqn, methodName);
+            String summaryPreview = shortenForPreview(summaryNarrative, MAX_METHOD_DESCRIPTION_PREVIEW);
+            boolean summaryTruncated = !summaryPreview.equals(summaryNarrative);
+            entry.put("summary", summaryNarrative);
+            entry.put("summaryRaw", summaryRaw);
+            entry.put("summaryNarrative", summaryNarrative);
             entry.put("summaryPreview", summaryPreview);
-            entry.put("summaryFull", summaryFull);
+            entry.put("summaryFull", summaryNarrative);
             entry.put("summaryTruncated", summaryTruncated);
             entry.put("subsystem", shortenText(method.path("classFqn").asText("core"), 80));
             ArrayNode relatedScenarios = entry.putArray("relatedScenarios");
@@ -1730,6 +1756,53 @@ public class LlmService {
             return "핵심 동작 수행";
         }
         return normalized;
+    }
+
+    private String normalizeRawSummary(String text) {
+        String raw = safeText(text).replaceAll("\\s+", " ").trim();
+        if (raw.isBlank()) {
+            return "핵심 동작 수행";
+        }
+        return raw;
+    }
+
+    private String toNarrativeSummary(String rawSummary, String classFqn, String methodName) {
+        String normalized = normalizeSentence(rawSummary);
+        if (looksNarrativeSummary(normalized)) {
+            return normalized;
+        }
+        String methodRef = buildMethodReference(classFqn, methodName);
+        if (methodRef.isBlank()) {
+            return normalized;
+        }
+        return "메서드 " + methodRef + "에서 " + normalized;
+    }
+
+    private boolean looksNarrativeSummary(String summary) {
+        String value = safeText(summary);
+        if (value.isBlank()) {
+            return false;
+        }
+        return value.startsWith("메서드 ")
+                || value.contains("에서 ")
+                || value.endsWith("입니다.")
+                || value.endsWith("합니다.")
+                || value.endsWith("한다.");
+    }
+
+    private String buildMethodReference(String classFqn, String methodName) {
+        String className = safeText(classFqn);
+        String method = safeText(methodName);
+        if (className.isBlank() && method.isBlank()) {
+            return "";
+        }
+        if (className.isBlank()) {
+            return method + "()";
+        }
+        if (method.isBlank()) {
+            return className;
+        }
+        return className + "#" + method;
     }
 
     private String shortenForPreview(String text, int maxLength) {
