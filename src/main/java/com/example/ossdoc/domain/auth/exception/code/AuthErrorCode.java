@@ -16,6 +16,17 @@ public enum AuthErrorCode implements BaseCode {
             "인증이 필요합니다."
     ),
 
+    /*
+     * 최신 develop의 여러 Controller에서 아직 사용하는 이름입니다.
+     * 의미는 AUTHENTICATION_REQUIRED와 동일합니다.
+     * 기존 컨트롤러 코드를 대량 수정하지 않기 위해 호환용으로 유지합니다.
+     */
+    UNAUTHORIZED_USER(
+            HttpStatus.UNAUTHORIZED,
+            "AUTH401_1",
+            "인증이 필요합니다."
+    ),
+
     USER_NOT_FOUND(
             HttpStatus.NOT_FOUND,
             "AUTH404_1",
