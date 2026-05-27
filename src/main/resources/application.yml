@@ -97,7 +97,9 @@ ossdoc:
 app:
   cors:
     allowed-origins:
-      - ${FRONTEND_BASE_URL:http://localhost:5173}
+      - ${FRONTEND_LOCAL_BASE_URL:http://localhost:5173}
+      - ${FRONTEND_BASE_URL:https://oh-ss.link}
+      - ${FRONTEND_WWW_BASE_URL:https://www.oh-ss.link}
 
   auth:
     frontend-success-redirect-uri: ${FRONTEND_SUCCESS_REDIRECT_URI:http://localhost:5173/login/success}
