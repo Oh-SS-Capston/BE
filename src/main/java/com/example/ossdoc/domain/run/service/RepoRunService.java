@@ -55,7 +55,7 @@ public class RepoRunService {
             PipelineJobStatus.RETRYING
     );
     private static final String CACHE_WAIT_STATUS_MESSAGE =
-            "[CACHE_WAIT] ?숈씪 而ㅻ컠 FULL 遺꾩꽍 寃곌낵瑜?湲곕떎由щ뒗 以묒엯?덈떎.";
+            "[CACHE_WAIT] 동일 커밋 FULL 분석 결과를 기다리는 중입니다.";
 
     private final RepoRunRepository repoRunRepository;
     private final UserRepository userRepository;
@@ -200,10 +200,10 @@ public class RepoRunService {
         }
 
         /*
-         * W10(?꾪솕):
-         * - READY miss ?댄썑, 吏곸쟾 FAILED 罹먯떆??吏㏃? 荑⑤떎??湲곕낯 30珥? ?щ?瑜??뺤씤?⑸땲??
-         * - ?숈씪 ?ъ슜?먯쓽 ?ㅽ뙣 run?대㈃ ?ъ궗?⑺빐 利됱떆 ?묐떟?⑸땲??
-         * - ??ъ슜???ㅽ뙣 run? ???붿껌??留됱? ?딄퀬, ?꾨옒 ?좉퇋 遺꾩꽍 寃쎈줈濡?洹몃?濡?吏꾪뻾?⑸땲??
+         * W10(완화):
+         * - READY miss 이후, 직전 FAILED 캐시의 쿨다운(기본 30초) 상태를 확인합니다.
+         * - 동일 사용자의 실패 run이면 재사용해 즉시 응답합니다.
+         * - 타 사용자의 실패 run은 공유 복제하지 않고, 기존 신규 분석 경로로 진행합니다.
          */
         AnalysisCacheFailedCooldownResult failedCooldownResult =
                 analysisCacheLookupService.lookupFailedCooldown(
@@ -233,9 +233,9 @@ public class RepoRunService {
             RepoRun sourceFailedRun = resolveAnyCachedRun(failedCooldownResult.sourceRunId());
             if (sourceFailedRun != null) {
                 /*
-                 * ??ъ슜???ㅽ뙣??怨듭쑀 蹂듭젣濡?留됱? ?딆뒿?덈떎.
-                 * ?ъ슜??愿?먯뿉??"?⑥쓽 ?ㅽ뙣 ?뚮Ц??紐??꾨뒗" ?듬떟?⑥쓣 ?놁븷湲??꾪빐
-                 * ??遺꾩꽍 run?쇰줈 ?ъ떆?꾪븷 ???덇쾶 ?꾨옒 enqueue 寃쎈줈濡??대갚?⑸땲??
+                 * 타 사용자의 실패 run은 공유 복제로 사용하지 않습니다.
+                 * 사용자 관점에서 "남의 실패 이력 노출"을 막기 위해
+                 * 새 분석 run으로 재시도하도록 기존 enqueue 경로로 복귀합니다.
                  */
                 if (sourceFailedRun.getOwner() != null
                         && sourceFailedRun.getOwner().getId() != null
@@ -263,17 +263,18 @@ public class RepoRunService {
         }
 
         /*
-         * W09 ?뺤옣:
-         * - ???띾뱷 ?깃났: 湲곗〈泥섎읆 利됱떆 ?좉퇋 遺꾩꽍 enqueue
-         * - ??寃쏀빀:
-         *   1) ???쒖꽦 run?대㈃ attach
-         *   2) ??ъ슜???쒖꽦 run + buildMode=FULL(?먮뒗 誘명솗?? -> ???뚯쑀 WAIT run ?앹꽦 ??罹먯떆 ?湲?         *   3) ??ъ슜???쒖꽦 run + buildMode!=FULL -> 議곌린 ?덉텧(?낅┰ 遺꾩꽍 利됱떆 enqueue)
+         * W09 확장:
+         * - lock 획득 성공: 기존처럼 즉시 신규 분석 enqueue
+         * - lock 경합:
+         *   1) 내 활성 run이면 attach
+         *   2) 타 사용자 활성 run + buildMode=FULL(또는 미확정) -> 공유 WAIT run 생성 후 캐시 대기
+         *   3) 타 사용자 활성 run + buildMode!=FULL -> 조기 이탈(즉시 신규 분석 enqueue)
          */
         /*
-         * ??owner token??runId 湲곕컲?쇰줈 怨좎젙???〓땲??
-         * ?댁쑀:
-         * - enqueue ?쒖젏???띾뱷???쎌쓣 worker 醫낅즺 ?쒖젏?먯꽌 媛숈? ?좏겙?쇰줈 ?덉쟾 ?댁젣?댁빞
-         *   TTL 留뚮즺 ?꾩뿉???ㅼ쓬 ?숈씪 ?붿껌??利됱떆 罹먯떆 hit 寃쎈줈瑜??????덉뒿?덈떎.
+         * lock owner token은 runId 기반으로 고정 생성합니다.
+         * 이유:
+         * - enqueue 시점에 획득한 lock을 worker 종료 시점에서 같은 토큰으로 안전 해제해야
+         *   TTL 만료 전에 다음 동일 요청이 즉시 캐시 hit 경로로 가지 않습니다.
          */
         String runId = generateRunId();
         String lockOwnerToken = buildLockOwnerToken(runId);
@@ -282,8 +283,8 @@ public class RepoRunService {
             if (forceRebuild) {
                 /*
                  * W11:
-                 * - forceRebuild??湲곗〈 ?ㅽ뻾 ?ъ궗?⑸낫??"?좉퇋 ?щ텇?? ?섎룄媛 ?곗꽑?낅땲??
-                 * - ??寃쏀빀 ??attach/wait濡?遺숈? ?딄퀬, ?꾨옒 ?좉퇋 遺꾩꽍 enqueue 寃쎈줈濡??대갚?⑸땲??
+                 * - forceRebuild는 기존 실행 재사용보다 "신규 분석 우선"이 정책입니다.
+                 * - 경합 시 attach/wait로 붙지 않고, 기존 신규 분석 enqueue 경로로 복귀합니다.
                  */
                 log.info(
                         "[CACHE][LOCK] contention ignored by forceRebuild. fallback=NEW_ANALYSIS, cacheKey={}",
@@ -323,7 +324,7 @@ public class RepoRunService {
                             activeRun.getRunId(),
                             sourceBuildMode
                     );
-                    // 議곌린 ?덉텧: ?꾨옒 ?좉퇋 遺꾩꽍 enqueue 寃쎈줈濡??대갚?⑸땲??
+                    // 조기 이탈: 기존 신규 분석 enqueue 경로로 복귀합니다.
                 } else {
                     RepoRun waitingRun = createCacheWaitingRun(req, owner, parsed, ref, commitSha, userId);
                     log.info(
@@ -365,8 +366,8 @@ public class RepoRunService {
             pipelineQueueService.enqueue(run, userId);
         } catch (RuntimeException e) {
             /*
-             * enqueue ?ㅽ뙣 ?쒖뿉???꾩옱 ?붿껌?????앹꽦???ㅽ뙣?덉쑝誘濡??쎌쓣 利됱떆 ?댁젣?⑸땲??
-             * ?뺤긽 寃쎈줈?먯꽌??worker媛 吏꾪뻾?섎뒗 ?숈븞 TTL濡??먯뿰 留뚮즺?섎룄濡??좎??⑸땲??
+             * enqueue 실패 시에는 현재 요청에서 생성한 lock이 누수되지 않도록 즉시 해제합니다.
+             * 정상 경로에서는 worker가 처리하는 동안 TTL로 자연 만료되도록 둡니다.
              */
             analysisCacheLockService.releaseIfOwned(analysisCacheKey, lockOwnerToken);
             throw e;
@@ -404,11 +405,11 @@ public class RepoRunService {
     }
 
     /**
-     * 罹먯떆 ???쒕뱶 援ъ꽦 ?꾩슜 硫붿꽌?쒖엯?덈떎.
+     * 캐시 키 시드를 구성하는 전용 메서드입니다.
      * <p>
-     * 遺꾨━???댁쑀:
-     * - createRun 蹂몃Ц?먯꽌 踰꾩쟾/?듭뀡 議곕┰ 濡쒖쭅??遺꾨━??媛?낆꽦怨??좎?蹂댁닔?깆쓣 ?믪엯?덈떎.
-     * - 異뷀썑 ?듭뀡 異뺤씠 ?섏뼱?섎룄 ??硫붿꽌?쒕쭔 ?섏젙?섎㈃ ?섎룄濡?蹂寃?吏?먯쓣 怨좎젙?⑸땲??
+     * 분리한 이유:
+     * - createRun 본문에서 버전/옵션 조립 로직을 분리해 가독성과 유지보수성을 높입니다.
+     * - 추후 옵션이 추가되어도 이 메서드만 수정하면 되도록 변경 지점을 고정합니다.
      */
     private RunAnalysisCacheKeySeed buildCacheKeySeed(String repoUrl, String commitSha) {
         return RunAnalysisCacheKeySeed.builder()
@@ -423,7 +424,7 @@ public class RepoRunService {
     }
 
     /**
-     * 罹먯떆 hit sourceRun???꾩옱 ?ъ슜???뚯쑀?몄? ?뺤씤?⑸땲??
+     * 캐시 hit sourceRun이 현재 사용자 소유인지 확인합니다.
      */
     private RepoRun resolveOwnedCachedRun(String sourceRunId, Long userId) {
         if (sourceRunId == null || sourceRunId.isBlank()) {
@@ -434,7 +435,7 @@ public class RepoRunService {
     }
 
     /**
-     * ?꾩뿭 罹먯떆 ?섏슜???꾪빐 sourceRunId 議댁옱 ?щ?留??뺤씤?⑸땲??
+     * 전역 캐시 재사용을 위해 sourceRunId 존재 여부만 확인합니다.
      */
     private RepoRun resolveAnyCachedRun(String sourceRunId) {
         if (sourceRunId == null || sourceRunId.isBlank()) {
@@ -445,13 +446,13 @@ public class RepoRunService {
     }
 
     /**
-     * 罹먯떆 ?ъ궗???덉슜 議곌굔(? ?깃났)??寃?ы빀?덈떎.
+     * 캐시 재사용 허용 조건(완전 성공)을 검증합니다.
      *
-     * ?덉슜 議곌굔:
+     * 허용 조건:
      * 1) repo_run.status == SUCCESS
      * 2) run_pipeline_job.status == SUCCESS
      *
-     * ??議곌굔??????留뚯”?섏? ?딆쑝硫?cache hit瑜??섏슜?섏? ?딄퀬 ?좉퇋 遺꾩꽍 寃쎈줈濡??대갚?⑸땲??
+     * 위 조건을 만족하지 않으면 cache hit를 수용하지 않고 신규 분석 경로로 복귀합니다.
      */
     private boolean isFullSuccessCacheSource(RepoRun run) {
         if (run.getStatus() != RunStatus.SUCCESS) {
@@ -464,11 +465,11 @@ public class RepoRunService {
     }
 
     /**
-     * ?먮낯 run 寃곌낵瑜??붿껌???뚯쑀 run?쇰줈 蹂듭젣?⑸땲??
+     * 원본 run 결과를 요청 사용자 run으로 복제합니다.
      *
-     * ?대젃寃?援ы쁽???댁쑀:
-     * - ?⑥닚???먮낯 runId瑜?諛섑솚?섎㈃ owner 寃利?progress/artifact)?먯꽌 李⑤떒?⑸땲??
-     * - ?붿껌???뚯쑀 run?쇰줈 硫뷀?瑜?蹂듭젣?섎㈃ 湲곗〈 沅뚰븳 紐⑤뜽???좎???梨??꾩뿭 罹먯떆瑜??ъ궗?⑺븷 ???덉뒿?덈떎.
+     * 이렇게 구현한 이유:
+     * - 단순히 원본 runId를 반환하면 owner 검증(progress/artifact)에서 차단됩니다.
+     * - 요청자 소유 run으로 메타를 복제하면 기존 권한 모델을 유지하면서 전역 캐시를 재사용할 수 있습니다.
      */
     private RepoRun createSharedCachedRun(RepoRun sourceRun, User owner, Long requestUserId) {
         String sharedRunId = generateRunId();
@@ -495,8 +496,8 @@ public class RepoRunService {
     }
 
     /**
-     * ?먮낯 run??理쒖쥌 ???곹깭瑜?蹂듭젣?⑸땲??
-     * READY 罹먯떆???깃났 寃곌낵瑜??꾩젣濡??섎?濡?湲곕낯媛믪? SUCCESS?낅땲??
+     * 원본 run의 최종 job 상태를 복제합니다.
+     * READY 캐시는 성공 결과를 전제로 하므로 기본값은 SUCCESS입니다.
      */
     private RunPipelineJob copyJobState(String sourceRunId, RepoRun sharedRun, Long requestUserId) {
         RunPipelineJob sharedJob = RunPipelineJob.create(sharedRun, requestUserId);
@@ -522,7 +523,7 @@ public class RepoRunService {
     }
 
     /**
-     * ?먮낯 run???④퀎蹂??곹깭瑜?蹂듭젣??吏꾪뻾 ?곸꽭 ?붾㈃?먯꽌 ?숈씪???④퀎瑜??뺤씤?????덇쾶 ?⑸땲??
+     * 원본 run의 단계별 상태를 복제해 진행 상세 화면에서 동일한 단계를 확인할 수 있게 합니다.
      */
     private void copyStepExecutionSnapshots(String sourceRunId, RepoRun sharedRun, RunPipelineJob sharedJob) {
         List<RunPipelineStepExecution> sourceSteps =
@@ -545,7 +546,7 @@ public class RepoRunService {
             } else if (sourceStatus == PipelineStepStatus.RUNNING) {
                 copied.succeed(sourceStep.getMessage());
             } else {
-                copied.skip("罹먯떆 ?ъ궗?⑹쑝濡????湲??④퀎瑜??앸왂?덉뒿?덈떎.");
+                copied.skip("캐시 재사용으로 대기 단계를 생략했습니다.");
             }
 
             runPipelineStepExecutionRepository.save(copied);
@@ -553,8 +554,8 @@ public class RepoRunService {
     }
 
     /**
-     * ?먮낯 run???곗텧臾?硫뷀?瑜??붿껌???뚯쑀 run?쇰줈 蹂듭젣?⑸땲??
-     * S3 ?ъ뾽濡쒕뱶 ?놁씠 DB ?덉퐫?쒕쭔 蹂듭젣?섎?濡?罹먯떆 hit 吏?곗씠 留ㅼ슦 ??뒿?덈떎.
+     * 원본 run의 산출물 메타를 요청자 소유 run으로 복제합니다.
+     * S3 재업로드 없이 DB 레코드만 복제하므로 캐시 hit 지연이 매우 짧습니다.
      */
     private void copyArtifactsForSharedRun(String sourceRunId, RepoRun sharedRun) {
         List<Artifact> sourceArtifacts = artifactRepository.findAllByRun_RunIdOrderByArtifactIdAsc(sourceRunId);
@@ -573,11 +574,11 @@ public class RepoRunService {
     }
 
     /**
-     * Run ?앹꽦 ?묐떟???쒖? ?щ㎎?쇰줈 議곕┰?⑸땲??
+     * Run 생성 응답을 한 곳에서 조립합니다.
      *
-     * ??遺꾨━?덈뒗媛:
-     * - W07 ?붽뎄?ы빆(罹먯떆 硫뷀? ?묐떟)????吏?먯뿉???쇨??섍쾶 梨꾩슦湲??꾪븿?낅땲??
-     * - hit/miss/怨듭쑀蹂듭젣 寃쎈줈媛 ?щ씪???묐떟 怨꾩빟???붾뱾由ъ? ?딄쾶 ?⑸땲??
+     * 분리 이유:
+     * - W07 요구사항(캐시 메타 응답)을 모든 경로에서 일관되게 채우기 위함입니다.
+     * - hit/miss/공유복제 경로가 달라도 응답 계약이 흔들리지 않게 합니다.
      */
     private RepoRunCreateResponse toCreateResponse(
             RepoRun run,
@@ -618,11 +619,11 @@ public class RepoRunService {
     }
 
     /**
-     * ??ъ슜??FULL 遺꾩꽍??湲곕떎由ш린 ?꾪븳 ?붿껌???뚯쑀 run/job/step???앹꽦?⑸땲??
+     * 타 사용자의 FULL 분석 완료를 기다리기 위한 요청자 소유 run/job/step을 생성합니다.
      *
-     * 援ы쁽 ?댁쑀:
-     * - 409 ?ъ떆??UX ???"??runId"瑜?利됱떆 諛섑솚??polling ?먮쫫???좎??⑸땲??
-     * - worker媛 怨㏓컮濡??ㅽ뻾?섏? ?딅룄濡?job? RUNNING+臾대씫(lock null) ?湲??곹깭濡??〓땲??
+     * 구현 이유:
+     * - 409 대신 UX 상 "내 runId"를 즉시 반환해 polling 흐름을 유지합니다.
+     * - worker가 곧바로 실행되지 않더라도 job을 RUNNING+대기(lock null) 상태로 둡니다.
      */
     private RepoRun createCacheWaitingRun(
             RepoRunCreateRequest req,
@@ -663,7 +664,7 @@ public class RepoRunService {
     }
 
     /**
-     * W09 ??寃쏀빀 ?? ?숈씪 repo/sha??吏꾪뻾以?job??李얠븘 attach 媛???щ?瑜??먮떒?⑸땲??
+     * W09 경합 처리에서 동일 repo/sha로 진행 중인 job을 찾아 attach 가능 여부를 판단합니다.
      */
     private RepoRun resolveActiveRunForSameRepoAndSha(String repoOwner, String repoName, String commitSha) {
         return runPipelineJobRepository
@@ -681,7 +682,7 @@ public class RepoRunService {
     }
 
     /**
-     * build_manifest meta??buildMode瑜??쎌뼱 FULL ?щ?瑜??먮떒?⑸땲??
+     * build_manifest meta에서 buildMode를 읽어 FULL 여부를 판단합니다.
      */
     private BuildMode resolveBuildMode(String runId) {
         return artifactRepository.findTopByRun_RunIdAndKindOrderByCreatedAtDesc(runId, ArtifactKind.BUILD_MANIFEST)
@@ -703,8 +704,8 @@ public class RepoRunService {
     }
 
     /**
-     * Redis lock value(owner token) ?앹꽦 洹쒖튃?낅땲??
-     * owner 寃利??댁젣 ?쒖뿉 "?꾧? ?띾뱷???쎌씤吏"瑜??앸퀎?섍린 ?꾪빐 ?ъ슜?⑸땲??
+     * Redis lock value(owner token) 생성 규칙입니다.
+     * owner 검증 해제 시점에 "내가 획득한 lock인지"를 식별하기 위해 사용합니다.
      */
     private String buildLockOwnerToken(String runId) {
         return AnalysisCacheLockService.ownerTokenForRun(runId);
