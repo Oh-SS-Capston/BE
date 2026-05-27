@@ -91,10 +91,10 @@ public class MembershipAccessService {
     public boolean canViewRun(RepoRun run, User user) {
         AnalysisAccessType accessType = run.getAnalysisAccessType();
 
-        if (accessType == AnalysisAccessType.FREE_TRIAL) {
+        if (accessType == AnalysisAccessType.FREE_TRIAL
+                || accessType == AnalysisAccessType.TOKEN) {
             return true;
         }
-
         return hasActiveMembership(user);
     }
 }

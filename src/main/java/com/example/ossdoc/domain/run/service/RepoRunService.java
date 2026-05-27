@@ -7,7 +7,11 @@ import com.example.ossdoc.domain.auth.exception.AuthException;
 import com.example.ossdoc.domain.auth.exception.code.AuthErrorCode;
 import com.example.ossdoc.domain.build.enums.BuildMode;
 import com.example.ossdoc.domain.membership.enums.AnalysisAccessType;
-import com.example.ossdoc.domain.membership.service.MembershipAccessService;
+//import com.example.ossdoc.domain.membership.service.MembershipAccessService;
+import com.example.ossdoc.domain.token.enums.TokenLedgerType;
+import com.example.ossdoc.domain.token.enums.TokenReferenceType;
+import com.example.ossdoc.domain.token.service.TokenService;
+import com.example.ossdoc.domain.token.support.TokenPolicy;
 import com.example.ossdoc.domain.run.cache.model.AnalysisCacheFailedCooldownResult;
 import com.example.ossdoc.domain.run.cache.model.AnalysisCacheLookupResult;
 import com.example.ossdoc.domain.run.cache.service.AnalysisCacheLockService;
@@ -72,7 +76,7 @@ public class RepoRunService {
     private final RunPipelineJobRepository runPipelineJobRepository;
     private final RunPipelineStepExecutionRepository runPipelineStepExecutionRepository;
     private final ArtifactRepository artifactRepository;
-    private final MembershipAccessService membershipAccessService;
+    private final TokenService tokenService;
 
     @Transactional
     public RepoRunCreateResponse createRun(RepoRunCreateRequest req, Long userId) {
@@ -160,6 +164,12 @@ public class RepoRunService {
                          * 내 기존 성공 run을 그대로 반환하는 경우입니다.
                          * 새 분석 결과를 만드는 것이 아니므로 무료 분석권을 차감하지 않습니다.
                          */
+                        chargeTokensForAnalysis(
+                                userId,
+                                ownedCachedRun.getRunId(),
+                                false
+                        );
+
                         return toCreateResponse(
                                 ownedCachedRun,
                                 true,
@@ -183,13 +193,19 @@ public class RepoRunService {
                          * 타사용자의 성공 캐시 결과를 내 소유 run으로 복제하는 경우입니다.
                          * 사용자는 새 결과 접근권을 얻는 것이므로 무료 분석권 또는 멤버십 권한을 확인합니다.
                          */
-                        AnalysisAccessType accessType = membershipAccessService.grantAnalysisStart(owner);
+                        AnalysisAccessType accessType = tokenAccessType();
 
                         RepoRun sharedCachedRun = createSharedCachedRun(
                                 sourceRun,
                                 owner,
                                 userId,
                                 accessType
+                        );
+
+                        chargeTokensForAnalysis(
+                                userId,
+                                sharedCachedRun.getRunId(),
+                                false
                         );
 
                         log.info(
@@ -376,11 +392,8 @@ public class RepoRunService {
                          * 신규 run을 만들 때 무료 분석권 또는 멤버십 권한을 확인합니다.
                          */
                     } else {
-                        /*
-                         * 타사용자의 FULL 분석을 기다리는 내 WAIT run을 생성하는 경우입니다.
-                         * 내 소유 run이 새로 만들어지므로 무료 분석권 또는 멤버십 권한을 확인합니다.
-                         */
-                        AnalysisAccessType accessType = membershipAccessService.grantAnalysisStart(owner);
+
+                        AnalysisAccessType accessType = tokenAccessType();
 
                         RepoRun waitingRun = createCacheWaitingRun(
                                 req,
@@ -390,6 +403,12 @@ public class RepoRunService {
                                 commitSha,
                                 userId,
                                 accessType
+                        );
+
+                        chargeTokensForAnalysis(
+                                userId,
+                                waitingRun.getRunId(),
+                                false
                         );
 
                         log.info(
@@ -416,15 +435,7 @@ public class RepoRunService {
 
         log.info("Workspace prepared runId={}, workspaceRoot={}", runId, wsRoot);
 
-        /*
-         * 신규 분석 run을 생성하는 경우입니다.
-         * GitHub URL 파싱, 기본 브랜치 조회, commitSha resolve, cache attach/wait 판단이 끝난 뒤에
-         * 무료 분석권 또는 멤버십 권한을 확인합니다.
-         *
-         * 이렇게 해야 잘못된 URL이나 GitHub 조회 실패, 내 기존 run attach 때문에
-         * 무료 분석권이 잘못 차감되는 일을 막을 수 있습니다.
-         */
-        AnalysisAccessType analysisAccessType = membershipAccessService.grantAnalysisStart(owner);
+        AnalysisAccessType analysisAccessType = tokenAccessType();
 
         RepoRun run = new RepoRun(
                 runId,
@@ -438,14 +449,20 @@ public class RepoRunService {
                 analysisAccessType
         );
 
-        repoRunRepository.save(run);
-
         try {
+            chargeTokensForAnalysis(
+                    userId,
+                    runId,
+                    forceRebuild
+            );
+
+            repoRunRepository.save(run);
             pipelineQueueService.enqueue(run, userId);
         } catch (RuntimeException e) {
             /*
-             * enqueue 실패 시에는 현재 요청이 잡 생성에 실패했으므로 락을 즉시 해제합니다.
-             * 정상 경로에서는 worker가 진행하는 동안 TTL로 자연 만료되도록 유지합니다.
+             * 토큰 부족, run 저장 실패, enqueue 실패 모두 여기서 처리합니다.
+             * 락을 이미 잡은 상태이므로 예외 발생 시 반드시 락을 해제합니다.
+             * chargeTokensForAnalysis는 같은 트랜잭션에서 실행되므로 예외가 발생하면 차감도 롤백됩니다.
              */
             analysisCacheLockService.releaseIfOwned(analysisCacheKey, lockOwnerToken);
             throw e;
@@ -812,5 +829,44 @@ public class RepoRunService {
                 + OffsetDateTime.now().toLocalDate().toString().replace("-", "")
                 + "_"
                 + UUID.randomUUID().toString().substring(0, 8);
+    }
+
+    private AnalysisAccessType tokenAccessType() {
+        return AnalysisAccessType.TOKEN;
+    }
+
+    private void chargeTokensForAnalysis(
+            Long userId,
+            String runId,
+            boolean forceRebuild
+    ) {
+        long cost = forceRebuild
+                ? TokenPolicy.REANALYSIS_COST
+                : TokenPolicy.ANALYSIS_COST;
+
+        TokenLedgerType ledgerType = forceRebuild
+                ? TokenLedgerType.REANALYSIS_USE
+                : TokenLedgerType.ANALYSIS_USE;
+
+        String reason = forceRebuild
+                ? "재분석 요청"
+                : "일반 분석 요청";
+
+        tokenService.useTokens(
+                userId,
+                cost,
+                ledgerType,
+                TokenReferenceType.RUN,
+                runId,
+                reason
+        );
+
+        log.info(
+                "[TOKEN] charged. userId={}, runId={}, cost={}, type={}",
+                userId,
+                runId,
+                cost,
+                ledgerType
+        );
     }
 }
