@@ -6,14 +6,18 @@ import com.example.ossdoc.domain.payment.exception.PaymentException;
 import com.example.ossdoc.domain.payment.exception.code.PaymentErrorCode;
 import com.example.ossdoc.global.properties.PortOneProperties;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 
+@Slf4j
 @Component
 @RequiredArgsConstructor
 public class PortOnePaymentClient {
@@ -21,25 +25,53 @@ public class PortOnePaymentClient {
     private final PortOneProperties portOneProperties;
     private final WebClient.Builder webClientBuilder;
 
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
     public PortOnePaymentSnapshot getPayment(String paymentId) {
         portOneProperties.validateApiConfig();
 
         try {
-            JsonNode root = webClient()
+            String body = webClient()
                     .get()
                     .uri("/payments/{paymentId}", paymentId)
-                    .retrieve()
-                    .bodyToMono(JsonNode.class)
+                    .exchangeToMono(response -> response.bodyToMono(String.class)
+                            .defaultIfEmpty("")
+                            .map(responseBody -> {
+                                if (response.statusCode().is2xxSuccessful()) {
+                                    return responseBody;
+                                }
+
+                                log.error(
+                                        "PortOne payment lookup failed. status={}, paymentId={}, body={}",
+                                        response.statusCode(),
+                                        paymentId,
+                                        responseBody
+                                );
+
+                                throw new PaymentException(PaymentErrorCode.PAYMENT_PROVIDER_ERROR);
+                            }))
                     .block();
 
-            if (root == null) {
+            if (body == null || body.isBlank()) {
+                log.error("PortOne payment lookup returned empty body. paymentId={}", paymentId);
                 throw new PaymentException(PaymentErrorCode.PAYMENT_PROVIDER_ERROR);
             }
+
+            JsonNode root = objectMapper.readTree(body);
+
+            log.info(
+                    "PortOne payment lookup success. paymentId={}, status={}, amount={}, currency={}",
+                    paymentId,
+                    text(root, "status", null),
+                    integer(root.path("amount"), "total"),
+                    text(root, "currency", null)
+            );
 
             return toSnapshot(root, paymentId);
         } catch (PaymentException e) {
             throw e;
         } catch (Exception e) {
+            log.error("PortOne payment lookup unexpected error. paymentId={}", paymentId, e);
             throw new PaymentException(PaymentErrorCode.PAYMENT_PROVIDER_ERROR);
         }
     }
@@ -48,22 +80,41 @@ public class PortOnePaymentClient {
         portOneProperties.validateApiConfig();
 
         try {
-            JsonNode root = webClient()
+            String body = webClient()
                     .post()
                     .uri("/payments/{paymentId}/cancel", paymentId)
+                    .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(new PortOneCancelRequest(reason))
-                    .retrieve()
-                    .bodyToMono(JsonNode.class)
+                    .exchangeToMono(response -> response.bodyToMono(String.class)
+                            .defaultIfEmpty("")
+                            .map(responseBody -> {
+                                if (response.statusCode().is2xxSuccessful()) {
+                                    return responseBody;
+                                }
+
+                                log.error(
+                                        "PortOne payment cancel failed. status={}, paymentId={}, body={}",
+                                        response.statusCode(),
+                                        paymentId,
+                                        responseBody
+                                );
+
+                                throw new PaymentException(PaymentErrorCode.PAYMENT_CANCEL_FAILED);
+                            }))
                     .block();
 
-            if (root == null) {
+            if (body == null || body.isBlank()) {
+                log.error("PortOne payment cancel returned empty body. paymentId={}", paymentId);
                 throw new PaymentException(PaymentErrorCode.PAYMENT_CANCEL_FAILED);
             }
+
+            JsonNode root = objectMapper.readTree(body);
 
             return toSnapshot(root, paymentId);
         } catch (PaymentException e) {
             throw e;
         } catch (Exception e) {
+            log.error("PortOne payment cancel unexpected error. paymentId={}", paymentId, e);
             throw new PaymentException(PaymentErrorCode.PAYMENT_CANCEL_FAILED);
         }
     }
@@ -75,6 +126,7 @@ public class PortOnePaymentClient {
                         HttpHeaders.AUTHORIZATION,
                         "PortOne " + portOneProperties.getApiSecret()
                 )
+                .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
                 .build();
     }
 
@@ -101,9 +153,11 @@ public class PortOnePaymentClient {
 
     private String text(JsonNode node, String field, String fallback) {
         JsonNode value = node.get(field);
+
         if (value == null || value.isNull()) {
             return fallback;
         }
+
         return value.asText();
     }
 
@@ -113,6 +167,7 @@ public class PortOnePaymentClient {
         }
 
         JsonNode value = node.get(field);
+
         if (value == null || value.isNull()) {
             return null;
         }
