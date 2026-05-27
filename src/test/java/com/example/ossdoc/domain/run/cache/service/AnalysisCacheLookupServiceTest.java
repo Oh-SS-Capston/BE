@@ -50,13 +50,13 @@ class AnalysisCacheLookupServiceTest {
     }
 
     @Test
-    void redis_hit이고_db_ready가_일치하면_즉시_hit_반환한다() {
+    void redisHitAndDbReady_returnsHit() {
         String cacheKey = "cache-key-1";
         AnalysisCache ready = readyCache(cacheKey, "run_1");
 
         when(redisStore.get("analysis:ready:" + cacheKey))
                 .thenReturn(Optional.of("{\"cacheKey\":\"cache-key-1\",\"sourceRunId\":\"run_1\"}"));
-        when(analysisCacheRepository.findByCacheKeyAndStatus(cacheKey, AnalysisCacheStatus.READY))
+        when(analysisCacheRepository.findByKeyAndStatus(cacheKey, AnalysisCacheStatus.READY))
                 .thenReturn(Optional.of(ready));
 
         AnalysisCacheLookupResult result = lookupService.lookupReady(
@@ -70,19 +70,19 @@ class AnalysisCacheLookupServiceTest {
         assertThat(result.reason()).isEqualTo("REDIS_HIT_DB_CONFIRMED");
         assertThat(ready.getHitCount()).isEqualTo(1L);
         verify(analysisCacheRepository, never())
-                .findTopByRepoUrlNormAndCommitShaAndStatusOrderByUpdatedAtDesc(any(), any(), any());
+                .findLatestByRepoAndCommitAndStatus(any(), any(), any());
     }
 
     @Test
-    void redis_hit인데_db_불일치면_redis_정리후_db_폴백으로_복구한다() {
+    void redisHitButDbMismatch_syncsRedisFromDb() {
         String inputCacheKey = "cache-key-input";
         AnalysisCache dbReady = readyCache("cache-key-db", "run_db");
 
         when(redisStore.get("analysis:ready:" + inputCacheKey))
                 .thenReturn(Optional.of("{\"cacheKey\":\"cache-key-input\",\"sourceRunId\":\"run_old\"}"));
-        when(analysisCacheRepository.findByCacheKeyAndStatus(inputCacheKey, AnalysisCacheStatus.READY))
+        when(analysisCacheRepository.findByKeyAndStatus(inputCacheKey, AnalysisCacheStatus.READY))
                 .thenReturn(Optional.empty());
-        when(analysisCacheRepository.findTopByRepoUrlNormAndCommitShaAndStatusOrderByUpdatedAtDesc(
+        when(analysisCacheRepository.findLatestByRepoAndCommitAndStatus(
                 "github://apache/commons-cli",
                 "e717fd63",
                 AnalysisCacheStatus.READY
@@ -103,12 +103,12 @@ class AnalysisCacheLookupServiceTest {
     }
 
     @Test
-    void redis_db_모두_miss면_신규_분석_대상으로_miss_반환한다() {
+    void redisAndDbMiss_returnsMiss() {
         String cacheKey = "cache-key-3";
 
         when(redisStore.get("analysis:ready:" + cacheKey))
                 .thenReturn(Optional.empty());
-        when(analysisCacheRepository.findTopByRepoUrlNormAndCommitShaAndStatusOrderByUpdatedAtDesc(
+        when(analysisCacheRepository.findLatestByRepoAndCommitAndStatus(
                 "github://apache/commons-cli",
                 "e717fd63",
                 AnalysisCacheStatus.READY
@@ -126,11 +126,11 @@ class AnalysisCacheLookupServiceTest {
     }
 
     @Test
-    void failed_쿨다운_활성_구간이면_재시도_차단_신호를_반환한다() {
+    void failedCooldownActive_returnsCoolingDown() {
         String cacheKey = "cache-key-failed";
         AnalysisCache failed = failedCache(cacheKey, "run_failed_1", 5);
 
-        when(analysisCacheRepository.findByCacheKeyAndStatus(cacheKey, AnalysisCacheStatus.FAILED))
+        when(analysisCacheRepository.findByKeyAndStatus(cacheKey, AnalysisCacheStatus.FAILED))
                 .thenReturn(Optional.of(failed));
 
         AnalysisCacheFailedCooldownResult result = lookupService.lookupFailedCooldown(
@@ -147,13 +147,13 @@ class AnalysisCacheLookupServiceTest {
     }
 
     @Test
-    void failed_쿨다운이_끝났으면_즉시_재시도_가능_상태를_반환한다() {
+    void failedCooldownExpired_returnsInactive() {
         String cacheKey = "cache-key-failed-expired";
         AnalysisCache failed = failedCache(cacheKey, "run_failed_2", -1);
 
-        when(analysisCacheRepository.findByCacheKeyAndStatus(cacheKey, AnalysisCacheStatus.FAILED))
+        when(analysisCacheRepository.findByKeyAndStatus(cacheKey, AnalysisCacheStatus.FAILED))
                 .thenReturn(Optional.of(failed));
-        when(analysisCacheRepository.findTopByRepoUrlNormAndCommitShaAndStatusOrderByUpdatedAtDesc(
+        when(analysisCacheRepository.findLatestByRepoAndCommitAndStatus(
                 "github://apache/commons-cli",
                 "e717fd63",
                 AnalysisCacheStatus.FAILED
@@ -197,3 +197,4 @@ class AnalysisCacheLookupServiceTest {
         return cache;
     }
 }
+

@@ -1,0 +1,64 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: ossdoc-redis
+    restart: unless-stopped
+    env_file:
+      - path: .env.redis
+        required: false
+    command:
+      - sh
+      - -c
+      - if [ -n "$$REDIS_PASSWORD" ]; then exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"; else exec redis-server --appendonly yes; fi
+    ports:
+      - "${REDIS_PUBLISH_PORT:-6379}:6379"
+    volumes:
+      - ossdoc_redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "if [ -n \"$$REDIS_PASSWORD\" ]; then redis-cli -a \"$$REDIS_PASSWORD\" ping; else redis-cli ping; fi"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ossdoc-app:latest
+    container_name: ossdoc-app
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    env_file:
+      - path: .env.app
+        required: false
+      - path: .env.docker
+        required: false
+      - path: .env.redis
+        required: false
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      OSSDOC_WORKSPACE_BASE_DIR: /workspace
+      MAVEN_COMMAND: /usr/bin/mvn
+      GRADLE_COMMAND: /usr/bin/gradle
+      JAVA11_HOME: /opt/jdks/11
+      JAVA17_HOME: /opt/jdks/17
+      JAVA21_HOME: /opt/java/openjdk
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    volumes:
+      - ossdoc_workspace:/workspace
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/swagger-ui/index.html >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+volumes:
+  ossdoc_redis_data:
+  ossdoc_workspace:

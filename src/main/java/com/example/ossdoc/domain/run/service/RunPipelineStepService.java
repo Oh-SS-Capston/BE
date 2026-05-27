@@ -14,10 +14,10 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 /*
- * 단계별 상태 저장 서비스입니다.
+ * ?④퀎蹂??곹깭 ????쒕퉬?ㅼ엯?덈떎.
  *
- * 각 단계 시작/성공/실패/건너뜀은 REQUIRES_NEW로 저장합니다.
- * 그래서 긴 작업 중에도 프론트 polling이 진행률을 볼 수 있습니다.
+ * 媛??④퀎 ?쒖옉/?깃났/?ㅽ뙣/嫄대꼫?? REQUIRES_NEW濡???ν빀?덈떎.
+ * 洹몃옒??湲??묒뾽 以묒뿉???꾨줎??polling??吏꾪뻾瑜좎쓣 蹂????덉뒿?덈떎.
  */
 @Service
 @RequiredArgsConstructor
@@ -35,7 +35,7 @@ public class RunPipelineStepService {
         step.start(message);
 
         /*
-         * 진행 상태는 repo_run이 아니라 run_pipeline_job에 저장합니다.
+         * 吏꾪뻾 ?곹깭??repo_run???꾨땲??run_pipeline_job????ν빀?덈떎.
          */
         job.updateProgress(stage, message);
     }
@@ -92,7 +92,7 @@ public class RunPipelineStepService {
             RepoRun run,
             RunStage stage
     ) {
-        return stepRepository.findByJobAndStage(job, stage)
+        return stepRepository.findStepByJobAndStage(job, stage)
                 .orElseGet(() -> stepRepository.save(
                         RunPipelineStepExecution.create(job, run, stage)
                 ));

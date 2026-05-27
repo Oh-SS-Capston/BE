@@ -39,17 +39,17 @@ public class RunProgressQueryService {
 
     @Transactional(readOnly = true)
     public RepoRunProgressResponse getProgress(String runId, Long userId) {
-        RepoRun run = repoRunRepository.findByRunIdAndOwner_Id(runId, userId)
+        RepoRun run = repoRunRepository.findOwnedRun(runId, userId)
                 .orElseThrow(() -> new RunException(RunErrorCode.RUN_FORBIDDEN));
 
         if (!membershipAccessService.canViewRun(run, run.getOwner())) {
             throw new MembershipException(MembershipErrorCode.MEMBERSHIP_REQUIRED);
         }
 
-        RunPipelineJob job = jobRepository.findByRun_RunId(runId)
+        RunPipelineJob job = jobRepository.findJobByRunId(runId)
                 .orElseThrow(() -> new RunException(RunErrorCode.PIPELINE_JOB_NOT_FOUND));
 
-        var stepEntities = stepRepository.findAllByRun_RunIdOrderByStepIdAsc(runId);
+        var stepEntities = stepRepository.findStepsByRunId(runId);
 
         List<RunStepProgressResponse> steps = stepEntities.stream()
                 .map(RunStepProgressResponse::from)

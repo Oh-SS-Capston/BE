@@ -14,13 +14,23 @@ import java.util.Optional;
 
 public interface RunPipelineJobRepository extends JpaRepository<RunPipelineJob, Long> {
 
-    boolean existsByRun_RunId(String runId);
+    @Query("""
+            SELECT CASE WHEN COUNT(j) > 0 THEN true ELSE false END
+            FROM RunPipelineJob j
+            WHERE j.run.runId = :runId
+            """)
+    boolean existsByRunId(@Param("runId") String runId);
 
-    Optional<RunPipelineJob> findByRun_RunId(String runId);
+    @Query("""
+            SELECT j
+            FROM RunPipelineJob j
+            WHERE j.run.runId = :runId
+            """)
+    Optional<RunPipelineJob> findJobByRunId(@Param("runId") String runId);
 
     /**
-     * 동일 저장소/커밋 기준으로 현재 진행 가능한(또는 진행 중인) 잡을 조회합니다.
-     * W09 락 경합 시 기존 실행에 attach할 대상 탐색에 사용합니다.
+     * 동일 저장소/커밋 기준으로 현재 진행 가능한(또는 진행 중인) 작업을 조회합니다.
+     * W09 락 경합 시 기존 실행을 attach할 대상 탐색에 사용합니다.
      */
     @Query("""
             SELECT j
@@ -60,7 +70,7 @@ public interface RunPipelineJobRepository extends JpaRepository<RunPipelineJob, 
     );
 
     /**
-     * 동일 repo/sha의 "내 run이 아닌" 활성 source job 1건을 찾습니다.
+     * 동일 repo/sha에서 "내 run이 아닌" 활성 source job 1건을 찾습니다.
      */
     @Query("""
             SELECT j
@@ -82,7 +92,7 @@ public interface RunPipelineJobRepository extends JpaRepository<RunPipelineJob, 
     );
 
     /**
-     * 동일 repo/sha의 "내 run이 아닌" 최근 완료 source job 1건을 찾습니다.
+     * 동일 repo/sha에서 "내 run이 아닌" 최근 완료 source job 1건을 찾습니다.
      */
     @Query("""
             SELECT j

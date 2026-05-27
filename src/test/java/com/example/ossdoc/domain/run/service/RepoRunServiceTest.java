@@ -100,7 +100,7 @@ class RepoRunServiceTest {
     }
 
     @Test
-    void cache_hit이면_신규_분석을_실행하지_않고_기존_run을_즉시_반환한다() {
+    void cacheHit_ownedRun_returnsCachedRun() {
         Long userId = 1L;
         RepoRunCreateRequest request = request("https://github.com/apache/commons-cli", "master");
         User owner = user(userId);
@@ -121,9 +121,9 @@ class RepoRunServiceTest {
         when(githubClient.resolveCommitSha("apache", "commons-cli", "master")).thenReturn("e717fd63");
         when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63")))
                 .thenReturn(AnalysisCacheLookupResult.hit("cache-key-1", "run_cached_001", "REDIS_HIT_DB_CONFIRMED"));
-        when(repoRunRepository.findByRunIdAndOwner_Id("run_cached_001", userId))
+        when(repoRunRepository.findOwnedRun("run_cached_001", userId))
                 .thenReturn(Optional.of(cachedRun));
-        when(runPipelineJobRepository.findByRun_RunId("run_cached_001"))
+        when(runPipelineJobRepository.findJobByRunId("run_cached_001"))
                 .thenReturn(Optional.of(successJob(cachedRun, userId)));
 
         RepoRunCreateResponse response = repoRunService.createRun(request, userId);
@@ -140,7 +140,7 @@ class RepoRunServiceTest {
     }
 
     @Test
-    void cache_hit이지만_타사용자_run이면_요청자_소유_공유_run을_생성해_반환한다() {
+    void cacheHit_sharedSourceRun_returnsSharedRunForRequester() {
         Long userId = 1L;
         RepoRunCreateRequest request = request("https://github.com/apache/commons-cli", "master");
         User requester = user(userId);
@@ -162,17 +162,17 @@ class RepoRunServiceTest {
         when(githubClient.resolveCommitSha("apache", "commons-cli", "master")).thenReturn("e717fd63");
         when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63")))
                 .thenReturn(AnalysisCacheLookupResult.hit("cache-key-1", "run_source_001", "REDIS_HIT_DB_CONFIRMED"));
-        when(repoRunRepository.findByRunIdAndOwner_Id("run_source_001", userId))
+        when(repoRunRepository.findOwnedRun("run_source_001", userId))
                 .thenReturn(Optional.empty());
         when(repoRunRepository.findById("run_source_001"))
                 .thenReturn(Optional.of(sourceRun));
         when(repoRunRepository.save(any(RepoRun.class)))
                 .thenAnswer(invocation -> invocation.getArgument(0));
-        when(runPipelineJobRepository.findByRun_RunId("run_source_001"))
+        when(runPipelineJobRepository.findJobByRunId("run_source_001"))
                 .thenReturn(Optional.of(successJob(sourceRun, userId)));
         when(runPipelineJobRepository.save(any()))
                 .thenAnswer(invocation -> invocation.getArgument(0));
-        when(runPipelineStepExecutionRepository.findAllByRun_RunIdOrderByStepIdAsc("run_source_001"))
+        when(runPipelineStepExecutionRepository.findStepsByRunId("run_source_001"))
                 .thenReturn(List.of());
         when(artifactRepository.findAllByRun_RunIdOrderByArtifactIdAsc("run_source_001"))
                 .thenReturn(List.of());
@@ -191,7 +191,7 @@ class RepoRunServiceTest {
     }
 
     @Test
-    void cache_hit이더라도_부분성공_결과면_재사용하지_않고_신규_분석을_실행한다() {
+    void cacheHit_nonFullSource_fallsBackToNewAnalysis() {
         Long userId = 1L;
         RepoRunCreateRequest request = request("https://github.com/apache/commons-cli", "master");
         User requester = user(userId);
@@ -213,7 +213,7 @@ class RepoRunServiceTest {
         when(githubClient.resolveCommitSha("apache", "commons-cli", "master")).thenReturn("e717fd63");
         when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63")))
                 .thenReturn(AnalysisCacheLookupResult.hit("cache-key-1", "run_source_partial_001", "REDIS_HIT_DB_CONFIRMED"));
-        when(repoRunRepository.findByRunIdAndOwner_Id("run_source_partial_001", userId))
+        when(repoRunRepository.findOwnedRun("run_source_partial_001", userId))
                 .thenReturn(Optional.empty());
         when(repoRunRepository.findById("run_source_partial_001"))
                 .thenReturn(Optional.of(sourceRun));
@@ -234,7 +234,7 @@ class RepoRunServiceTest {
     }
 
     @Test
-    void cache_miss이면_기존처럼_신규_run을_저장하고_파이프라인을_enqueue한다() {
+    void cacheMiss_enqueuesNewRun() {
         Long userId = 1L;
         RepoRunCreateRequest request = request("https://github.com/apache/commons-cli", "master");
         User owner = user(userId);
@@ -261,7 +261,7 @@ class RepoRunServiceTest {
     }
 
     @Test
-    void cache_miss_락_경합이고_내_진행중_run이_있으면_신규_생성_없이_attach_반환한다() {
+    void cacheMiss_lockContentionWithOwnedActiveRun_returnsAttachedRun() {
         Long userId = 1L;
         RepoRunCreateRequest request = request("https://github.com/apache/commons-cli", "master");
         User owner = user(userId);
@@ -299,7 +299,7 @@ class RepoRunServiceTest {
     }
 
     @Test
-    void cache_miss_락_경합이고_타사용자_진행중_run이_FULL계열이면_WAIT_run을_생성한다() {
+    void cacheMiss_lockContentionWithForeignFullRun_returnsWaitingRun() {
         Long userId = 1L;
         RepoRunCreateRequest request = request("https://github.com/apache/commons-cli", "master");
         User requester = user(userId);
@@ -342,7 +342,7 @@ class RepoRunServiceTest {
     }
 
     @Test
-    void cache_miss_락_경합이고_source_buildMode가_NON_FULL이면_즉시_조기탈출_분석을_시작한다() {
+    void cacheMiss_lockContentionWithForeignNonFullRun_fallsBackToNewRun() {
         Long userId = 1L;
         RepoRunCreateRequest request = request("https://github.com/apache/commons-cli", "master");
         User requester = user(userId);
@@ -396,7 +396,7 @@ class RepoRunServiceTest {
     }
 
     @Test
-    void ready_miss_후_failed_쿨다운_중이면_신규_enqueue_없이_기존_실패_run을_반환한다() {
+    void readyMiss_failedCooldownOwnedRun_returnsOwnedFailedRun() {
         Long userId = 1L;
         RepoRunCreateRequest request = request("https://github.com/apache/commons-cli", "master");
         User requester = user(userId);
@@ -424,7 +424,7 @@ class RepoRunServiceTest {
                         java.time.LocalDateTime.now().plusMinutes(3),
                         "FAILED_COOLDOWN_BY_KEY"
                 ));
-        when(repoRunRepository.findByRunIdAndOwner_Id("run_failed_001", userId))
+        when(repoRunRepository.findOwnedRun("run_failed_001", userId))
                 .thenReturn(Optional.of(failedRun));
 
         RepoRunCreateResponse response = repoRunService.createRun(request, userId);
@@ -439,7 +439,7 @@ class RepoRunServiceTest {
     }
 
     @Test
-    void ready_miss_후_failed_쿨다운_중이어도_타사용자_실패면_내_신규분석으로_진행한다() {
+    void readyMiss_failedCooldownForeignRun_allowsNewAnalysis() {
         Long userId = 1L;
         RepoRunCreateRequest request = request("https://github.com/apache/commons-cli", "master");
         User requester = user(userId);
@@ -468,7 +468,7 @@ class RepoRunServiceTest {
                         java.time.LocalDateTime.now().plusSeconds(30),
                         "FAILED_COOLDOWN_BY_KEY"
                 ));
-        when(repoRunRepository.findByRunIdAndOwner_Id("run_failed_002", userId))
+        when(repoRunRepository.findOwnedRun("run_failed_002", userId))
                 .thenReturn(Optional.empty());
         when(repoRunRepository.findById("run_failed_002"))
                 .thenReturn(Optional.of(failedRunOfAnotherUser));
@@ -485,7 +485,7 @@ class RepoRunServiceTest {
     }
 
     @Test
-    void forceRebuild_true면_ready_hit이_있어도_캐시를_우회하고_신규분석을_시작한다() {
+    void forceRebuildTrue_bypassesReadyHitAndStartsNewRun() {
         Long userId = 1L;
         RepoRunCreateRequest request = request("https://github.com/apache/commons-cli", "master", true);
         User owner = user(userId);
@@ -542,3 +542,4 @@ class RepoRunServiceTest {
     }
 
 }
+

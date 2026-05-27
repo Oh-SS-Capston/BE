@@ -1,15 +1,22 @@
 .git
+.gitignore
 .gradle
+.gradle-home
+.idea
+.vscode
 build
 out
-.idea
-*.iml
-
+workspace
 logs
 runs
-workspace
 data
 tmp
 artifacts
 
+.env
+.env.*
+!.env.app.example
+!.env.redis.example
+
+*.iml
 *.log

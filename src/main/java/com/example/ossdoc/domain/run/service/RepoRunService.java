@@ -469,7 +469,7 @@ public class RepoRunService {
 
     @Transactional(readOnly = true)
     public List<RepoRunRecentResponse> getRecentRuns(Long userId) {
-        return repoRunRepository.findTop10ByOwner_IdOrderByCreatedAtDesc(userId)
+        return repoRunRepository.findRecentRunsByOwner(userId)
                 .stream()
                 .map(RepoRunRecentResponse::from)
                 .toList();
@@ -510,7 +510,7 @@ public class RepoRunService {
             return null;
         }
 
-        return repoRunRepository.findByRunIdAndOwner_Id(sourceRunId, userId)
+        return repoRunRepository.findOwnedRun(sourceRunId, userId)
                 .orElse(null);
     }
 
@@ -540,7 +540,7 @@ public class RepoRunService {
             return false;
         }
 
-        return runPipelineJobRepository.findByRun_RunId(run.getRunId())
+        return runPipelineJobRepository.findJobByRunId(run.getRunId())
                 .map(job -> job.getStatus() == PipelineJobStatus.SUCCESS)
                 .orElse(false);
     }
@@ -591,7 +591,7 @@ public class RepoRunService {
         RunPipelineJob sharedJob = RunPipelineJob.create(sharedRun, requestUserId);
         sharedJob.markSuccess();
 
-        RunPipelineJob sourceJob = runPipelineJobRepository.findByRun_RunId(sourceRunId)
+        RunPipelineJob sourceJob = runPipelineJobRepository.findJobByRunId(sourceRunId)
                 .orElse(null);
 
         if (sourceJob == null) {
@@ -616,7 +616,7 @@ public class RepoRunService {
      */
     private void copyStepExecutionSnapshots(String sourceRunId, RepoRun sharedRun, RunPipelineJob sharedJob) {
         List<RunPipelineStepExecution> sourceSteps =
-                runPipelineStepExecutionRepository.findAllByRun_RunIdOrderByStepIdAsc(sourceRunId);
+                runPipelineStepExecutionRepository.findStepsByRunId(sourceRunId);
 
         for (RunPipelineStepExecution sourceStep : sourceSteps) {
             RunPipelineStepExecution copied = RunPipelineStepExecution.create(
