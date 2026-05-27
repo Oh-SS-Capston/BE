@@ -1,7 +1,6 @@
 package com.example.ossdoc.domain.rule.service.miner;
 
 import com.example.ossdoc.domain.rule.dto.projection.GuardReturnProjection;
-import com.example.ossdoc.domain.rule.entity.RuleCandidate;
 import com.example.ossdoc.domain.rule.enums.RuleCandidateConfidence;
 import com.example.ossdoc.domain.rule.enums.RuleCandidateKind;
 import com.example.ossdoc.domain.rule.enums.RuleCandidateSource;
@@ -42,7 +41,7 @@ public class GuardReturnMiner extends AbstractRuleCandidateMiner {
         List<GuardReturnProjection> projections =
                 ruleMiningQueryRepository.findGuardReturnSignals(run.getRunId());
 
-        int saved = 0;
+        List<CandidateDraft> drafts = new ArrayList<>();
 
         for (GuardReturnProjection projection : projections) {
             RuleCandidateConfidence confidence = confidenceByDistance(projection.lineDistance());
@@ -67,27 +66,6 @@ public class GuardReturnMiner extends AbstractRuleCandidateMiner {
 
             int supportCount = projection.errorResponseSignal() == null ? 2 : 3;
 
-            RuleCandidate candidate = upsertCandidate(
-                    run,
-                    ruleKey,
-                    RuleCandidateKind.GUARD_RETURN,
-                    confidence,
-                    RuleCandidateSource.MIXED,
-                    projection.methodSymbol(),
-                    safeSymbolId(projection.methodSymbol()),
-                    title,
-                    description,
-                    ruleKey,
-                    score(confidence, supportCount),
-                    supportCount,
-                    false,
-                    summaryNode("IF_CONDITION_THEN_RETURN", conditionText, actionText),
-                    impactNode("MEDIUM", "잘못된 입력이나 상태에서 흐름을 조기에 종료하는 방어 로직일 가능성이 있습니다."),
-                    metaNode("GuardReturnMiner")
-                            .put("lineDistance", projection.lineDistance())
-                            .put("hasErrorResponse", projection.errorResponseSignal() != null)
-            );
-
             List<CandidateEvidenceDraft> evidences = new ArrayList<>();
             evidences.add(evidenceDraft(
                     projection.conditionSignal(),
@@ -111,10 +89,29 @@ public class GuardReturnMiner extends AbstractRuleCandidateMiner {
                 ));
             }
 
-            saveEvidenceLinks(candidate, evidences);
-
-            saved++;
+            drafts.add(candidateDraft(
+                    ruleKey,
+                    RuleCandidateKind.GUARD_RETURN,
+                    confidence,
+                    RuleCandidateSource.MIXED,
+                    projection.methodSymbol(),
+                    safeSymbolId(projection.methodSymbol()),
+                    title,
+                    description,
+                    ruleKey,
+                    score(confidence, supportCount),
+                    supportCount,
+                    false,
+                    summaryNode("IF_CONDITION_THEN_RETURN", conditionText, actionText),
+                    impactNode("MEDIUM", "잘못된 입력이나 상태에서 흐름을 조기에 종료하는 방어 로직일 가능성이 있습니다."),
+                    metaNode("GuardReturnMiner")
+                            .put("lineDistance", projection.lineDistance())
+                            .put("hasErrorResponse", projection.errorResponseSignal() != null),
+                    evidences
+            ));
         }
+
+        int saved = saveCandidateDrafts(run, drafts);
 
         log.info("[RULE-MINING] GuardReturnMiner completed. runId={}, candidates={}", run.getRunId(), saved);
         return saved;

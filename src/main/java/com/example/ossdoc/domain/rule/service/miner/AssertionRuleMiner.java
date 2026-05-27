@@ -1,7 +1,6 @@
 package com.example.ossdoc.domain.rule.service.miner;
 
 import com.example.ossdoc.domain.rule.dto.projection.AssertionCallProjection;
-import com.example.ossdoc.domain.rule.entity.RuleCandidate;
 import com.example.ossdoc.domain.rule.enums.RuleCandidateConfidence;
 import com.example.ossdoc.domain.rule.enums.RuleCandidateKind;
 import com.example.ossdoc.domain.rule.enums.RuleCandidateSource;
@@ -14,6 +13,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.ArrayList;
 import java.util.List;
 
 @Slf4j
@@ -42,7 +42,7 @@ public class AssertionRuleMiner extends AbstractRuleCandidateMiner {
         List<AssertionCallProjection> projections =
                 ruleMiningQueryRepository.findAssertionCallSignals(run.getRunId());
 
-        int saved = 0;
+        List<CandidateDraft> drafts = new ArrayList<>();
 
         for (AssertionCallProjection projection : projections) {
             RuleMiningSignalType assertionType = projection.assertionType();
@@ -64,8 +64,7 @@ public class AssertionRuleMiner extends AbstractRuleCandidateMiner {
                     ? RuleCandidateConfidence.HIGH
                     : RuleCandidateConfidence.MEDIUM;
 
-            RuleCandidate candidate = upsertCandidate(
-                    run,
+            drafts.add(candidateDraft(
                     ruleKey,
                     RuleCandidateKind.ASSERTION_RULE,
                     confidence,
@@ -81,20 +80,19 @@ public class AssertionRuleMiner extends AbstractRuleCandidateMiner {
                     summaryNode(assertionType.name(), null, assertionText),
                     impactNode("MEDIUM", "메서드 실행 전 입력값 또는 상태를 검증하는 규칙일 가능성이 있습니다."),
                     metaNode("AssertionRuleMiner")
-                            .put("assertionType", assertionType.name())
-            );
-
-            saveEvidenceLinks(candidate, List.of(
-                    evidenceDraft(
-                            projection.assertionSignal(),
-                            assertionType.name(),
-                            WEIGHT_PRIMARY,
-                            "전제조건 검증 호출 신호"
+                            .put("assertionType", assertionType.name()),
+                    List.of(
+                            evidenceDraft(
+                                    projection.assertionSignal(),
+                                    assertionType.name(),
+                                    WEIGHT_PRIMARY,
+                                    "전제조건 검증 호출 신호"
+                            )
                     )
             ));
-
-            saved++;
         }
+
+        int saved = saveCandidateDrafts(run, drafts);
 
         log.info("[RULE-MINING] AssertionRuleMiner completed. runId={}, candidates={}", run.getRunId(), saved);
         return saved;

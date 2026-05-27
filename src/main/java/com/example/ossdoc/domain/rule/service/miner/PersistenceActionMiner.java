@@ -1,7 +1,6 @@
 package com.example.ossdoc.domain.rule.service.miner;
 
 import com.example.ossdoc.domain.rule.dto.projection.PersistenceActionProjection;
-import com.example.ossdoc.domain.rule.entity.RuleCandidate;
 import com.example.ossdoc.domain.rule.enums.RuleCandidateConfidence;
 import com.example.ossdoc.domain.rule.enums.RuleCandidateKind;
 import com.example.ossdoc.domain.rule.enums.RuleCandidateSource;
@@ -15,6 +14,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.ArrayList;
 import java.util.List;
 
 @Slf4j
@@ -43,11 +43,11 @@ public class PersistenceActionMiner extends AbstractRuleCandidateMiner {
     @Override
     @Transactional
     public int mine(RepoRun run) {
-        // @Transactional 신호가 없으면 영속 프레임워크 미사용 프로젝트 → 패스
         boolean hasPersistenceFramework = ruleMiningSignalRepository.existsByRun_RunIdAndSignalType(
                 run.getRunId(),
                 RuleMiningSignalType.TRANSACTION_BOUNDARY
         );
+
         if (!hasPersistenceFramework) {
             log.info(
                     "[RULE-MINING] PersistenceActionMiner skipped: no @Transactional signals found. runId={}",
@@ -59,7 +59,7 @@ public class PersistenceActionMiner extends AbstractRuleCandidateMiner {
         List<PersistenceActionProjection> projections =
                 ruleMiningQueryRepository.findPersistenceActionSignals(run.getRunId());
 
-        int saved = 0;
+        List<CandidateDraft> drafts = new ArrayList<>();
 
         for (PersistenceActionProjection projection : projections) {
             RuleMiningSignalType actionType = projection.actionType();
@@ -81,8 +81,7 @@ public class PersistenceActionMiner extends AbstractRuleCandidateMiner {
 
             RuleCandidateConfidence confidence = RuleCandidateConfidence.MEDIUM;
 
-            RuleCandidate candidate = upsertCandidate(
-                    run,
+            drafts.add(candidateDraft(
                     ruleKey,
                     RuleCandidateKind.PERSISTENCE_ACTION,
                     confidence,
@@ -98,20 +97,19 @@ public class PersistenceActionMiner extends AbstractRuleCandidateMiner {
                     summaryNode("PERSISTENCE_" + actionLabel.toUpperCase(), null, actionText),
                     impactNode("MEDIUM", "데이터 저장, 수정, 삭제 흐름의 핵심 동작일 가능성이 있습니다."),
                     metaNode("PersistenceActionMiner")
-                            .put("actionType", actionType.name())
-            );
-
-            saveEvidenceLinks(candidate, List.of(
-                    evidenceDraft(
-                            projection.actionSignal(),
-                            actionType.name(),
-                            WEIGHT_PRIMARY,
-                            "영속성 동작 호출 신호"
+                            .put("actionType", actionType.name()),
+                    List.of(
+                            evidenceDraft(
+                                    projection.actionSignal(),
+                                    actionType.name(),
+                                    WEIGHT_PRIMARY,
+                                    "영속성 동작 호출 신호"
+                            )
                     )
             ));
-
-            saved++;
         }
+
+        int saved = saveCandidateDrafts(run, drafts);
 
         log.info("[RULE-MINING] PersistenceActionMiner completed. runId={}, candidates={}", run.getRunId(), saved);
         return saved;
