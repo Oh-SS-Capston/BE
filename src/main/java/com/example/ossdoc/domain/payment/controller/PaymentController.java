@@ -68,29 +68,6 @@ public class PaymentController {
     }
 
     /*
-     * 테스트 결제 취소 API입니다.
-     *
-     * 주의:
-     * 이미 충전된 토큰을 사용한 뒤에는 결제 취소 정책을 별도로 정해야 합니다.
-     */
-    @PostMapping("/{paymentId}/cancel")
-    public ApiResponse<PaymentCancelResponse> cancel(
-            @AuthenticationPrincipal AuthenticatedUser authenticatedUser,
-            @PathVariable String paymentId,
-            @RequestBody(required = false) PaymentCancelRequest request
-    ) {
-        validateAuthenticated(authenticatedUser);
-
-        return ApiResponse.onSuccess(
-                paymentService.cancelPayment(
-                        authenticatedUser.getUserId(),
-                        paymentId,
-                        request
-                )
-        );
-    }
-
-    /*
      * PortOne Webhook 수신 API입니다.
      */
     @PostMapping("/webhook")
