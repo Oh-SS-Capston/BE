@@ -2,51 +2,38 @@ package com.example.ossdoc.global.security.oauth;
 
 import com.example.ossdoc.domain.user.entity.User;
 import lombok.Getter;
-import lombok.RequiredArgsConstructor;
-import org.springframework.security.core.GrantedAuthority;
-import org.springframework.security.core.authority.SimpleGrantedAuthority;
-import org.springframework.security.oauth2.core.oidc.OidcIdToken;
-import org.springframework.security.oauth2.core.oidc.user.OidcUser;
-import org.springframework.security.oauth2.core.oidc.OidcUserInfo;
+import org.springframework.security.oauth2.core.user.OAuth2User;
 
 import java.util.Collection;
-import java.util.List;
 import java.util.Map;
 
 @Getter
-@RequiredArgsConstructor
-public class CustomOAuth2User implements OidcUser {
+public class CustomOAuth2User implements OAuth2User {
 
     private final User user;
-    private final OidcUser oidcUser;
+    private final OAuth2User delegate;
 
-    @Override
-    public Map<String, Object> getClaims() {
-        return oidcUser.getClaims();
-    }
-
-    @Override
-    public OidcUserInfo getUserInfo() {
-        return oidcUser.getUserInfo();
-    }
-
-    @Override
-    public OidcIdToken getIdToken() {
-        return oidcUser.getIdToken();
+    public CustomOAuth2User(User user, OAuth2User delegate) {
+        this.user = user;
+        this.delegate = delegate;
     }
 
     @Override
     public Map<String, Object> getAttributes() {
-        return oidcUser.getAttributes();
+        return delegate.getAttributes();
     }
 
+    /**
+     * 현재 서비스는 권한 기반 처리를 사용하지 않습니다.
+     * Google OAuth 기본 authority를 그대로 반환하거나 빈 리스트를 반환해도 됩니다.
+     */
     @Override
-    public Collection<? extends GrantedAuthority> getAuthorities() {
-        return List.of(new SimpleGrantedAuthority("ROLE_" + user.getRole().name()));
+    public Collection getAuthorities() {
+        return delegate.getAuthorities();
     }
 
     @Override
     public String getName() {
-        return String.valueOf(user.getId());
+        return user.getEmail();
     }
 }

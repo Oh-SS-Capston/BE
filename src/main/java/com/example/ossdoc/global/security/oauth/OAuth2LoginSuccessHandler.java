@@ -1,15 +1,15 @@
 package com.example.ossdoc.global.security.oauth;
 
+import com.example.ossdoc.domain.auth.exception.AuthException;
+import com.example.ossdoc.domain.auth.exception.code.AuthErrorCode;
 import com.example.ossdoc.domain.auth.service.AuthService;
 import com.example.ossdoc.domain.user.entity.User;
 import com.example.ossdoc.global.properties.AuthProperties;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
-import jakarta.servlet.http.HttpSession;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.core.Authentication;
-import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.web.authentication.SimpleUrlAuthenticationSuccessHandler;
 import org.springframework.stereotype.Component;
 
@@ -23,26 +23,37 @@ public class OAuth2LoginSuccessHandler extends SimpleUrlAuthenticationSuccessHan
     private final AuthProperties authProperties;
 
     @Override
-    public void onAuthenticationSuccess(HttpServletRequest request,
-                                        HttpServletResponse response,
-                                        Authentication authentication) throws IOException, ServletException {
+    public void onAuthenticationSuccess(
+            HttpServletRequest request,
+            HttpServletResponse response,
+            Authentication authentication
+    ) throws IOException, ServletException {
+        User user = extractUser(authentication);
 
-        CustomOAuth2User principal = (CustomOAuth2User) authentication.getPrincipal();
-        User user = principal.getUser();
-
-        authService.issueLoginTokens(user, response);
-        clearAuthenticationAttributes(request);
-
-        HttpSession session = request.getSession(false);
-        if (session != null) {
-            session.invalidate();
+        if (!user.isActive()) {
+            throw new AuthException(AuthErrorCode.INACTIVE_USER);
         }
 
-        SecurityContextHolder.clearContext();
+        authService.issueLoginTokens(user, response);
 
         getRedirectStrategy().sendRedirect(
                 request,
                 response,
-                authProperties.getFrontendSuccessRedirectUri());
+                authProperties.getFrontendSuccessRedirectUri()
+        );
+    }
+
+    private User extractUser(Authentication authentication) {
+        Object principal = authentication.getPrincipal();
+
+        if (principal instanceof CustomOidcUser customOidcUser) {
+            return customOidcUser.getUser();
+        }
+
+        if (principal instanceof CustomOAuth2User customOAuth2User) {
+            return customOAuth2User.getUser();
+        }
+
+        throw new AuthException(AuthErrorCode.OAUTH2_LOGIN_FAILED);
     }
 }

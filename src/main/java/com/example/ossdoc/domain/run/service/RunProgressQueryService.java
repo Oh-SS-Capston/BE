@@ -15,6 +15,9 @@ import com.example.ossdoc.domain.run.exception.code.RunErrorCode;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.example.ossdoc.domain.run.repository.RunPipelineJobRepository;
 import com.example.ossdoc.domain.run.repository.RunPipelineStepExecutionRepository;
+import com.example.ossdoc.domain.membership.exception.MembershipException;
+import com.example.ossdoc.domain.membership.exception.code.MembershipErrorCode;
+import com.example.ossdoc.domain.membership.service.MembershipAccessService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -22,7 +25,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.List;
 
 /*
- * ?꾨줎??polling??吏꾪뻾 ?곹깭 議고쉶 ?쒕퉬?ㅼ엯?덈떎.
+ * 프론트 polling용 진행 상태 조회 서비스입니다.
  */
 @Service
 @RequiredArgsConstructor
@@ -32,11 +35,16 @@ public class RunProgressQueryService {
     private final RunPipelineJobRepository jobRepository;
     private final RunPipelineStepExecutionRepository stepRepository;
     private final ArtifactRepository artifactRepository;
+    private final MembershipAccessService membershipAccessService;
 
     @Transactional(readOnly = true)
     public RepoRunProgressResponse getProgress(String runId, Long userId) {
         RepoRun run = repoRunRepository.findOwnedRun(runId, userId)
                 .orElseThrow(() -> new RunException(RunErrorCode.RUN_FORBIDDEN));
+
+        if (!membershipAccessService.canViewRun(run, run.getOwner())) {
+            throw new MembershipException(MembershipErrorCode.MEMBERSHIP_REQUIRED);
+        }
 
         RunPipelineJob job = jobRepository.findJobByRunId(runId)
                 .orElseThrow(() -> new RunException(RunErrorCode.PIPELINE_JOB_NOT_FOUND));
@@ -104,4 +112,3 @@ public class RunProgressQueryService {
                 .orElse(null);
     }
 }
-

@@ -106,6 +106,11 @@ app:
     refresh-cookie-name: ${REFRESH_COOKIE_NAME:ossdoc_refresh_token}
     secure-cookie: ${AUTH_SECURE_COOKIE:false}
     same-site: ${AUTH_COOKIE_SAME_SITE:Lax}
+  account:
+    rejoin-wait-days: ${ACCOUNT_REJOIN_WAIT_DAYS:30}
+
+  membership:
+    payment-provider: ${MEMBERSHIP_PAYMENT_PROVIDER:PORTONE_V2}
 
 jwt:
   issuer: ${JWT_ISSUER:ossdoc}
@@ -136,6 +141,14 @@ github:
     token: ${GITHUB_STATS_TOKEN:}
     cache-ttl-minutes: ${GITHUB_STATS_CACHE_TTL_MINUTES:360}
     api-timeout-seconds: ${GITHUB_STATS_API_TIMEOUT_SECONDS:30}
+
+portone:
+  env: ${PORTONE_ENV:test}
+  store-id: ${PORTONE_STORE_ID:}
+  channel-key: ${PORTONE_CHANNEL_KEY:}
+  api-secret: ${PORTONE_API_SECRET:}
+  webhook-secret: ${PORTONE_WEBHOOK_SECRET:}
+  api-base-url: ${PORTONE_API_BASE_URL:https://api.portone.io}
 
 logging:
   level:
