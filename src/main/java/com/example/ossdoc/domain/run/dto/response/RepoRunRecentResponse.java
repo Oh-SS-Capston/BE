@@ -1,5 +1,6 @@
 package com.example.ossdoc.domain.run.dto.response;
 
+import com.example.ossdoc.domain.membership.enums.AnalysisAccessType;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.enums.RunStatus;
 import lombok.Builder;
@@ -23,6 +24,7 @@ public class RepoRunRecentResponse {
     private String resolvedRef;
     private String commitSha;
     private RunStatus status;
+    private AnalysisAccessType analysisAccessType;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 
@@ -35,6 +37,7 @@ public class RepoRunRecentResponse {
                 .repoName(run.getRepoName())
                 .resolvedRef(run.getResolvedRef())
                 .commitSha(run.getCommitSha())
+                .status(run.getStatus())
                 .status(run.getStatus())
                 .createdAt(run.getCreatedAt())
                 .updatedAt(run.getUpdatedAt())
