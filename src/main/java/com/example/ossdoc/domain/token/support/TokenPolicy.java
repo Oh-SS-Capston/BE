@@ -4,6 +4,7 @@ public final class TokenPolicy {
 
     public static final long ANALYSIS_COST = 2_000L;
     public static final long REANALYSIS_COST = 500L;
+    public static final long SIGNUP_BONUS_TOKENS = 2_500L;
 
     private TokenPolicy() {
     }

@@ -76,16 +76,6 @@ public class UserTokenWallet extends BaseAuditedEntity {
         this.totalUsed += amount;
     }
 
-    public void refund(long amount) {
-        validatePositiveAmount(amount);
-
-        this.balance += amount;
-
-        if (this.totalUsed >= amount) {
-            this.totalUsed -= amount;
-        }
-    }
-
     private void validatePositiveAmount(long amount) {
         if (amount <= 0) {
             throw new IllegalArgumentException("토큰 금액은 0보다 커야 합니다.");
