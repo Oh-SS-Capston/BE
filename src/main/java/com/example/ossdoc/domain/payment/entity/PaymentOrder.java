@@ -1,6 +1,5 @@
 package com.example.ossdoc.domain.payment.entity;
 
-import com.example.ossdoc.domain.membership.enums.MembershipPlan;
 import com.example.ossdoc.domain.membership.enums.PaymentProvider;
 import com.example.ossdoc.domain.payment.enums.PaymentStatus;
 import com.example.ossdoc.domain.user.entity.User;
@@ -45,7 +44,11 @@ public class PaymentOrder extends BaseAuditedEntity {
     private String paymentId;
 
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
-    @JoinColumn(name = "user_id", nullable = false)
+    @JoinColumn(
+            name = "user_id",
+            nullable = false,
+            foreignKey = @ForeignKey(name = "fk_payment_order_user")
+    )
     private User user;
 
     @Enumerated(EnumType.STRING)
@@ -56,15 +59,18 @@ public class PaymentOrder extends BaseAuditedEntity {
     @Column(nullable = false, length = 30)
     private PaymentStatus status;
 
-    @Enumerated(EnumType.STRING)
-    @Column(nullable = false, length = 30)
-    private MembershipPlan plan;
-
     @Column(name = "order_name", nullable = false, length = 120)
     private String orderName;
 
+    /*
+     * 실제 결제 금액입니다.
+     * 1 KRW = 1 Token이므로 amount와 tokenAmount는 현재 동일합니다.
+     */
     @Column(nullable = false)
     private int amount;
+
+    @Column(name = "token_amount", nullable = false)
+    private int tokenAmount;
 
     @Column(nullable = false, length = 10)
     private String currency;
@@ -93,12 +99,12 @@ public class PaymentOrder extends BaseAuditedEntity {
     @Column(name = "cancel_reason", length = 500)
     private String cancelReason;
 
-    public static PaymentOrder ready(
+    public static PaymentOrder readyForTokenCharge(
             User user,
             String paymentId,
-            MembershipPlan plan,
             String orderName,
             int amount,
+            int tokenAmount,
             String currency,
             String customerKey
     ) {
@@ -107,9 +113,9 @@ public class PaymentOrder extends BaseAuditedEntity {
                 .user(user)
                 .provider(PaymentProvider.PORTONE_V2)
                 .status(PaymentStatus.READY)
-                .plan(plan)
                 .orderName(orderName)
                 .amount(amount)
+                .tokenAmount(tokenAmount)
                 .currency(currency)
                 .customerKey(customerKey)
                 .build();
