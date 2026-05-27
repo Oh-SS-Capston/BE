@@ -2,6 +2,7 @@ package com.example.ossdoc.domain.rule.service.miner;
 
 import com.example.ossdoc.domain.graphstore.entity.Edge;
 import com.example.ossdoc.domain.graphstore.entity.Evidence;
+import com.example.ossdoc.domain.graphstore.entity.SymbolEntity;
 import com.example.ossdoc.domain.rule.entity.RuleCandidate;
 import com.example.ossdoc.domain.rule.entity.RuleCandidateEvidence;
 import com.example.ossdoc.domain.rule.entity.RuleMiningSignal;
@@ -17,14 +18,22 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashMap;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
-import java.util.Optional;
+import java.util.Map;
+import java.util.Set;
 
 public abstract class AbstractRuleCandidateMiner implements RuleCandidateMiner {
 
     protected static final BigDecimal WEIGHT_PRIMARY = new BigDecimal("1.0000");
     protected static final BigDecimal WEIGHT_SUPPORTING = new BigDecimal("0.7000");
+
+    private static final int MAX_SNIPPET_LENGTH = 500;
+    private static final int MAX_NOTE_LENGTH = 300;
 
     protected final RuleCandidateRepository ruleCandidateRepository;
     protected final RuleCandidateEvidenceRepository ruleCandidateEvidenceRepository;
@@ -37,13 +46,237 @@ public abstract class AbstractRuleCandidateMiner implements RuleCandidateMiner {
         this.ruleCandidateEvidenceRepository = ruleCandidateEvidenceRepository;
     }
 
-    protected RuleCandidate upsertCandidate(
+    protected int saveCandidateDrafts(
             RepoRun run,
+            Collection<CandidateDraft> drafts
+    ) {
+        if (run == null || drafts == null || drafts.isEmpty()) {
+            return 0;
+        }
+
+        List<CandidateDraft> mergedDrafts = mergeDraftsByRuleKey(drafts);
+        if (mergedDrafts.isEmpty()) {
+            return 0;
+        }
+
+        List<String> ruleKeys = mergedDrafts.stream()
+                .map(CandidateDraft::ruleKey)
+                .filter(ruleKey -> ruleKey != null && !ruleKey.isBlank())
+                .toList();
+
+        if (ruleKeys.isEmpty()) {
+            return 0;
+        }
+
+        Map<String, RuleCandidate> existingByRuleKey =
+                loadExistingCandidatesByRuleKey(run.getRunId(), ruleKeys);
+
+        List<Long> existingCandidateIds = existingByRuleKey.values().stream()
+                .map(RuleCandidate::getCandidateId)
+                .filter(id -> id != null)
+                .toList();
+
+        if (!existingCandidateIds.isEmpty()) {
+            ruleCandidateEvidenceRepository.deleteByCandidateIdInBulk(existingCandidateIds);
+        }
+
+        List<RuleCandidate> candidatesToSave = new ArrayList<>();
+
+        for (CandidateDraft draft : mergedDrafts) {
+            if (draft.ruleKey() == null || draft.ruleKey().isBlank()) {
+                continue;
+            }
+
+            RuleCandidate existing = existingByRuleKey.get(draft.ruleKey());
+
+            if (existing != null) {
+                existing.updateMiningResult(
+                        draft.confidence(),
+                        draft.source(),
+                        draft.title(),
+                        draft.description(),
+                        draft.score(),
+                        draft.supportCount(),
+                        draft.publicApiRelated(),
+                        draft.summary(),
+                        draft.impact(),
+                        draft.meta()
+                );
+                candidatesToSave.add(existing);
+                continue;
+            }
+
+            candidatesToSave.add(RuleCandidate.of(
+                    run,
+                    draft.ruleKey(),
+                    draft.kind(),
+                    draft.confidence(),
+                    draft.source(),
+                    draft.subjectSymbol(),
+                    draft.groupId(),
+                    draft.title(),
+                    draft.description(),
+                    draft.fingerprint(),
+                    draft.score(),
+                    draft.supportCount(),
+                    draft.publicApiRelated(),
+                    draft.summary(),
+                    draft.impact(),
+                    draft.meta()
+            ));
+        }
+
+        if (candidatesToSave.isEmpty()) {
+            return 0;
+        }
+
+        List<RuleCandidate> savedCandidates = ruleCandidateRepository.saveAll(candidatesToSave);
+
+        Map<String, RuleCandidate> savedByRuleKey = new HashMap<>();
+        for (RuleCandidate candidate : savedCandidates) {
+            if (candidate.getRuleKey() != null) {
+                savedByRuleKey.put(candidate.getRuleKey(), candidate);
+            }
+        }
+
+        List<RuleCandidateEvidence> evidenceLinks = buildEvidenceLinks(mergedDrafts, savedByRuleKey);
+
+        if (!evidenceLinks.isEmpty()) {
+            ruleCandidateEvidenceRepository.saveAll(evidenceLinks);
+        }
+
+        return savedCandidates.size();
+    }
+
+    private Map<String, RuleCandidate> loadExistingCandidatesByRuleKey(
+            String runId,
+            Collection<String> ruleKeys
+    ) {
+        if (runId == null || runId.isBlank() || ruleKeys == null || ruleKeys.isEmpty()) {
+            return Map.of();
+        }
+
+        List<RuleCandidate> existingCandidates =
+                ruleCandidateRepository.findAllByRun_RunIdAndRuleKeyIn(runId, ruleKeys);
+
+        if (existingCandidates == null || existingCandidates.isEmpty()) {
+            return Map.of();
+        }
+
+        Map<String, RuleCandidate> result = new HashMap<>();
+        for (RuleCandidate candidate : existingCandidates) {
+            if (candidate.getRuleKey() != null) {
+                result.put(candidate.getRuleKey(), candidate);
+            }
+        }
+
+        return result;
+    }
+
+    private List<CandidateDraft> mergeDraftsByRuleKey(Collection<CandidateDraft> drafts) {
+        Map<String, CandidateDraft> merged = new LinkedHashMap<>();
+
+        for (CandidateDraft draft : drafts) {
+            if (draft == null || draft.ruleKey() == null || draft.ruleKey().isBlank()) {
+                continue;
+            }
+
+            CandidateDraft existing = merged.get(draft.ruleKey());
+            if (existing == null) {
+                merged.put(draft.ruleKey(), draft);
+                continue;
+            }
+
+            existing.evidences().addAll(draft.evidences());
+        }
+
+        return new ArrayList<>(merged.values());
+    }
+
+    private List<RuleCandidateEvidence> buildEvidenceLinks(
+            List<CandidateDraft> drafts,
+            Map<String, RuleCandidate> savedByRuleKey
+    ) {
+        List<RuleCandidateEvidence> links = new ArrayList<>();
+        Set<String> evidenceKeys = new HashSet<>();
+
+        for (CandidateDraft draft : drafts) {
+            RuleCandidate candidate = savedByRuleKey.get(draft.ruleKey());
+            if (candidate == null || candidate.getCandidateId() == null) {
+                continue;
+            }
+
+            for (CandidateEvidenceDraft evidenceDraft : draft.evidences()) {
+                if (evidenceDraft == null) {
+                    continue;
+                }
+
+                String evidenceKey = evidenceKey(candidate, evidenceDraft);
+                if (!evidenceKeys.add(evidenceKey)) {
+                    continue;
+                }
+
+                Evidence evidence = evidenceDraft.evidence();
+                Edge edge = evidenceDraft.edge();
+
+                links.add(RuleCandidateEvidence.of(
+                        candidate,
+                        evidenceDraft.signal(),
+                        evidence,
+                        edge,
+                        evidenceDraft.role(),
+                        evidenceDraft.weight(),
+                        filePath(evidence),
+                        evidence == null ? null : evidence.getStartLine(),
+                        evidence == null ? null : evidence.getEndLine(),
+                        evidence == null ? null : truncate(evidence.getSnippet(), MAX_SNIPPET_LENGTH),
+                        truncate(evidenceDraft.note(), MAX_NOTE_LENGTH)
+                ));
+            }
+        }
+
+        return links;
+    }
+
+    private String evidenceKey(
+            RuleCandidate candidate,
+            CandidateEvidenceDraft draft
+    ) {
+        return candidate.getCandidateId() + "|"
+                + id(draft.signal()) + "|"
+                + id(draft.evidence()) + "|"
+                + id(draft.edge()) + "|"
+                + safeKey(draft.role());
+    }
+
+    private String id(RuleMiningSignal signal) {
+        return signal == null || signal.getSignalId() == null
+                ? "-"
+                : String.valueOf(signal.getSignalId());
+    }
+
+    private String id(Evidence evidence) {
+        return evidence == null || evidence.getEvidenceId() == null
+                ? "-"
+                : String.valueOf(evidence.getEvidenceId());
+    }
+
+    private String id(Edge edge) {
+        return edge == null || edge.getEdgeId() == null
+                ? "-"
+                : String.valueOf(edge.getEdgeId());
+    }
+
+    private String safeKey(String value) {
+        return value == null ? "-" : value;
+    }
+
+    protected CandidateDraft candidateDraft(
             String ruleKey,
             RuleCandidateKind kind,
             RuleCandidateConfidence confidence,
             RuleCandidateSource source,
-            com.example.ossdoc.domain.graphstore.entity.SymbolEntity subjectSymbol,
+            SymbolEntity subjectSymbol,
             String groupId,
             String title,
             String description,
@@ -53,38 +286,10 @@ public abstract class AbstractRuleCandidateMiner implements RuleCandidateMiner {
             Boolean publicApiRelated,
             JsonNode summary,
             JsonNode impact,
-            JsonNode meta
+            JsonNode meta,
+            List<CandidateEvidenceDraft> evidences
     ) {
-        Optional<RuleCandidate> existing =
-                ruleCandidateRepository.findByRun_RunIdAndRuleKey(run.getRunId(), ruleKey);
-
-        RuleCandidate candidate;
-
-        if (existing.isPresent()) {
-            candidate = existing.get();
-            candidate.updateMiningResult(
-                    confidence,
-                    source,
-                    title,
-                    description,
-                    score,
-                    supportCount,
-                    publicApiRelated,
-                    summary,
-                    impact,
-                    meta
-            );
-            candidate = ruleCandidateRepository.save(candidate);
-
-            if (candidate.getCandidateId() != null) {
-                ruleCandidateEvidenceRepository.deleteAllByCandidate_CandidateId(candidate.getCandidateId());
-            }
-
-            return candidate;
-        }
-
-        candidate = RuleCandidate.of(
-                run,
+        return new CandidateDraft(
                 ruleKey,
                 kind,
                 confidence,
@@ -99,48 +304,9 @@ public abstract class AbstractRuleCandidateMiner implements RuleCandidateMiner {
                 publicApiRelated,
                 summary,
                 impact,
-                meta
+                meta,
+                evidences
         );
-
-        return ruleCandidateRepository.save(candidate);
-    }
-
-    protected void saveEvidenceLinks(
-            RuleCandidate candidate,
-            List<CandidateEvidenceDraft> drafts
-    ) {
-        if (candidate == null || drafts == null || drafts.isEmpty()) {
-            return;
-        }
-
-        List<RuleCandidateEvidence> links = new ArrayList<>();
-
-        for (CandidateEvidenceDraft draft : drafts) {
-            if (draft == null) {
-                continue;
-            }
-
-            Evidence evidence = draft.evidence();
-            Edge edge = draft.edge();
-
-            links.add(RuleCandidateEvidence.of(
-                    candidate,
-                    draft.signal(),
-                    evidence,
-                    edge,
-                    draft.role(),
-                    draft.weight(),
-                    filePath(evidence),
-                    evidence == null ? null : evidence.getStartLine(),
-                    evidence == null ? null : evidence.getEndLine(),
-                    evidence == null ? null : evidence.getSnippet(),
-                    draft.note()
-            ));
-        }
-
-        if (!links.isEmpty()) {
-            ruleCandidateEvidenceRepository.saveAll(links);
-        }
     }
 
     protected CandidateEvidenceDraft evidenceDraft(
@@ -170,11 +336,11 @@ public abstract class AbstractRuleCandidateMiner implements RuleCandidateMiner {
         return evidence.getFile().getPath();
     }
 
-    protected String safeSymbolId(com.example.ossdoc.domain.graphstore.entity.SymbolEntity symbol) {
+    protected String safeSymbolId(SymbolEntity symbol) {
         return symbol == null ? "unknown-symbol" : symbol.getSymbolId();
     }
 
-    protected String safeSymbolName(com.example.ossdoc.domain.graphstore.entity.SymbolEntity symbol) {
+    protected String safeSymbolName(SymbolEntity symbol) {
         if (symbol == null) {
             return "unknown symbol";
         }
@@ -254,6 +420,45 @@ public abstract class AbstractRuleCandidateMiner implements RuleCandidateMiner {
             return first;
         }
         return second;
+    }
+
+    protected String truncate(String text, int maxLength) {
+        if (text == null) {
+            return null;
+        }
+
+        if (maxLength <= 0 || text.length() <= maxLength) {
+            return text;
+        }
+
+        return text.substring(0, Math.max(0, maxLength - 3)) + "...";
+    }
+
+    protected record CandidateDraft(
+            String ruleKey,
+            RuleCandidateKind kind,
+            RuleCandidateConfidence confidence,
+            RuleCandidateSource source,
+            SymbolEntity subjectSymbol,
+            String groupId,
+            String title,
+            String description,
+            String fingerprint,
+            BigDecimal score,
+            Integer supportCount,
+            Boolean publicApiRelated,
+            JsonNode summary,
+            JsonNode impact,
+            JsonNode meta,
+            List<CandidateEvidenceDraft> evidences
+    ) {
+        public CandidateDraft {
+            evidences = evidences == null
+                    ? new ArrayList<>()
+                    : new ArrayList<>(evidences.stream()
+                    .filter(evidence -> evidence != null)
+                    .toList());
+        }
     }
 
     protected record CandidateEvidenceDraft(

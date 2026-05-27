@@ -2,6 +2,7 @@ package com.example.ossdoc.domain.rule.repository;
 
 import com.example.ossdoc.domain.rule.entity.RuleCandidateEvidence;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -26,16 +27,38 @@ public interface RuleCandidateEvidenceRepository extends JpaRepository<RuleCandi
 
     void deleteAllByCandidate_CandidateId(Long candidateId);
 
-    /**
-     * artifact 발행 시 candidate / signal / evidence / edge를 함께 가져온다.
-     * candidate별 evidence lazy loading 비용을 줄인다.
-     */
+    @Modifying(flushAutomatically = true)
+    @Query("""
+            delete from RuleCandidateEvidence rce
+            where rce.candidate.candidateId = :candidateId
+            """)
+    void deleteByCandidateIdBulk(@Param("candidateId") Long candidateId);
+
+    @Modifying(flushAutomatically = true)
+    @Query("""
+            delete from RuleCandidateEvidence rce
+            where rce.candidate.candidateId in :candidateIds
+            """)
+    void deleteByCandidateIdInBulk(@Param("candidateIds") Collection<Long> candidateIds);
+
+    @Modifying(flushAutomatically = true)
+    @Query("""
+            delete from RuleCandidateEvidence rce
+            where rce.candidate.candidateId in (
+                select c.candidateId
+                from RuleCandidate c
+                where c.run.runId = :runId
+            )
+            """)
+    void deleteByRunIdBulk(@Param("runId") String runId);
+
     @Query("""
             select rce
             from RuleCandidateEvidence rce
             join fetch rce.candidate c
             left join fetch rce.signal
-            left join fetch rce.evidence
+            left join fetch rce.evidence ev
+            left join fetch ev.file
             left join fetch rce.edge
             where c.candidateId in :candidateIds
             """)

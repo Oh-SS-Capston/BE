@@ -2,9 +2,10 @@ package com.example.ossdoc.domain.rule.repository;
 
 import com.example.ossdoc.domain.rule.entity.RuleMiningSignal;
 import com.example.ossdoc.domain.rule.enums.RuleMiningSignalType;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
-import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.util.Collection;
 import java.util.List;
@@ -64,4 +65,15 @@ public interface RuleMiningSignalRepository extends JpaRepository<RuleMiningSign
     List<RuleMiningSignal> findAllWithSymbolAndSourceByRunId(@Param("runId") String runId);
 
     void deleteAllByRun_RunId(String runId);
+
+    /**
+     * forceRebuild 시 rule mining signal을 bulk delete 한다.
+     * RuleCandidateEvidence, RuleCandidate 삭제 이후 호출하는 것을 권장한다.
+     */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("""
+            delete from RuleMiningSignal s
+            where s.run.runId = :runId
+            """)
+    void deleteByRunIdBulk(@Param("runId") String runId);
 }
