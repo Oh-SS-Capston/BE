@@ -34,6 +34,12 @@ public enum RunErrorCode implements BaseCode {
             "레포지토리 압축 해제에 실패했습니다."
     ),
 
+    CLONE_FAILED(
+            HttpStatus.BAD_GATEWAY,
+            "RUN502_3",
+            "레포지토리 clone에 실패했습니다."
+    ),
+
     JOB_MANIFEST_WRITE_FAILED(
             HttpStatus.INTERNAL_SERVER_ERROR,
             "RUN500_2",

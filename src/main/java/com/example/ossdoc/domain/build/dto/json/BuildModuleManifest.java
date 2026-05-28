@@ -19,6 +19,6 @@ public class BuildModuleManifest {
     private List<String> compileClasspath;  // 있으면 타입해결 향상
     private List<String> runtimeClasspath;
 
-    private String status; // OK|PARTIAL|FAILED
+    private String status; // OK|PARTIAL|SKIPPED|FAILED
     private BuildFailure failReason;
 }

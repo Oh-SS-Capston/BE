@@ -204,7 +204,7 @@ public class BuildResolveService {
                 repoRoot,
                 workspaceRoot,
                 dumpCmd,
-                Duration.ofMinutes(10),
+                Duration.ofMinutes(20),
                 "dump"
         );
         log.info("[BUILD] Gradle dump finished. exitCode={}", dump.getExitCode());
@@ -244,7 +244,7 @@ public class BuildResolveService {
                 repoRoot,
                 workspaceRoot,
                 compileCmd,
-                Duration.ofMinutes(20),
+                Duration.ofMinutes(40),
                 "compile"
         );
         log.info("[BUILD] Gradle compile finished. exitCode={}", compile.getExitCode());
