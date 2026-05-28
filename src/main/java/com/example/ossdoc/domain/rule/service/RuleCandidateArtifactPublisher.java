@@ -735,9 +735,9 @@ public class RuleCandidateArtifactPublisher {
                 .orElse(null);
 
         if (bestCandidate != null) {
-            String fromCandidate = firstNonBlank(bestCandidate.getDescription(), bestCandidate.getTitle());
-            if (fromCandidate != null && !fromCandidate.isBlank()) {
-                return truncate(fromCandidate, 170);
+            String fromCandidate = firstNonBlank(bestCandidate.getDescription(), bestCandidate.getTitle()).trim();
+            if (!fromCandidate.isBlank()) {
+                return fromCandidate;
             }
         }
 
@@ -912,19 +912,6 @@ public class RuleCandidateArtifactPublisher {
             }
         }
         return "";
-    }
-
-    /**
-     * 최대 길이를 넘는 문자열을 말줄임 처리한다.
-     */
-    private String truncate(String text, int maxLength) {
-        if (text == null) {
-            return "";
-        }
-        if (text.length() <= maxLength) {
-            return text;
-        }
-        return text.substring(0, Math.max(0, maxLength - 3)) + "...";
     }
 
     private static class MethodSignalAggregate {

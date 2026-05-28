@@ -5,6 +5,7 @@ import com.example.ossdoc.domain.run.entity.RunPipelineJob;
 import lombok.Builder;
 import lombok.Getter;
 
+import java.time.LocalDateTime;
 import java.util.List;
 
 @Getter
@@ -20,6 +21,8 @@ public class RepoRunProgressResponse {
     private String failureMessage;
     private String repoUrl;
     private String commitSha;
+    private LocalDateTime createdAt;
+    private LocalDateTime updatedAt;
 
     private RunArtifactIdsResponse artifacts;
     private List<RunStepProgressResponse> steps;
@@ -42,6 +45,8 @@ public class RepoRunProgressResponse {
                 .failureMessage(job.getFailureMessage())
                 .repoUrl(run.getRepoUrl())
                 .commitSha(run.getCommitSha())
+                .createdAt(run.getCreatedAt())
+                .updatedAt(run.getUpdatedAt())
                 .artifacts(artifacts)
                 .steps(steps)
                 .failedSteps(failedSteps)

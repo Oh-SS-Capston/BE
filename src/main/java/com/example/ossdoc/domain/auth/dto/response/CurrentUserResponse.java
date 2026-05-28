@@ -4,6 +4,8 @@ public record CurrentUserResponse(
         Long userId,
         String email,
         String name,
-        String role
+        String nickname,
+        String role,
+        String provider
 ) {
 }

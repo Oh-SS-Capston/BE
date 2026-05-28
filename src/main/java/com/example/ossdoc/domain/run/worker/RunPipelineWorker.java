@@ -1,6 +1,7 @@
 package com.example.ossdoc.domain.run.worker;
 
 import com.example.ossdoc.domain.run.entity.RunPipelineJob;
+import com.example.ossdoc.domain.run.cache.service.RunCacheWaitResolveService;
 import com.example.ossdoc.domain.run.service.RunPipelineExecutor;
 import com.example.ossdoc.domain.run.service.RunPipelineQueueService;
 import lombok.RequiredArgsConstructor;
@@ -23,14 +24,20 @@ public class RunPipelineWorker {
 
     private final RunPipelineQueueService queueService;
     private final RunPipelineExecutor executor;
+    private final RunCacheWaitResolveService cacheWaitResolveService;
 
     @Value("${ossdoc.pipeline.worker.max-jobs-per-tick:1}")
     private int maxJobsPerTick;
+
+    @Value("${ossdoc.pipeline.worker.cache-wait-resolve-max-per-tick:5}")
+    private int cacheWaitResolveMaxPerTick;
 
     private final String workerId = buildWorkerId();
 
     @Scheduled(fixedDelayString = "${ossdoc.pipeline.worker.fixed-delay-ms:2000}")
     public void poll() {
+        cacheWaitResolveService.reconcileWaitingRuns(cacheWaitResolveMaxPerTick);
+
         for (int i = 0; i < maxJobsPerTick; i++) {
             Optional<RunPipelineJob> claimed = queueService.claimNextJob(workerId);
 

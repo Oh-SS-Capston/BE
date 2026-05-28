@@ -41,6 +41,7 @@ src/main/generated/
 
 #env
 .env
+.env.*
 
 #workspace
 workspace/

@@ -134,9 +134,9 @@ public class RuleMiningSignalIngestService {
     }
 
     private void deletePreviousMiningResults(String runId) {
-        ruleCandidateEvidenceRepository.deleteAllByCandidate_Run_RunId(runId);
-        ruleCandidateRepository.deleteAllByRun_RunId(runId);
-        ruleMiningSignalRepository.deleteAllByRun_RunId(runId);
+        ruleCandidateEvidenceRepository.deleteByRunIdBulk(runId);
+        ruleCandidateRepository.deleteByRunIdBulk(runId);
+        ruleMiningSignalRepository.deleteByRunIdBulk(runId);
     }
 
     private boolean isSignalSourceEdge(Edge edge) {

@@ -1,7 +1,6 @@
 package com.example.ossdoc.domain.rule.service.miner;
 
 import com.example.ossdoc.domain.rule.dto.projection.GuardThrowProjection;
-import com.example.ossdoc.domain.rule.entity.RuleCandidate;
 import com.example.ossdoc.domain.rule.enums.RuleCandidateConfidence;
 import com.example.ossdoc.domain.rule.enums.RuleCandidateKind;
 import com.example.ossdoc.domain.rule.enums.RuleCandidateSource;
@@ -13,7 +12,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.List;
 
 @Slf4j
@@ -42,7 +41,7 @@ public class GuardThrowMiner extends AbstractRuleCandidateMiner {
         List<GuardThrowProjection> projections =
                 ruleMiningQueryRepository.findGuardThrowSignals(run.getRunId());
 
-        int saved = 0;
+        List<CandidateDraft> drafts = new ArrayList<>();
 
         for (GuardThrowProjection projection : projections) {
             RuleCandidateConfidence confidence = confidenceByDistance(projection.lineDistance());
@@ -60,10 +59,7 @@ public class GuardThrowMiner extends AbstractRuleCandidateMiner {
             String description = "메서드 " + methodName
                     + "에서 조건문 이후 예외 throw가 근접하게 나타나는 guard clause 후보입니다.";
 
-            String fingerprint = ruleKey;
-
-            RuleCandidate candidate = upsertCandidate(
-                    run,
+            drafts.add(candidateDraft(
                     ruleKey,
                     RuleCandidateKind.GUARD_THROW,
                     confidence,
@@ -72,33 +68,32 @@ public class GuardThrowMiner extends AbstractRuleCandidateMiner {
                     safeSymbolId(projection.methodSymbol()),
                     title,
                     description,
-                    fingerprint,
+                    ruleKey,
                     score(confidence, 2),
                     2,
                     false,
                     summaryNode("IF_CONDITION_THEN_THROW", conditionText, throwText),
                     impactNode("MEDIUM", "잘못된 입력이나 상태를 초기에 차단하는 방어 로직일 가능성이 있습니다."),
                     metaNode("GuardThrowMiner")
-                            .put("lineDistance", projection.lineDistance())
-            );
-
-            saveEvidenceLinks(candidate, List.of(
-                    evidenceDraft(
-                            projection.conditionSignal(),
-                            "IF_CONDITION",
-                            WEIGHT_PRIMARY,
-                            "조건 검증 신호"
-                    ),
-                    evidenceDraft(
-                            projection.throwSignal(),
-                            "THROW_STATEMENT",
-                            WEIGHT_PRIMARY,
-                            "조건 실패 시 예외 발생 신호"
+                            .put("lineDistance", projection.lineDistance()),
+                    List.of(
+                            evidenceDraft(
+                                    projection.conditionSignal(),
+                                    "IF_CONDITION",
+                                    WEIGHT_PRIMARY,
+                                    "조건 검증 신호"
+                            ),
+                            evidenceDraft(
+                                    projection.throwSignal(),
+                                    "THROW_STATEMENT",
+                                    WEIGHT_PRIMARY,
+                                    "조건 실패 시 예외 발생 신호"
+                            )
                     )
             ));
-
-            saved++;
         }
+
+        int saved = saveCandidateDrafts(run, drafts);
 
         log.info("[RULE-MINING] GuardThrowMiner completed. runId={}, candidates={}", run.getRunId(), saved);
         return saved;
