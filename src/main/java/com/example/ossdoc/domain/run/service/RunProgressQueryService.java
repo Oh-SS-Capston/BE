@@ -15,9 +15,6 @@ import com.example.ossdoc.domain.run.exception.code.RunErrorCode;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.example.ossdoc.domain.run.repository.RunPipelineJobRepository;
 import com.example.ossdoc.domain.run.repository.RunPipelineStepExecutionRepository;
-import com.example.ossdoc.domain.membership.exception.MembershipException;
-import com.example.ossdoc.domain.membership.exception.code.MembershipErrorCode;
-import com.example.ossdoc.domain.membership.service.MembershipAccessService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -26,6 +23,9 @@ import java.util.List;
 
 /*
  * 프론트 polling용 진행 상태 조회 서비스입니다.
+ *
+ * 토큰 기반 정책에서는 멤버십 활성 여부가 아니라,
+ * 현재 로그인 사용자가 해당 run의 owner인지로 조회 권한을 판단합니다.
  */
 @Service
 @RequiredArgsConstructor
@@ -35,16 +35,15 @@ public class RunProgressQueryService {
     private final RunPipelineJobRepository jobRepository;
     private final RunPipelineStepExecutionRepository stepRepository;
     private final ArtifactRepository artifactRepository;
-    private final MembershipAccessService membershipAccessService;
 
     @Transactional(readOnly = true)
     public RepoRunProgressResponse getProgress(String runId, Long userId) {
+        /*
+         * runId만으로 조회하지 않고, 반드시 현재 로그인 사용자 userId와 함께 조회합니다.
+         * 따라서 다른 사용자의 runId를 알아도 진행 상태를 볼 수 없습니다.
+         */
         RepoRun run = repoRunRepository.findOwnedRun(runId, userId)
                 .orElseThrow(() -> new RunException(RunErrorCode.RUN_FORBIDDEN));
-
-        if (!membershipAccessService.canViewRun(run, run.getOwner())) {
-            throw new MembershipException(MembershipErrorCode.MEMBERSHIP_REQUIRED);
-        }
 
         RunPipelineJob job = jobRepository.findJobByRunId(runId)
                 .orElseThrow(() -> new RunException(RunErrorCode.PIPELINE_JOB_NOT_FOUND));
@@ -68,18 +67,15 @@ public class RunProgressQueryService {
                 .buildManifestArtifactId(latestArtifactId(runId, ArtifactKind.BUILD_MANIFEST))
                 .factsArtifactId(latestArtifactId(runId, ArtifactKind.FACTS_JSON))
                 .graphStatsArtifactId(latestArtifactId(runId, ArtifactKind.GRAPH_STATS))
-
                 .rankingsArtifactId(latestArtifactId(runId, ArtifactKind.RANKINGS_JSON))
                 .subsystemsArtifactId(latestArtifactId(runId, ArtifactKind.SUBSYSTEMS_JSON))
                 .classDiagramArtifactId(latestArtifactId(runId, ArtifactKind.CLASS_DIAGRAM_JSON))
-
                 .ruleCandidatesArtifactId(
                         latestArtifactId(runId, ArtifactKind.RULE_CANDIDATES_JSON)
                 )
                 .symbolSourceIndexArtifactId(
                         latestArtifactId(runId, ArtifactKind.SYMBOL_SOURCE_INDEX_JSON)
                 )
-
                 .llmRefinedRulesArtifactId(
                         latestArtifactId(runId, ArtifactKind.LLM_REFINED_RULES)
                 )

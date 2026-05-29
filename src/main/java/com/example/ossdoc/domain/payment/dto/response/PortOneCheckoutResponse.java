@@ -1,16 +1,16 @@
 package com.example.ossdoc.domain.payment.dto.response;
 
-import com.example.ossdoc.domain.membership.enums.MembershipPlan;
-import com.example.ossdoc.domain.membership.enums.PaymentProvider;
+import com.example.ossdoc.domain.payment.enums.PaymentProvider;
 
 public record PortOneCheckoutResponse(
         String paymentId,
         PaymentProvider paymentProvider,
         String storeId,
         String channelKey,
-        MembershipPlan plan,
-        String planName,
-        int amount,
+
+        Integer chargeAmount,
+        Integer tokenAmount,
+
         String currency,
         String orderName,
         String customerKey,

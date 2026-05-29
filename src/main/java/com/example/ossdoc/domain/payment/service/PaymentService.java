@@ -2,26 +2,22 @@ package com.example.ossdoc.domain.payment.service;
 
 import com.example.ossdoc.domain.auth.exception.AuthException;
 import com.example.ossdoc.domain.auth.exception.code.AuthErrorCode;
-import com.example.ossdoc.domain.membership.entity.UserSubscription;
-import com.example.ossdoc.domain.membership.enums.MembershipPlan;
-import com.example.ossdoc.domain.membership.enums.PaymentProvider;
-import com.example.ossdoc.domain.membership.enums.SubscriptionStatus;
-import com.example.ossdoc.domain.membership.exception.MembershipException;
-import com.example.ossdoc.domain.membership.exception.code.MembershipErrorCode;
-import com.example.ossdoc.domain.membership.repository.UserSubscriptionRepository;
-import com.example.ossdoc.domain.membership.service.MembershipAccessService;
+import com.example.ossdoc.domain.payment.enums.PaymentProvider;
 import com.example.ossdoc.domain.payment.client.PortOnePaymentClient;
 import com.example.ossdoc.domain.payment.dto.portone.PortOnePaymentSnapshot;
 import com.example.ossdoc.domain.payment.dto.request.PaymentCancelRequest;
 import com.example.ossdoc.domain.payment.dto.request.PaymentVerifyRequest;
+import com.example.ossdoc.domain.payment.dto.request.TokenChargeCheckoutRequest;
 import com.example.ossdoc.domain.payment.dto.response.PaymentCancelResponse;
 import com.example.ossdoc.domain.payment.dto.response.PaymentVerifyResponse;
 import com.example.ossdoc.domain.payment.dto.response.PortOneCheckoutResponse;
 import com.example.ossdoc.domain.payment.entity.PaymentOrder;
-import com.example.ossdoc.domain.payment.enums.PaymentStatus;
 import com.example.ossdoc.domain.payment.exception.PaymentException;
 import com.example.ossdoc.domain.payment.exception.code.PaymentErrorCode;
 import com.example.ossdoc.domain.payment.repository.PaymentOrderRepository;
+import com.example.ossdoc.domain.token.dto.response.TokenBalanceResponse;
+import com.example.ossdoc.domain.token.enums.TokenReferenceType;
+import com.example.ossdoc.domain.token.service.TokenService;
 import com.example.ossdoc.domain.user.entity.User;
 import com.example.ossdoc.domain.user.repository.UserRepository;
 import com.example.ossdoc.global.properties.PortOneProperties;
@@ -31,7 +27,6 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.LocalDateTime;
 import java.util.UUID;
 
 @Service
@@ -39,40 +34,46 @@ import java.util.UUID;
 @Transactional(readOnly = true)
 public class PaymentService {
 
-    private static final MembershipPlan DEFAULT_PLAN = MembershipPlan.BASIC_MONTHLY;
+    private static final String TOKEN_CURRENCY = "KRW";
+
     private static final String PAID_STATUS = "PAID";
     private static final String CANCELED_STATUS = "CANCELLED";
     private static final String CANCELED_STATUS_ALT = "CANCELED";
 
     private final UserRepository userRepository;
     private final PaymentOrderRepository paymentOrderRepository;
-    private final UserSubscriptionRepository userSubscriptionRepository;
-    private final MembershipAccessService membershipAccessService;
     private final PortOnePaymentClient portOnePaymentClient;
     private final PortOneProperties portOneProperties;
+    private final TokenService tokenService;
     private final ObjectMapper objectMapper;
 
+    /*
+     * 토큰 충전 결제창 호출 정보를 준비합니다.
+     * 1 KRW = 1 Token이므로 amount와 tokenAmount는 동일합니다.
+     */
     @Transactional
-    public PortOneCheckoutResponse prepareCheckout(Long userId) {
+    public PortOneCheckoutResponse prepareTokenCheckout(
+            Long userId,
+            TokenChargeCheckoutRequest request
+    ) {
         portOneProperties.validateCheckoutConfig();
 
         User user = getActiveUser(userId);
 
-        if (membershipAccessService.hasActiveMembership(user)) {
-            throw new MembershipException(MembershipErrorCode.SUBSCRIPTION_ALREADY_ACTIVE);
-        }
+        int amount = request.amount();
+        int tokenAmount = amount;
 
         String paymentId = generatePaymentId();
-        String orderName = DEFAULT_PLAN.getDisplayName() + " 정기 멤버십";
+        String orderName = "OSS Doc " + tokenAmount + " 토큰 충전";
         String customerKey = "user_" + user.getId();
 
-        PaymentOrder order = PaymentOrder.ready(
+        PaymentOrder order = PaymentOrder.readyForTokenCharge(
                 user,
                 paymentId,
-                DEFAULT_PLAN,
                 orderName,
-                DEFAULT_PLAN.getAmount(),
-                DEFAULT_PLAN.getCurrency(),
+                amount,
+                tokenAmount,
+                TOKEN_CURRENCY,
                 customerKey
         );
 
@@ -83,10 +84,9 @@ public class PaymentService {
                 PaymentProvider.PORTONE_V2,
                 portOneProperties.getStoreId(),
                 portOneProperties.getChannelKey(),
-                DEFAULT_PLAN,
-                DEFAULT_PLAN.getDisplayName(),
-                DEFAULT_PLAN.getAmount(),
-                DEFAULT_PLAN.getCurrency(),
+                amount,
+                tokenAmount,
+                TOKEN_CURRENCY,
                 orderName,
                 customerKey,
                 user.getEmail(),
@@ -94,15 +94,19 @@ public class PaymentService {
         );
     }
 
+    /*
+     * PortOne 결제 단건 조회로 결제 완료 여부를 검증한 뒤,
+     * 결제 금액만큼 토큰을 충전합니다.
+     */
     @Transactional
-    public PaymentVerifyResponse verifyPayment(
+    public PaymentVerifyResponse verifyTokenPayment(
             Long userId,
             PaymentVerifyRequest request
     ) {
         User user = getActiveUser(userId);
         PaymentOrder order = getMyPaymentOrder(request.paymentId(), user);
 
-        return syncPaidPayment(order);
+        return syncPaidTokenPayment(order);
     }
 
     @Transactional
@@ -123,10 +127,16 @@ public class PaymentService {
             );
         }
 
-        String reason = request == null || request.reason() == null || request.reason().isBlank()
+        String reason = request == null
+                || request.reason() == null
+                || request.reason().isBlank()
                 ? "테스트 결제 취소"
                 : request.reason();
 
+        /*
+         * 현재 3차에서는 결제 취소 시 토큰 차감 회수 정책은 최소화합니다.
+         * 실서비스에서는 이미 사용한 토큰이 있는 경우 취소 가능 여부를 별도로 막아야 합니다.
+         */
         PortOnePaymentSnapshot snapshot = portOnePaymentClient.cancelPayment(paymentId, reason);
 
         order.markCanceled(
@@ -134,9 +144,6 @@ public class PaymentService {
                 reason,
                 snapshot.canceledAt()
         );
-
-        userSubscriptionRepository.findFirstByLastPaymentId(order.getPaymentId())
-                .ifPresent(UserSubscription::expire);
 
         return new PaymentCancelResponse(
                 order.getPaymentId(),
@@ -146,6 +153,9 @@ public class PaymentService {
         );
     }
 
+    /*
+     * Webhook으로 결제 상태가 들어온 경우에도 서버 기준으로 결제 단건 조회 후 동기화합니다.
+     */
     @Transactional
     public void handleWebhook(String rawBody) {
         String paymentId = extractPaymentId(rawBody);
@@ -164,7 +174,7 @@ public class PaymentService {
         PortOnePaymentSnapshot snapshot = portOnePaymentClient.getPayment(paymentId);
 
         if (isPaid(snapshot.status())) {
-            syncPaidPayment(order);
+            syncPaidTokenPayment(order);
             return;
         }
 
@@ -174,9 +184,6 @@ public class PaymentService {
                     "PortOne 웹훅 결제 취소 동기화",
                     snapshot.canceledAt()
             );
-
-            userSubscriptionRepository.findFirstByLastPaymentId(order.getPaymentId())
-                    .ifPresent(UserSubscription::expire);
             return;
         }
 
@@ -186,21 +193,17 @@ public class PaymentService {
         );
     }
 
-    private PaymentVerifyResponse syncPaidPayment(PaymentOrder order) {
+    private PaymentVerifyResponse syncPaidTokenPayment(PaymentOrder order) {
         if (order.isPaid()) {
-            UserSubscription subscription = userSubscriptionRepository
-                    .findFirstByLastPaymentId(order.getPaymentId())
-                    .orElse(null);
+            TokenBalanceResponse balance = tokenService.getMyBalance(order.getUser().getId());
 
             return new PaymentVerifyResponse(
                     order.getPaymentId(),
                     order.getStatus(),
-                    order.getPlan(),
-                    order.getPlan().getDisplayName(),
                     order.getAmount(),
+                    order.getTokenAmount(),
+                    balance.balance(),
                     order.getCurrency(),
-                    subscription != null && subscription.isActiveAt(LocalDateTime.now()),
-                    subscription == null ? null : subscription.getCurrentPeriodEnd(),
                     "이미 검증 완료된 결제입니다."
             );
         }
@@ -209,43 +212,40 @@ public class PaymentService {
 
         validatePaidSnapshot(order, snapshot);
 
-        LocalDateTime now = LocalDateTime.now();
-        LocalDateTime periodEnd = now.plusMonths(order.getPlan().getBillingCycleMonths());
-
         order.markPaid(
                 snapshot.status(),
                 snapshot.transactionId(),
                 snapshot.paidAt()
         );
 
-        UserSubscription subscription = userSubscriptionRepository
-                .findFirstByUserOrderByCreatedAtDesc(order.getUser())
-                .orElseGet(() -> userSubscriptionRepository.save(
-                        UserSubscription.pending(
-                                order.getUser(),
-                                order.getPlan(),
-                                PaymentProvider.PORTONE_V2
-                        )
-                ));
-
-        subscription.activateByPayment(order.getPaymentId(), now, periodEnd);
+        TokenBalanceResponse balance = tokenService.chargeTokens(
+                order.getUser().getId(),
+                order.getTokenAmount(),
+                TokenReferenceType.PAYMENT,
+                order.getPaymentId(),
+                "PortOne 토큰 충전 결제"
+        );
 
         return new PaymentVerifyResponse(
                 order.getPaymentId(),
                 order.getStatus(),
-                order.getPlan(),
-                order.getPlan().getDisplayName(),
                 order.getAmount(),
+                order.getTokenAmount(),
+                balance.balance(),
                 order.getCurrency(),
-                true,
-                periodEnd,
-                "멤버십이 활성화되었습니다."
+                "토큰 충전이 완료되었습니다."
         );
     }
 
-    private void validatePaidSnapshot(PaymentOrder order, PortOnePaymentSnapshot snapshot) {
+    private void validatePaidSnapshot(
+            PaymentOrder order,
+            PortOnePaymentSnapshot snapshot
+    ) {
         if (!isPaid(snapshot.status())) {
-            order.markFailed(snapshot.status(), "결제가 완료되지 않았습니다.");
+            order.markFailed(
+                    snapshot.status(),
+                    "결제가 완료되지 않았습니다."
+            );
             throw new PaymentException(PaymentErrorCode.PAYMENT_NOT_PAID);
         }
 
@@ -278,9 +278,11 @@ public class PaymentService {
 
     private String generatePaymentId() {
         String paymentId;
+
         do {
-            paymentId = "membership_" + System.currentTimeMillis()
-                    + "_" + UUID.randomUUID().toString().substring(0, 8);
+            paymentId = "token_" + System.currentTimeMillis()
+                    + "_"
+                    + UUID.randomUUID().toString().substring(0, 8);
         } while (paymentOrderRepository.existsByPaymentId(paymentId));
 
         return paymentId;
