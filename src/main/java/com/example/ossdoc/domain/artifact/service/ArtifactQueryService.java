@@ -6,9 +6,6 @@ import com.example.ossdoc.domain.artifact.exception.ArtifactException;
 import com.example.ossdoc.domain.artifact.exception.code.ArtifactErrorCode;
 import com.example.ossdoc.domain.artifact.repository.ArtifactRepository;
 import com.example.ossdoc.domain.run.entity.RepoRun;
-import com.example.ossdoc.domain.membership.exception.MembershipException;
-import com.example.ossdoc.domain.membership.exception.code.MembershipErrorCode;
-import com.example.ossdoc.domain.membership.service.MembershipAccessService;
 import com.example.ossdoc.domain.user.entity.User;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -24,13 +21,12 @@ public class ArtifactQueryService {
 
     private final ArtifactRepository artifactRepository;
     private final ObjectMapper objectMapper;
-    private final MembershipAccessService membershipAccessService;
 
     public ArtifactJsonResponse getJsonArtifact(Long artifactId, Long userId) {
         Artifact artifact = artifactRepository.findById(artifactId)
                 .orElseThrow(() -> new ArtifactException(ArtifactErrorCode.ARTIFACT_NOT_FOUND));
 
-        validateOwnerAndMembership(artifact, userId);
+        validateOwner(artifact, userId);
         validateJsonArtifact(artifact);
 
         /*
@@ -46,16 +42,16 @@ public class ArtifactQueryService {
         return ArtifactJsonResponse.from(artifact, plainJsonContent);
     }
 
-    private void validateOwnerAndMembership(Artifact artifact, Long userId) {
+    /*
+     * 토큰 기반 정책에서는 멤버십 활성 여부가 아니라,
+     * 현재 로그인 사용자가 해당 artifact의 run owner인지로만 조회 권한을 판단합니다.
+     */
+    private void validateOwner(Artifact artifact, Long userId) {
         RepoRun run = artifact.getRun();
         User owner = run.getOwner();
 
         if (owner == null || !Objects.equals(owner.getId(), userId)) {
             throw new ArtifactException(ArtifactErrorCode.ARTIFACT_FORBIDDEN);
-        }
-
-        if (!membershipAccessService.canViewRun(run, owner)) {
-            throw new MembershipException(MembershipErrorCode.MEMBERSHIP_REQUIRED);
         }
     }
 
