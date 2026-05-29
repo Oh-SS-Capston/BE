@@ -1,6 +1,6 @@
 package com.example.ossdoc.domain.payment.entity;
 
-import com.example.ossdoc.domain.membership.enums.PaymentProvider;
+import com.example.ossdoc.domain.payment.enums.PaymentProvider;
 import com.example.ossdoc.domain.payment.enums.PaymentStatus;
 import com.example.ossdoc.domain.user.entity.User;
 import com.example.ossdoc.global.apiPayload.code.BaseAuditedEntity;

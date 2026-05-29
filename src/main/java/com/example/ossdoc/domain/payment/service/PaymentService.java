@@ -2,7 +2,7 @@ package com.example.ossdoc.domain.payment.service;
 
 import com.example.ossdoc.domain.auth.exception.AuthException;
 import com.example.ossdoc.domain.auth.exception.code.AuthErrorCode;
-import com.example.ossdoc.domain.membership.enums.PaymentProvider;
+import com.example.ossdoc.domain.payment.enums.PaymentProvider;
 import com.example.ossdoc.domain.payment.client.PortOnePaymentClient;
 import com.example.ossdoc.domain.payment.dto.portone.PortOnePaymentSnapshot;
 import com.example.ossdoc.domain.payment.dto.request.PaymentCancelRequest;
