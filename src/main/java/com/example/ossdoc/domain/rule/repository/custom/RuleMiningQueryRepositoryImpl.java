@@ -8,9 +8,13 @@ import com.example.ossdoc.domain.rule.entity.RuleMiningSignal;
 import com.example.ossdoc.domain.rule.enums.RuleMiningSignalType;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
+import org.hibernate.jpa.HibernateHints;
 import org.springframework.stereotype.Repository;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 @Repository
@@ -28,12 +32,12 @@ public class RuleMiningQueryRepositoryImpl implements RuleMiningQueryRepository 
                 List.of(RuleMiningSignalType.IF_CONDITION)
         );
 
-        List<RuleMiningSignal> throwsSignals = findSignalsByTypes(
+        List<RuleMiningSignal> throwSignals = findSignalsByTypes(
                 runId,
                 List.of(RuleMiningSignalType.THROW_STATEMENT)
         );
 
-        Map<String, List<RuleMiningSignal>> throwsBySymbol = groupBySymbolId(throwsSignals);
+        Map<String, List<RuleMiningSignal>> throwsBySymbol = groupBySymbolId(throwSignals);
         List<GuardThrowProjection> result = new ArrayList<>();
 
         for (RuleMiningSignal condition : conditions) {
@@ -94,6 +98,18 @@ public class RuleMiningQueryRepositoryImpl implements RuleMiningQueryRepository 
             }
 
             List<RuleMiningSignal> returnCandidates = returnsBySymbol.getOrDefault(symbolId, List.of());
+            if (returnCandidates.isEmpty()) {
+                continue;
+            }
+
+            /*
+             * 기존 코드에서는 return 후보마다 nearbyErrorSignal을 다시 계산했다.
+             * condition 기준으로 1회만 계산해서 재사용한다.
+             */
+            RuleMiningSignal nearbyErrorSignal = findNearestSignal(
+                    condition,
+                    errorsBySymbol.getOrDefault(symbolId, List.of())
+            );
 
             for (RuleMiningSignal returnSignal : returnCandidates) {
                 int distance = lineDistance(condition, returnSignal);
@@ -101,11 +117,6 @@ public class RuleMiningQueryRepositoryImpl implements RuleMiningQueryRepository 
                 if (!isNearEnough(distance)) {
                     continue;
                 }
-
-                RuleMiningSignal nearbyErrorSignal = findNearestSignal(
-                        condition,
-                        errorsBySymbol.getOrDefault(symbolId, List.of())
-                );
 
                 result.add(new GuardReturnProjection(
                         condition.getSymbol(),
@@ -181,13 +192,16 @@ public class RuleMiningQueryRepositoryImpl implements RuleMiningQueryRepository 
             return List.of();
         }
 
+        /*
+         * 기존 쿼리에서는 edge.fromSymbol, edge.toSymbol까지 항상 fetch join 했다.
+         * miner에서는 대부분 signal.symbol, signal.edge id, signal.evidence, evidence.file 정도만 필요하다.
+         * 그래서 불필요한 fetch join을 줄인다.
+         */
         return em.createQuery("""
-                        select distinct s
+                        select s
                         from RuleMiningSignal s
                         left join fetch s.symbol
-                        left join fetch s.edge e
-                        left join fetch e.fromSymbol
-                        left join fetch e.toSymbol
+                        left join fetch s.edge
                         left join fetch s.evidence ev
                         left join fetch ev.file
                         where s.run.runId = :runId
@@ -198,6 +212,7 @@ public class RuleMiningQueryRepositoryImpl implements RuleMiningQueryRepository 
                         """, RuleMiningSignal.class)
                 .setParameter("runId", runId)
                 .setParameter("signalTypes", signalTypes)
+                .setHint(HibernateHints.HINT_READ_ONLY, true)
                 .getResultList();
     }
 
@@ -220,8 +235,8 @@ public class RuleMiningQueryRepositoryImpl implements RuleMiningQueryRepository 
         }
 
         return candidates.stream()
-                .min(Comparator.comparingInt(candidate -> lineDistance(base, candidate)))
                 .filter(candidate -> isNearEnough(lineDistance(base, candidate)))
+                .min(Comparator.comparingInt(candidate -> lineDistance(base, candidate)))
                 .orElse(null);
     }
 
@@ -229,6 +244,10 @@ public class RuleMiningQueryRepositoryImpl implements RuleMiningQueryRepository 
         return distance >= 0 && distance <= MAX_GUARD_LINE_DISTANCE;
     }
 
+    /**
+     * 기존 Math.abs(rightLine - leftLine)는 조건문보다 위에 있는 throw/return도 매칭할 수 있었다.
+     * guard 패턴은 일반적으로 condition 이후 action이 나와야 하므로 방향성을 유지한다.
+     */
     private int lineDistance(RuleMiningSignal left, RuleMiningSignal right) {
         if (left == null || right == null) {
             return Integer.MAX_VALUE;
@@ -241,7 +260,7 @@ public class RuleMiningQueryRepositoryImpl implements RuleMiningQueryRepository 
             return Integer.MAX_VALUE;
         }
 
-        return Math.abs(rightLine - leftLine);
+        return rightLine - leftLine;
     }
 
     private Integer firstNonNull(Integer first, Integer second) {

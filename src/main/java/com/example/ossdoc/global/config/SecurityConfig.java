@@ -58,7 +58,6 @@ public class SecurityConfig {
                         .requestMatchers("/api/v1/auth/nicknames/**").authenticated()
                         .requestMatchers("/api/v1/runs/**").authenticated()
                         .requestMatchers("/api/v1/artifacts/**").authenticated()
-                        .requestMatchers("/api/v1/membership/**").authenticated()
                         .requestMatchers("/api/v1/payments/**").authenticated()
 
                         .anyRequest().permitAll()

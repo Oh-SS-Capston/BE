@@ -26,7 +26,9 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.Comparator;
+import java.util.EnumMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 @Slf4j
@@ -132,35 +134,58 @@ public class RuleCandidateMiningService {
         );
     }
 
+    /**
+     * 기존에는 total/high/medium/low count를 위해 쿼리 4번을 호출했다.
+     * 이제 confidence group by 쿼리 1번으로 count를 계산한다.
+     */
     private RuleCandidateMineResponse buildResponse(
             RepoRun run,
             Long artifactId,
             boolean forceRebuildApplied
     ) {
+        Map<RuleCandidateConfidence, Integer> counts = loadConfidenceCounts(run.getRunId());
+
+        int high = counts.getOrDefault(RuleCandidateConfidence.HIGH, 0);
+        int medium = counts.getOrDefault(RuleCandidateConfidence.MEDIUM, 0);
+        int low = counts.getOrDefault(RuleCandidateConfidence.LOW, 0);
+        int total = high + medium + low;
+
         return RuleCandidateMineResponse.builder()
                 .runId(run.getRunId())
                 .ruleCandidatesArtifactId(artifactId)
-                .totalCandidates(Math.toIntExact(ruleCandidateRepository.countByRun_RunId(run.getRunId())))
-                .highConfidenceCount(Math.toIntExact(
-                        ruleCandidateRepository.countByRun_RunIdAndConfidence(
-                                run.getRunId(),
-                                RuleCandidateConfidence.HIGH
-                        )
-                ))
-                .mediumConfidenceCount(Math.toIntExact(
-                        ruleCandidateRepository.countByRun_RunIdAndConfidence(
-                                run.getRunId(),
-                                RuleCandidateConfidence.MEDIUM
-                        )
-                ))
-                .lowConfidenceCount(Math.toIntExact(
-                        ruleCandidateRepository.countByRun_RunIdAndConfidence(
-                                run.getRunId(),
-                                RuleCandidateConfidence.LOW
-                        )
-                ))
+                .totalCandidates(total)
+                .highConfidenceCount(high)
+                .mediumConfidenceCount(medium)
+                .lowConfidenceCount(low)
                 .forceRebuildApplied(forceRebuildApplied)
                 .build();
+    }
+
+    private Map<RuleCandidateConfidence, Integer> loadConfidenceCounts(String runId) {
+        Map<RuleCandidateConfidence, Integer> result =
+                new EnumMap<>(RuleCandidateConfidence.class);
+
+        List<Object[]> rows = ruleCandidateRepository.countGroupByConfidence(runId);
+        if (rows == null || rows.isEmpty()) {
+            return result;
+        }
+
+        for (Object[] row : rows) {
+            if (row == null || row.length < 2) {
+                continue;
+            }
+
+            RuleCandidateConfidence confidence = (RuleCandidateConfidence) row[0];
+            Number count = (Number) row[1];
+
+            if (confidence == null || count == null) {
+                continue;
+            }
+
+            result.put(confidence, Math.toIntExact(count.longValue()));
+        }
+
+        return result;
     }
 
     private boolean determineForceRebuild(String runId, RuleCandidateMineRequest request) {
