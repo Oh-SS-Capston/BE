@@ -18,9 +18,10 @@ import org.springframework.stereotype.Component;
 public class RunSnapshotProperties {
 
     /**
-     * 스냅샷 수집 방식. 기본값은 ZIP(현 동작 유지).
+     * 스냅샷 수집 방식. 기본값은 CLONE — JUnit5처럼 git 메타데이터(.git 디렉토리, 커밋 SHA)에
+     * 의존하는 빌드 플러그인을 가진 프로젝트도 통과시키기 위함. ZIP은 fallback 옵션으로 유지한다.
      */
-    private SnapshotMode mode = SnapshotMode.ZIP;
+    private SnapshotMode mode = SnapshotMode.CLONE;
 
     /**
      * git 실행 파일 경로. 비워두면 PATH 상의 git을 사용한다.

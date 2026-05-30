@@ -72,16 +72,23 @@ public class ClusterBuildService {
             throw new ClusterException(ClusterErrorCode.CLUSTER_GRAPH_EMPTY);
         }
 
+        // Jackson 역직렬화 시 Lombok 필드 기본값이 누락되면 null로 들어와 언박싱 NPE가 발생하므로 호출 직전에 가드한다.
+        int minClusterSize = request.getMinClusterSize() != null ? request.getMinClusterSize() : 3;
+        int iterations     = request.getIterations()     != null ? request.getIterations()     : 10;
+        int topK           = request.getTopK()           != null ? request.getTopK()           : 30;
+
         ResolutionProbeService.ProbeResult probeResult;
         try {
             probeResult = resolutionProbeService.findBest(
                     projectedGraph,
-                    request.getMinClusterSize(),
-                    request.getIterations()
+                    minClusterSize,
+                    iterations
             );
         } catch (ClusterException e) {
             throw e;
         } catch (Exception e) {
+            log.error("[CLUSTER] Leiden probe failed. runId={}, nodes={}, edges={}",
+                    run.getRunId(), projectedGraph.getNodes().size(), projectedGraph.getEdges().size(), e);
             throw new ClusterException(ClusterErrorCode.CLUSTER_LEIDEN_FAILED);
         }
 
@@ -94,7 +101,7 @@ public class ClusterBuildService {
             subsystems = subsystemAssembler.assemble(
                     projectedGraph,
                     probeResult.communityResult().getClusters(),
-                    request.getMinClusterSize()
+                    minClusterSize
             );
         } catch (Exception e) {
             throw new ClusterException(ClusterErrorCode.CLUSTER_ASSEMBLY_FAILED);
@@ -119,14 +126,14 @@ public class ClusterBuildService {
             rankingResult = rankingService.rank(
                     projectedGraph,
                     subsystems,
-                    request.getTopK()
+                    topK
             );
         } catch (Exception e) {
             // 랭킹 실패의 실제 원인을 로그로 남겨 후속 장애 분석 속도를 높인다.
             log.error(
                     "[CLUSTER] ranking failed. runId={}, topK={}, subsystemCount={}, nodeCount={}, edgeCount={}",
                     request.getRunId(),
-                    request.getTopK(),
+                    topK,
                     subsystems.size(),
                     projectedGraph.getNodes() == null ? 0 : projectedGraph.getNodes().size(),
                     projectedGraph.getEdges() == null ? 0 : projectedGraph.getEdges().size(),
@@ -163,7 +170,7 @@ public class ClusterBuildService {
                     "stddev_subsystem_size", Math.round(stddevSize * 100.0) / 100.0,
                     "modularity", probeResult.modularity(),
                     "leiden_resolution", probeResult.resolution(),
-                    "leiden_iterations", request.getIterations()
+                    "leiden_iterations", iterations
             );
 
             SubsystemsJson subsystemsJson = SubsystemsJson.builder()
@@ -173,7 +180,7 @@ public class ClusterBuildService {
                     .algorithm(Map.of(
                             "name", "Leiden",
                             "resolution", probeResult.resolution(),
-                            "iterations", request.getIterations(),
+                            "iterations", iterations,
                             "graphMode", "UNDIRECTED_WEIGHTED_TYPE_GRAPH",
                             "modularity", probeResult.modularity(),
                             "clusterCount", probeResult.clusterCount(),

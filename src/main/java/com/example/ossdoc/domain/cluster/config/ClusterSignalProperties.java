@@ -12,7 +12,7 @@ import org.springframework.stereotype.Component;
 @Getter
 @Setter
 @Component
-@ConfigurationProperties(prefix = "cluster")
+@ConfigurationProperties(prefix = "ossdoc.cluster")
 public class ClusterSignalProperties {
 
     private Refiner refiner = new Refiner();
