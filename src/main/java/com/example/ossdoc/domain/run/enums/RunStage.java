@@ -48,6 +48,12 @@ public enum RunStage {
             "주요 모듈과 군집을 분석 중입니다."
     ),
 
+    SUPER_CLUSTER(
+            83,
+            false,
+            "모듈 수퍼 클러스터를 생성 중입니다."
+    ),
+
     PUBLICAPI(
             87,
             false,

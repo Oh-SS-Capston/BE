@@ -5,7 +5,12 @@ import com.example.ossdoc.global.config.BuildCommandProperties;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
 
+import javax.xml.parsers.DocumentBuilderFactory;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -113,10 +118,16 @@ public class MavenBuildSupport {
         String moduleId = toModuleId(repoRoot, moduleRoot);
         String name = moduleRoot.getFileName() != null ? moduleRoot.getFileName().toString() : moduleId;
 
+        PomCoordinates coords = readPomCoordinates(moduleRoot);
+        String artifactId = (coords != null && coords.artifactId() != null) ? coords.artifactId() : name;
+
         // classpath/runtimeClasspath은 절대경로로 정규화해 후속 분석 단계에서 OS 의존성을 줄인다.
         return BuildModuleManifest.builder()
                 .moduleId(moduleId)
                 .name(name)
+                .groupId(coords != null ? coords.groupId() : null)
+                .artifactId(artifactId)
+                .version(coords != null ? coords.version() : null)
                 .sourceRoots(sourceRoots)
                 .testRoots(testRoots)
                 .resourceRoots(resourceRoots)
@@ -256,4 +267,52 @@ public class MavenBuildSupport {
         // -Dmaven.repo.local 옵션으로 Run별 캐시 경로를 강제한다.
         command.add("-Dmaven.repo.local=" + buildPathNormalizer.normalize(mavenLocalRepoPath));
     }
+
+    private PomCoordinates readPomCoordinates(Path moduleRoot) {
+        Path pom = moduleRoot.resolve("pom.xml");
+        if (!Files.exists(pom)) {
+            return null;
+        }
+        try {
+            Document doc = DocumentBuilderFactory.newInstance()
+                    .newDocumentBuilder()
+                    .parse(pom.toFile());
+            Element root = doc.getDocumentElement();
+            String groupId = directChildText(root, "groupId");
+            if (groupId == null) {
+                groupId = parentChildText(root, "groupId");
+            }
+            String artifactId = directChildText(root, "artifactId");
+            String version = directChildText(root, "version");
+            if (version == null) {
+                version = parentChildText(root, "version");
+            }
+            return new PomCoordinates(groupId, artifactId, version);
+        } catch (Exception e) {
+            log.warn("[BUILD] Failed to read pom coordinates. pom={}", pom, e);
+            return null;
+        }
+    }
+
+    private String directChildText(Element parent, String tag) {
+        NodeList children = parent.getChildNodes();
+        for (int i = 0; i < children.getLength(); i++) {
+            Node n = children.item(i);
+            if (n.getNodeType() == Node.ELEMENT_NODE && tag.equals(n.getNodeName())) {
+                String text = n.getTextContent();
+                return (text != null && !text.isBlank()) ? text.trim() : null;
+            }
+        }
+        return null;
+    }
+
+    private String parentChildText(Element root, String tag) {
+        NodeList parents = root.getElementsByTagName("parent");
+        if (parents.getLength() == 0 || !(parents.item(0) instanceof Element parentElem)) {
+            return null;
+        }
+        return directChildText(parentElem, tag);
+    }
+
+    private record PomCoordinates(String groupId, String artifactId, String version) {}
 }

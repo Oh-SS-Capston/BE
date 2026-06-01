@@ -97,7 +97,7 @@ public class RuleMiningSignalIngestService {
             throw new RuleCandidateException(RuleCandidateErrorCode.GRAPHSTORE_DATA_NOT_FOUND);
         }
 
-        Map<Long, List<Evidence>> evidenceByEdgeId = loadEvidenceByEdgeId(signalSourceEdges);
+        Map<Long, List<Evidence>> evidenceByEdgeId = loadEvidenceByEdgeId(runId, signalSourceEdges);
         List<RuleMiningSignal> signals = new ArrayList<>();
         Set<String> signalKeys = new HashSet<>();
 
@@ -164,17 +164,17 @@ public class RuleMiningSignalIngestService {
                 && symbol.getSourceEndLine() != null;
     }
 
-    private Map<Long, List<Evidence>> loadEvidenceByEdgeId(List<Edge> edges) {
-        List<Long> edgeIds = edges.stream()
+    private Map<Long, List<Evidence>> loadEvidenceByEdgeId(String runId, List<Edge> edges) {
+        Set<Long> edgeIdFilter = edges.stream()
                 .map(Edge::getEdgeId)
                 .filter(Objects::nonNull)
-                .toList();
+                .collect(Collectors.toSet());
 
-        if (edgeIds.isEmpty()) {
+        if (edgeIdFilter.isEmpty()) {
             return Map.of();
         }
 
-        List<EdgeEvidence> links = edgeEvidenceRepository.findAllByEdge_EdgeIdIn(edgeIds);
+        List<EdgeEvidence> links = edgeEvidenceRepository.findAllByEdge_Run_RunId(runId);
 
         Map<Long, List<Evidence>> result = new HashMap<>();
 
@@ -184,7 +184,7 @@ public class RuleMiningSignalIngestService {
             }
 
             Long edgeId = link.getEdge().getEdgeId();
-            if (edgeId == null) {
+            if (edgeId == null || !edgeIdFilter.contains(edgeId)) {
                 continue;
             }
 

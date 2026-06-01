@@ -11,6 +11,10 @@ public class BuildModuleManifest {
     private String moduleId; // gradle projectPath (":core")
     private String name;
 
+    private String groupId;
+    private String artifactId;
+    private String version;
+
     private List<String> sourceRoots;
     private List<String> testRoots;
     private List<String> resourceRoots;

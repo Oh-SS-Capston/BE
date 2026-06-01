@@ -184,7 +184,7 @@ public class ClassMapBuildService {
                     structuralAggregates.size()
             );
 
-            Map<Long, List<Evidence>> evidenceByEdgeId = loadEvidenceByEdgeId(selectedAggregates);
+            Map<Long, List<Evidence>> evidenceByEdgeId = loadEvidenceByEdgeId(run.getRunId(), selectedAggregates);
             Set<String> exampleUsedTypeIds = new HashSet<>();
 
             List<ClassDiagramEdge> edgeItems = new ArrayList<>();
@@ -787,25 +787,29 @@ public class ClassMapBuildService {
 
     /**
      * 선택된 edge들의 evidence를 edge id 기준으로 로드한다.
+     * edge_id IN(...) 대신 run_id JOIN 후 메모리 필터링으로 PostgreSQL 파라미터 한도를 우회한다.
      */
-    private Map<Long, List<Evidence>> loadEvidenceByEdgeId(List<EdgeAggregate> selectedAggregates) {
-        List<Long> edgeIds = selectedAggregates.stream()
+    private Map<Long, List<Evidence>> loadEvidenceByEdgeId(String runId, List<EdgeAggregate> selectedAggregates) {
+        Set<Long> edgeIdFilter = selectedAggregates.stream()
                 .flatMap(aggregate -> aggregate.rawEdges.stream())
                 .map(Edge::getEdgeId)
                 .filter(Objects::nonNull)
-                .distinct()
-                .toList();
-        if (edgeIds.isEmpty()) {
+                .collect(Collectors.toSet());
+        if (edgeIdFilter.isEmpty()) {
             return Map.of();
         }
 
         Map<Long, List<Evidence>> evidenceByEdgeId = new HashMap<>();
-        List<EdgeEvidence> rows = edgeEvidenceRepository.findAllByEdge_EdgeIdIn(edgeIds);
+        List<EdgeEvidence> rows = edgeEvidenceRepository.findAllByEdge_Run_RunId(runId);
         for (EdgeEvidence row : rows) {
             if (row.getEdge() == null || row.getEvidence() == null || row.getEdge().getEdgeId() == null) {
                 continue;
             }
-            evidenceByEdgeId.computeIfAbsent(row.getEdge().getEdgeId(), ignored -> new ArrayList<>())
+            Long edgeId = row.getEdge().getEdgeId();
+            if (!edgeIdFilter.contains(edgeId)) {
+                continue;
+            }
+            evidenceByEdgeId.computeIfAbsent(edgeId, ignored -> new ArrayList<>())
                     .add(row.getEvidence());
         }
         return evidenceByEdgeId;

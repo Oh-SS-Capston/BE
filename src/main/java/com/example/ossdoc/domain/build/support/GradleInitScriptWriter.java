@@ -28,6 +28,10 @@ public class GradleInitScriptWriter {
                       def result = [:]
                       result.projectPath = prj.path
                       result.name = prj.name
+                      def grpStr = prj.group ? prj.group.toString() : ''
+                      result.group = grpStr ? grpStr : null
+                      def verStr = prj.version ? prj.version.toString() : ''
+                      result.version = (verStr && verStr != 'unspecified') ? verStr : null
                       def hasJava = prj.plugins.hasPlugin('java') || prj.plugins.hasPlugin('java-library')
                       result.hasJava = hasJava
 

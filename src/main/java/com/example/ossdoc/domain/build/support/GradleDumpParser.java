@@ -47,6 +47,10 @@ public class GradleDumpParser {
             try {
                 Map<String, Object> map = objectMapper.readValue(m.group(1), Map.class);
 
+                String groupId = emptyToNull((String) map.get("group"));
+                String artifactId = emptyToNull((String) map.getOrDefault("name", ""));
+                String version = emptyToNull((String) map.get("version"));
+
                 List<String> sourceRoots = readPathList(map, "sourceRoots", repoRoot);
                 List<String> testRoots = readPathList(map, "testRoots", repoRoot);
                 List<String> resourceRoots = readPathList(map, "resourceRoots", repoRoot);
@@ -76,6 +80,9 @@ public class GradleDumpParser {
                 modules.add(BuildModuleManifest.builder()
                         .moduleId(projectPath)
                         .name((String) map.getOrDefault("name", ""))
+                        .groupId(groupId)
+                        .artifactId(artifactId)
+                        .version(version)
                         .sourceRoots(sourceRoots)
                         .testRoots(testRoots)
                         .resourceRoots(resourceRoots)
@@ -94,6 +101,10 @@ public class GradleDumpParser {
             }
         }
         return modules;
+    }
+
+    private static String emptyToNull(String s) {
+        return (s == null || s.isBlank()) ? null : s;
     }
 
     private List<String> readPathList(Map<String, Object> map, String key, Path repoRoot) {

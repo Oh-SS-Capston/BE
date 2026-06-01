@@ -21,6 +21,8 @@ import com.example.ossdoc.domain.cluster.support.supercluster.SuperClusterMergeS
 import com.example.ossdoc.domain.graphstore.entity.SymbolEntity;
 import com.example.ossdoc.domain.graphstore.enums.SymbolKind;
 import com.example.ossdoc.domain.graphstore.repository.SymbolRepository;
+import com.example.ossdoc.domain.module.entity.ModuleEntity;
+import com.example.ossdoc.domain.module.repository.ModuleRepository;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -45,6 +47,7 @@ public class SuperClusterBuildService {
     private final RepoRunRepository repoRunRepository;
     private final ArtifactRepository artifactRepository;
     private final SymbolRepository symbolRepository;
+    private final ModuleRepository moduleRepository;
     private final ClusterArtifactPublisher clusterArtifactPublisher;
     private final ClusterSignalProperties clusterSignalProperties;
     private final ObjectMapper objectMapper;
@@ -71,14 +74,25 @@ public class SuperClusterBuildService {
             throw new ClusterException(ClusterErrorCode.CLUSTER_GRAPH_EMPTY);
         }
 
-        // Option 3: BUILD_MANIFEST를 메모리로 읽어 symbol → 모듈 식별자를 복원한다 (DB 무변경).
-        // graph의 SymbolEntity.module은 FactsSymbolConverter에서 null로 적재되므로,
-        // 여기서 sourceRoot ↔ 모듈 sourceRoots 매칭으로 moduleId를 in-memory 재구성한다.
+        // Option 3: BUILD_MANIFEST 기반 sourceRoot 매칭 (DB module이 null인 과거 run 호환 fallback)
         ModuleResolver moduleResolver = loadModuleResolver(runId);
 
-        Map<String, ProjectedNode> nodeIndex = new HashMap<>();
+        // C-3: DB module 테이블에서 모듈 정보 로드 (C-1/C-2 이후 run에서 유효)
+        // displayNames: Option 3 기준으로 시작 후 DB 값으로 덮어씀 (artifactId ?? name 우선)
         Map<String, String> displayNames = new LinkedHashMap<>(moduleResolver.displayNames());
-        buildIndexes(runId, nodeIndex, moduleResolver,
+        Map<String, ModuleEntity> dbModuleByKey = new LinkedHashMap<>();
+        for (ModuleEntity m : moduleRepository.findAllByRun_RunId(runId)) {
+            String key = extractModuleKey(m.getModuleId(), runId);
+            if (key != null) {
+                dbModuleByKey.put(key, m);
+                String displayName = (m.getArtifactId() != null && !m.getArtifactId().isBlank())
+                        ? m.getArtifactId() : m.getName();
+                displayNames.put(key, displayName);
+            }
+        }
+
+        Map<String, ProjectedNode> nodeIndex = new HashMap<>();
+        buildIndexes(runId, nodeIndex, moduleResolver, dbModuleByKey,
                 config.getFallback().getPackageRootCommonPrefixDepth());
 
         SuperClusterMergeStrategy strategy = resolveStrategy(config.getStrategy());
@@ -142,6 +156,7 @@ public class SuperClusterBuildService {
     private void buildIndexes(String runId,
                               Map<String, ProjectedNode> nodeIndex,
                               ModuleResolver moduleResolver,
+                              Map<String, ModuleEntity> dbModuleByKey,
                               int fallbackDepth) {
         try {
             List<SymbolEntity> typeSymbols = symbolRepository
@@ -150,10 +165,23 @@ public class SuperClusterBuildService {
             // pass 1: 직접 매칭 결과를 모으고, 매칭된 노드로 packageRoot→moduleKey 다리를 학습한다.
             List<RawNode> raws = new ArrayList<>(typeSymbols.size());
             Map<String, Map<String, Integer>> bridgeVotes = new HashMap<>();
+            int dbMatched = 0;
+            int option3Matched = 0;
 
             for (SymbolEntity symbol : typeSymbols) {
                 String packageName = extractPackageName(symbol.getQualifiedName());
-                String matchedModuleId = moduleResolver.resolveModuleKey(symbol.getSourceRoot());
+
+                // C-3: DB module 우선, null이면 Option 3 sourceRoot 매칭 fallback (과거 run 호환)
+                // symbol.getModule()은 @Id 접근이므로 Hibernate proxy 초기화 없이 moduleId 반환
+                String matchedModuleId;
+                if (symbol.getModule() != null) {
+                    matchedModuleId = extractModuleKey(symbol.getModule().getModuleId(), runId);
+                    if (matchedModuleId != null) dbMatched++;
+                } else {
+                    matchedModuleId = moduleResolver.resolveModuleKey(symbol.getSourceRoot());
+                    if (matchedModuleId != null) option3Matched++;
+                }
+
                 String packageRoot = extractPackagePrefix(packageName, fallbackDepth);
 
                 raws.add(new RawNode(
@@ -190,8 +218,8 @@ public class SuperClusterBuildService {
                         .build());
             }
 
-            log.info("[SUPER_CLUSTER] 모듈 매칭 완료. runId={}, total={}, bridgeKeys={}, bridgedNodes={}",
-                    runId, raws.size(), bridge.size(), bridged);
+            log.info("[SUPER_CLUSTER] 모듈 매칭 완료. runId={}, total={}, dbMatched={}, option3Matched={}, bridgeKeys={}, bridgedNodes={}",
+                    runId, raws.size(), dbMatched, option3Matched, bridge.size(), bridged);
         } catch (Exception e) {
             log.error("[SUPER_CLUSTER] 노드 인덱스 구성 실패. runId={}", runId, e);
             throw new ClusterException(ClusterErrorCode.CLUSTER_SUPER_BUILD_FAILED);
@@ -320,6 +348,19 @@ public class SuperClusterBuildService {
                     log.warn("[SUPER_CLUSTER] 전략 '{}' 없음, 첫 번째 전략 사용", strategyName);
                     return strategies.get(0);
                 });
+    }
+
+    /**
+     * DB moduleId ("runId::":gradlePath"") → ModuleResolver와 동일한 moduleKey.
+     * ":resilience4j-core" → "resilience4j-core" (ModuleResolver.normalizeModuleKey와 동일 로직)
+     */
+    private static String extractModuleKey(String moduleId, String runId) {
+        if (moduleId == null) return null;
+        String prefix = runId + "::";
+        if (!moduleId.startsWith(prefix)) return null;
+        String gradlePath = moduleId.substring(prefix.length());
+        while (gradlePath.startsWith(":")) gradlePath = gradlePath.substring(1);
+        return gradlePath.isBlank() ? null : gradlePath;
     }
 
     private static String extractPackageName(String qualifiedName) {

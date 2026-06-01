@@ -10,9 +10,8 @@ import com.example.ossdoc.domain.graphstore.enums.EdgeType;
 import com.example.ossdoc.domain.graphstore.enums.SymbolKind;
 import com.example.ossdoc.domain.graphstore.repository.EdgeRepository;
 import com.example.ossdoc.domain.graphstore.repository.SymbolRepository;
-import com.example.ossdoc.domain.publicapi.entity.PublicApiEntry;
 import com.example.ossdoc.domain.publicapi.model.EntryPointCandidate;
-import com.example.ossdoc.domain.publicapi.repository.PublicApiEntryRepository;
+import com.example.ossdoc.domain.publicapi.support.PublicSymbolFilter;
 import com.fasterxml.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -27,6 +26,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * 역할: EntryPointPlan.md 파이프라인 구현체.
@@ -63,19 +63,18 @@ public class EntryPointDetectService {
     private static final int MIN_FACADE_METHODS = 5;
     private static final int MED_MIN_SCORE = 3;
 
-    private final PublicApiEntryRepository publicApiEntryRepository;
     private final SymbolRepository symbolRepository;
     private final EdgeRepository edgeRepository;
     private final ArtifactRepository artifactRepository;
 
     public List<EntryPointCandidate> detect(String runId) {
-        Set<String> publicSymbolIds = loadPublicSymbolIds(runId);
+        // 모든 심볼 한 번에 로드 → first-level cache로 lazy 연관 N+1 방지
+        List<SymbolEntity> allSymbols = symbolRepository.findAllByRun_RunId(runId);
+        Set<String> publicSymbolIds = loadPublicSymbolIds(allSymbols);
         if (publicSymbolIds.isEmpty()) {
             return List.of();
         }
 
-        // 모든 심볼 한 번에 로드 → first-level cache로 lazy 연관 N+1 방지
-        List<SymbolEntity> allSymbols = symbolRepository.findAllByRun_RunId(runId);
         ChildMaps childMaps = buildChildMaps(allSymbols);
 
         Map<String, Integer> returnedByPublicApi =
@@ -121,13 +120,13 @@ public class EntryPointDetectService {
 
     // ─── 데이터 로딩 ────────────────────────────────────────────────────────────
 
-    private Set<String> loadPublicSymbolIds(String runId) {
-        List<PublicApiEntry> entries = publicApiEntryRepository.findAllByRun_RunId(runId);
-        Set<String> ids = new HashSet<>(entries.size());
-        for (PublicApiEntry entry : entries) {
-            ids.add(entry.getSymbol().getSymbolId());
-        }
-        return ids;
+    private Set<String> loadPublicSymbolIds(List<SymbolEntity> allSymbols) {
+        // allSymbols는 detect() 상단에서 이미 로드됨 — 추가 DB 쿼리 없음
+        // 판정 기준은 PublicSymbolFilter에서 단일 관리 (sync와 parity 보장)
+        return allSymbols.stream()
+                .filter(PublicSymbolFilter::isPublicApiType)
+                .map(SymbolEntity::getSymbolId)
+                .collect(Collectors.toSet());
     }
 
     private ChildMaps buildChildMaps(List<SymbolEntity> allSymbols) {
