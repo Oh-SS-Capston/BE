@@ -1,6 +1,6 @@
 package com.example.ossdoc.domain.run.dto.response;
 
-import com.example.ossdoc.domain.membership.enums.AnalysisAccessType;
+import com.example.ossdoc.domain.run.enums.AnalysisAccessType;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.enums.RunStatus;
 import lombok.Builder;

@@ -1,4 +1,4 @@
-package com.example.ossdoc.domain.membership.exception.code;
+package com.example.ossdoc.domain.token.exception.code;
 
 import com.example.ossdoc.global.apiPayload.code.BaseCode;
 import com.example.ossdoc.global.apiPayload.code.ReasonDTO;
@@ -8,24 +8,36 @@ import org.springframework.http.HttpStatus;
 
 @Getter
 @RequiredArgsConstructor
-public enum MembershipErrorCode implements BaseCode {
+public enum TokenErrorCode implements BaseCode {
 
-    MEMBERSHIP_REQUIRED(
-            HttpStatus.PAYMENT_REQUIRED,
-            "MEMBERSHIP402_1",
-            "무료 분석 기회를 모두 사용했습니다. 멤버십 가입 후 사용할 수 있습니다."
-    ),
-
-    SUBSCRIPTION_NOT_FOUND(
+    TOKEN_WALLET_NOT_FOUND(
             HttpStatus.NOT_FOUND,
-            "MEMBERSHIP404_1",
-            "구독 정보를 찾을 수 없습니다."
+            "TOKEN404_1",
+            "토큰 지갑을 찾을 수 없습니다."
     ),
 
-    SUBSCRIPTION_ALREADY_ACTIVE(
+    USER_NOT_FOUND(
+            HttpStatus.NOT_FOUND,
+            "TOKEN404_2",
+            "사용자를 찾을 수 없습니다."
+    ),
+
+    INVALID_TOKEN_AMOUNT(
+            HttpStatus.BAD_REQUEST,
+            "TOKEN400_1",
+            "토큰 금액이 올바르지 않습니다."
+    ),
+
+    INSUFFICIENT_TOKEN(
+            HttpStatus.PAYMENT_REQUIRED,
+            "TOKEN402_1",
+            "토큰이 부족합니다."
+    ),
+
+    DUPLICATE_TOKEN_CHARGE(
             HttpStatus.CONFLICT,
-            "MEMBERSHIP409_1",
-            "이미 활성화된 멤버십이 있습니다."
+            "TOKEN409_1",
+            "이미 처리된 토큰 충전입니다."
     );
 
     private final HttpStatus httpStatus;
@@ -44,10 +56,10 @@ public enum MembershipErrorCode implements BaseCode {
     @Override
     public ReasonDTO getReasonHttpStatus() {
         return ReasonDTO.builder()
+                .httpStatus(httpStatus)
                 .isSuccess(false)
                 .code(code)
                 .message(message)
-                .httpStatus(httpStatus)
                 .build();
     }
 }

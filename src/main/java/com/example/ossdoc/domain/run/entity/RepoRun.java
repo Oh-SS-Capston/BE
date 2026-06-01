@@ -2,7 +2,7 @@ package com.example.ossdoc.domain.run.entity;
 
 import com.example.ossdoc.domain.run.enums.RunStatus;
 import com.example.ossdoc.domain.user.entity.User;
-import com.example.ossdoc.domain.membership.enums.AnalysisAccessType;
+import com.example.ossdoc.domain.run.enums.AnalysisAccessType;
 import com.example.ossdoc.global.apiPayload.code.BaseAuditedEntity;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.persistence.*;
