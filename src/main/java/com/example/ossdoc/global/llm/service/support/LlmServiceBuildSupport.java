@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -29,6 +30,7 @@ import java.util.function.Supplier;
  * LlmService의 출력 정규화/문서 조합 로직을 분리한 지원 컴포넌트.
  * 서비스 본체는 흐름 제어만 담당하고, 세부 변환은 이 클래스가 담당한다.
  */
+@Slf4j
 @Component
 @RequiredArgsConstructor
 public class LlmServiceBuildSupport {
@@ -1178,6 +1180,8 @@ public class LlmServiceBuildSupport {
             }
             entry.put("actionabilityScore", method.path("actionabilityScore").asInt(0));
             entry.put("subsystem", shortenText(method.path("classFqn").asText("core"), 80));
+            if (method.has("apiFlowRef")) entry.set("apiFlowRef", method.path("apiFlowRef").deepCopy());
+            if (method.has("flowTraceSummary")) entry.put("flowTraceSummary", method.path("flowTraceSummary").asText(""));
             ArrayNode relatedScenarios = entry.putArray("relatedScenarios");
             relatedScenarios.add("SCN-001");
         }
@@ -1589,31 +1593,97 @@ public class LlmServiceBuildSupport {
     }
 
     /**
-     * apiEntries에 flow trace 요약을 연결한다 (step ④ API docs 보강).
-     * entryQualifiedName 또는 fqn 매핑으로 연결한다.
+     * coreMethods에 flow trace 요약을 연결한다 (step ④ API docs 보강).
+     *
+     * <p>trace의 entryQualifiedName은 TYPE FQN("org.foo.Bar")이고,
+     * coreMethods의 fqn은 METHOD FQN("org.foo.Bar.method")이다.
+     * 단위가 달라 직접 매칭이 불가능하므로 method.classFqn → TYPE FQN으로 변환하여 연결한다.
+     * 같은 타입에 속한 여러 메서드는 동일 flow trace 요약을 공유한다.
      */
-    public void enrichApiEntriesWithFlowTraces(ArrayNode apiEntries, JsonNode apiFlowTraces) {
+    public void enrichCoreMethodsWithFlowTraces(ArrayNode coreMethods, JsonNode apiFlowTraces) {
         if (!apiFlowTraces.isArray() || apiFlowTraces.isEmpty()) return;
 
-        // fqn → trace 인덱스 구성
-        Map<String, JsonNode> traceByFqn = new HashMap<>();
+        // TYPE FQN → trace 인덱스 구성
+        // entryQualifiedName 형식: "type:org.foo.Bar"
+        // normalizeEntryQualifiedName 후: "org.foo.Bar" (TYPE FQN)
+        Map<String, JsonNode> traceByTypeFqn = new HashMap<>();
         for (JsonNode trace : apiFlowTraces) {
             String qn = trace.path("entryQualifiedName").asText("");
-            if (!qn.isBlank()) traceByFqn.put(qn, trace);
+            if (qn.isBlank()) continue;
+            String typeFqn = normalizeEntryQualifiedName(qn);
+            if (!typeFqn.isBlank()) traceByTypeFqn.put(typeFqn, trace);
         }
 
-        for (JsonNode entry : apiEntries) {
-            if (!entry.isObject()) continue;
-            String fqn = entry.path("fqn").asText("");
-            JsonNode trace = traceByFqn.get(fqn);
-            if (trace == null) continue;
+        int matched = 0;
+        int unmatched = 0;
+        for (JsonNode method : coreMethods) {
+            if (!method.isObject()) continue;
+            // classFqn이 TYPE FQN과 직접 매칭됨. 없으면 method fqn에서 추출
+            String classFqn = firstNonBlank(
+                    method.path("classFqn").asText(""),
+                    ownerFromMethodFqn(method.path("fqn").asText(""))
+            );
+            JsonNode trace = traceByTypeFqn.get(classFqn);
+            if (trace == null) {
+                unmatched++;
+                continue;
+            }
+            matched++;
 
-            ObjectNode entryObj = (ObjectNode) entry;
-            ObjectNode flowRef = entryObj.putObject("apiFlowRef");
-            flowRef.put("reachableCount", trace.path("reachableNodes").size());
-            flowRef.put("maxDepth", trace.path("maxDepth").asInt(0));
-            flowRef.put("truncated", trace.path("truncated").asBoolean(false));
+            ObjectNode methodObj = (ObjectNode) method;
+            int reachableCount = trace.path("reachableNodes").size();
+            int maxDepth = trace.path("maxDepth").asInt(0);
+            boolean truncated = trace.path("truncated").asBoolean(false);
+
+            ObjectNode flowRef = methodObj.putObject("apiFlowRef");
+            flowRef.put("reachableCount", reachableCount);
+            flowRef.put("maxDepth", maxDepth);
+            flowRef.put("truncated", truncated);
+
+            // directCallees (bfsDepth=1, 최대 5개)
+            List<String> directCallees = new java.util.ArrayList<>();
+            JsonNode nodes = trace.path("reachableNodes");
+            if (nodes.isArray()) {
+                for (JsonNode node : nodes) {
+                    if (node.path("bfsDepth").asInt(0) == 1 && directCallees.size() < 5) {
+                        String name = firstNonBlank(
+                                node.path("name").asText(""),
+                                node.path("qualifiedName").asText(""));
+                        if (!name.isBlank()) directCallees.add(name);
+                    }
+                }
+            }
+
+            // flowTraceSummary: "진입점이 최대 N단계, M개 노드 도달. 직접 호출: a, b, c"
+            StringBuilder sb = new StringBuilder();
+            sb.append("진입점이 최대 ").append(maxDepth).append("단계 깊이로 ")
+              .append(reachableCount).append("개 노드에 도달");
+            if (truncated) sb.append(" (경로 일부 생략)");
+            sb.append(".");
+            if (!directCallees.isEmpty()) {
+                sb.append(" 직접 호출: ").append(String.join(", ", directCallees)).append(".");
+            }
+            methodObj.put("flowTraceSummary", sb.toString());
         }
+        log.info("[LLM] flowTrace enrich: coreMethods={}, traces={}, matched={}, unmatched={}",
+                coreMethods.size(), apiFlowTraces.size(), matched, unmatched);
+    }
+
+    /**
+     * API_FLOW_TRACE_JSON entryQualifiedName → TYPE FQN으로 정규화.
+     * "type:org.foo.Bar" → "org.foo.Bar"
+     * "method:org.foo.Bar#doSomething(params)" → "org.foo.Bar.doSomething" (레거시 대비)
+     */
+    private static String normalizeEntryQualifiedName(String qn) {
+        if (qn == null || qn.isBlank()) return "";
+        // kind prefix 제거 ("method:", "type:", "ctor:" 등)
+        int colonIdx = qn.indexOf(':');
+        String stripped = colonIdx >= 0 ? qn.substring(colonIdx + 1) : qn;
+        // 파라미터 제거 ("(..." 이후)
+        int parenIdx = stripped.indexOf('(');
+        if (parenIdx >= 0) stripped = stripped.substring(0, parenIdx);
+        // '#' → '.' (class#method → class.method)
+        return stripped.replace('#', '.');
     }
 
     private ArrayNode takeFirst(JsonNode arrayNode, int limit) {

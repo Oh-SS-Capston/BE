@@ -119,11 +119,11 @@ public class LlmService {
 
         LlmResult result = LlmResult.builder()
                 .runId(request.getRunId())
-                .refinedRules(refinedRules)
-                .scenarioSpecs(scenarioSpecs)
-                .subsystemSummaries(subsystemSummaries)
-                .apiDocs(apiDocs)
-                .fileTreeDocs(fileTreeDocs)
+                .refinedRules(toSerializable(refinedRules))
+                .scenarioSpecs(toSerializable(scenarioSpecs))
+                .subsystemSummaries(toSerializable(subsystemSummaries))
+                .apiDocs(toSerializable(apiDocs))
+                .fileTreeDocs(toSerializable(fileTreeDocs))
                 .scenarioCacheId(scenarioCache.getCacheId())
                 .build();
 
@@ -223,19 +223,20 @@ public class LlmService {
                 structure.path("methodFlowSeed"),
                 refinedRules.path("cautions")
         ));
+
+        // api_flow 보강: TYPE FQN 기준으로 coreMethods에 연결 후 apiEntries가 상속
+        JsonNode apiFlowTraces = structure.path("apiFlowTraces");
+        if (apiFlowTraces.isArray() && !apiFlowTraces.isEmpty()) {
+            llmServiceBuildSupport.enrichCoreMethodsWithFlowTraces(
+                    (com.fasterxml.jackson.databind.node.ArrayNode) out.path("coreMethods"), apiFlowTraces);
+        }
+
         out.set("methodUsageOrder", llmServiceBuildSupport.buildMethodUsageOrder(
                 structure.path("methodFlowSeed"),
                 scenarioSpecs.path("scenarios")
         ));
         out.set("apiEntries", llmServiceBuildSupport.buildApiEntriesCompat(out.path("coreMethods")));
         out.set("qualityGate", llmServiceBuildSupport.buildApiDocQualityGate(out.path("coreMethods")));
-
-        // api_flow 보강: 진입점별 호출 경로 요약을 apiEntries에 연결 (보조 입력)
-        JsonNode apiFlowTraces = structure.path("apiFlowTraces");
-        if (apiFlowTraces.isArray() && !apiFlowTraces.isEmpty()) {
-            llmServiceBuildSupport.enrichApiEntriesWithFlowTraces(
-                    (com.fasterxml.jackson.databind.node.ArrayNode) out.path("apiEntries"), apiFlowTraces);
-        }
 
         out.put("fallbackApplied", false);
         out.put("deterministicSeedApplied", true);
@@ -308,6 +309,11 @@ public class LlmService {
             log.warn("[LlmService] {} fallback applied.", stepName);
             return fallbackSupplier.get();
         }
+    }
+
+    private Object toSerializable(JsonNode node) {
+        if (node == null || node.isNull()) return null;
+        return objectMapper.convertValue(node, Object.class);
     }
 
     private boolean isResponseParseFailed(LlmException e) {

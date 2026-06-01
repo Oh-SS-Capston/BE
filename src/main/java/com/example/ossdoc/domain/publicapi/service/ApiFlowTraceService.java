@@ -13,10 +13,9 @@ import com.example.ossdoc.domain.graphstore.enums.SymbolKind;
 import com.example.ossdoc.domain.graphstore.repository.EdgeRepository;
 import com.example.ossdoc.domain.graphstore.repository.SymbolRepository;
 import com.example.ossdoc.domain.publicapi.artifact.ApiFlowTraceJson;
-import com.example.ossdoc.domain.publicapi.entity.PublicApiEntry;
-import com.example.ossdoc.domain.publicapi.repository.PublicApiEntryRepository;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -52,12 +51,13 @@ public class ApiFlowTraceService {
     private static final String ARTIFACT_PATH = "publicapi/api_flow_trace.json";
 
     private final RepoRunRepository repoRunRepository;
-    private final PublicApiEntryRepository publicApiEntryRepository;
     private final SymbolRepository symbolRepository;
     private final EdgeRepository edgeRepository;
     private final ArtifactService artifactService;
     private final ArtifactRepository artifactRepository;
     private final ObjectMapper objectMapper;
+
+    private record ApiMapEntry(String symbolId, String role) {}
 
     /**
      * runId 의 진입점 목록을 기반으로 BFS 호출 경로 추적을 실행하고 artifact 로 저장한다.
@@ -69,9 +69,10 @@ public class ApiFlowTraceService {
         RepoRun run = repoRunRepository.findById(runId)
                 .orElseThrow(() -> new IllegalArgumentException("run not found: " + runId));
 
-        List<PublicApiEntry> entries = publicApiEntryRepository.findAllByRun_RunId(runId);
-        if (entries.isEmpty()) {
-            log.warn("[API-FLOW-TRACE] No public API entries found. runId={}", runId);
+        // API_MAP_JSON의 entry_points를 진입점 소스로 사용 (PR A-1)
+        List<ApiMapEntry> apiMapEntries = loadApiMapEntries(runId);
+        if (apiMapEntries.isEmpty()) {
+            log.warn("[API-FLOW-TRACE] API_MAP_JSON entry_points 없음. BFS 시작점 0건. runId={}", runId);
         }
 
         // 심볼 인덱스 구성 (METHOD + TYPE)
@@ -87,25 +88,24 @@ public class ApiFlowTraceService {
         Map<String, List<AdjacentEdge>> adj = buildAdjacency(callEdges);
 
         // 진입점 목록 (심볼 인덱스에 존재하는 것만, 최대 MAX_ENTRY_POINTS)
-        List<PublicApiEntry> filteredEntries = entries.stream()
-                .filter(e -> symbolIndex.containsKey(e.getSymbol().getSymbolId()))
+        List<ApiMapEntry> filteredEntries = apiMapEntries.stream()
+                .filter(e -> symbolIndex.containsKey(e.symbolId()))
                 .limit(MAX_ENTRY_POINTS)
                 .toList();
 
         ModuleResolver moduleResolver = loadModuleResolver(runId);
         Map<String, String> typeSourceRootIndex = buildTypeSourceRootIndex(symbolIndex);
-        Map<String, List<String>> typeToMethodIds = buildTypeToMethodIndex(symbolIndex);
 
         int totalSymbols = symbolIndex.size();
         List<ApiFlowTraceJson.EntryPointTrace> traces = new ArrayList<>();
 
-        for (PublicApiEntry entry : filteredEntries) {
-            String entrySymbolId = entry.getSymbol().getSymbolId();
+        for (ApiMapEntry entry : filteredEntries) {
+            String entrySymbolId = entry.symbolId();
             SymbolEntity entrySym = symbolIndex.get(entrySymbolId);
             ApiFlowTraceJson.EntryPointTrace trace = bfsTrace(
-                    entrySymbolId, entrySym, entry.getExposure(),
+                    entrySymbolId, entrySym, entry.role(),
                     adj, symbolIndex, callEdges, totalSymbols,
-                    moduleResolver, typeSourceRootIndex, typeToMethodIds
+                    moduleResolver, typeSourceRootIndex
             );
             traces.add(trace);
         }
@@ -115,7 +115,7 @@ public class ApiFlowTraceService {
                 .runId(runId)
                 .generatedAt(OffsetDateTime.now())
                 .meta(ApiFlowTraceJson.TraceMeta.builder()
-                        .entryPointCount(entries.size())
+                        .entryPointCount(apiMapEntries.size())
                         .tracedCount(traces.size())
                         .maxBfsDepth(DEFAULT_MAX_BFS_DEPTH)
                         .flowSetOverloadRatio(FLOW_SET_OVERLOAD_RATIO)
@@ -128,9 +128,40 @@ public class ApiFlowTraceService {
                 run, ArtifactKind.API_FLOW_TRACE_JSON, ARTIFACT_SCHEMA_VERSION, ARTIFACT_PATH, jsonNode
         );
 
-        log.info("[API-FLOW-TRACE] trace complete. runId={}, entries={}, traced={}",
-                runId, entries.size(), traces.size());
+        log.info("[API-FLOW-TRACE] trace complete. runId={}, apiMapEntries={}, traced={}",
+                runId, apiMapEntries.size(), traces.size());
         return artifact;
+    }
+
+    private List<ApiMapEntry> loadApiMapEntries(String runId) {
+        return artifactRepository
+                .findTopByRun_RunIdAndKindOrderByCreatedAtDesc(runId, ArtifactKind.API_MAP_JSON)
+                .map(artifact -> {
+                    try {
+                        JsonNode root = artifact.getMeta();
+                        JsonNode entryPoints = root.path("entry_points");
+                        if (!entryPoints.isArray()) {
+                            log.warn("[API-FLOW-TRACE] API_MAP_JSON에 entry_points 배열 없음. runId={}", runId);
+                            return List.<ApiMapEntry>of();
+                        }
+                        List<ApiMapEntry> entries = new ArrayList<>();
+                        for (JsonNode ep : entryPoints) {
+                            String symbolId = ep.path("symbol_id").asText("");
+                            String role = ep.path("role").asText("PRIMARY");
+                            if (!symbolId.isBlank()) {
+                                entries.add(new ApiMapEntry(symbolId, role));
+                            }
+                        }
+                        return entries;
+                    } catch (Exception e) {
+                        log.warn("[API-FLOW-TRACE] API_MAP_JSON 파싱 실패. runId={}", runId, e);
+                        return List.<ApiMapEntry>of();
+                    }
+                })
+                .orElseGet(() -> {
+                    log.warn("[API-FLOW-TRACE] API_MAP_JSON artifact 없음. runId={}", runId);
+                    return List.of();
+                });
     }
 
     /**
@@ -150,14 +181,13 @@ public class ApiFlowTraceService {
     private ApiFlowTraceJson.EntryPointTrace bfsTrace(
             String entrySymbolId,
             SymbolEntity entrySym,
-            String exposure,
+            String role,
             Map<String, List<AdjacentEdge>> adj,
             Map<String, SymbolEntity> symbolIndex,
             List<Edge> callEdges,
             int totalSymbols,
             ModuleResolver moduleResolver,
-            Map<String, String> typeSourceRootIndex,
-            Map<String, List<String>> typeToMethodIds
+            Map<String, String> typeSourceRootIndex
     ) {
         Map<String, Integer> depthMap = new LinkedHashMap<>();
         depthMap.put(entrySymbolId, 0);
@@ -165,21 +195,12 @@ public class ApiFlowTraceService {
         Deque<String> queue = new ArrayDeque<>();
         int maxActualDepth = 0;
 
-        // TYPE 진입점은 CALLS 엣지가 없으므로 소속 메서드를 depth 1로 pre-seed해 BFS를 가동한다.
-        if (entrySym != null && entrySym.getSymbolKind() == SymbolKind.TYPE) {
-            String typeFqn = stripKindPrefix(entrySym.getQualifiedName());
-            List<String> methodIds = typeToMethodIds.getOrDefault(typeFqn, List.of());
-            for (String methodId : methodIds) {
-                depthMap.put(methodId, 1);
-                queue.add(methodId);
-                maxActualDepth = 1;
-            }
-            if (methodIds.isEmpty()) {
-                queue.add(entrySymbolId); // 메서드 없는 타입: 기존 동작 유지
-            }
-        } else {
-            queue.add(entrySymbolId);
-        }
+        // API_MAP_JSON entry_points는 TYPE 레벨(symbol_id="type:org.foo.Bar")이다.
+        // 진입 TYPE 심볼을 시작점으로 CALLS 엣지를 BFS 탐색한다.
+        // ⚠️ 결과 trace의 entryQualifiedName도 TYPE FQN(예: "org.foo.Bar")이므로
+        //    METHOD 단위(apiEntries/coreMethods.fqn)와 직접 매칭되지 않는다.
+        //    LLM enrich 단계에서 메서드 fqn→소유 TYPE fqn 변환으로 연결해야 한다.
+        queue.add(entrySymbolId);
         while (!queue.isEmpty()) {
             String cur = queue.poll();
             int curDepth = depthMap.get(cur);
@@ -232,7 +253,7 @@ public class ApiFlowTraceService {
                 .entrySymbolId(entrySymbolId)
                 .entryName(simpleName(entrySym.getQualifiedName()))
                 .entryQualifiedName(entrySym.getQualifiedName())
-                .exposure(exposure)
+                .exposure(role)
                 .reachableNodes(nodes)
                 .reachableEdges(edges)
                 .maxDepth(maxActualDepth)
@@ -278,24 +299,6 @@ public class ApiFlowTraceService {
                 String fqn = stripKindPrefix(sym.getQualifiedName());
                 if (!fqn.isBlank()) {
                     index.put(fqn, sym.getSourceRoot());
-                }
-            }
-        }
-        return index;
-    }
-
-    /**
-     * METHOD 심볼의 소유 클래스 FQN → symbolId 목록 인덱스.
-     * TYPE 진입점 BFS 시, 소속 메서드를 depth 1로 pre-seed하기 위한 구조다.
-     */
-    private Map<String, List<String>> buildTypeToMethodIndex(Map<String, SymbolEntity> symbolIndex) {
-        Map<String, List<String>> index = new HashMap<>();
-        for (SymbolEntity sym : symbolIndex.values()) {
-            if (sym.getSymbolKind() == SymbolKind.METHOD) {
-                String classFqn = stripMethodPart(stripKindPrefix(sym.getQualifiedName()));
-                if (!classFqn.isBlank()) {
-                    index.computeIfAbsent(classFqn, k -> new ArrayList<>())
-                            .add(sym.getSymbolId());
                 }
             }
         }
