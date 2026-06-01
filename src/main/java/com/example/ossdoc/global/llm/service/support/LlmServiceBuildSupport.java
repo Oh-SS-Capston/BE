@@ -1399,6 +1399,7 @@ public class LlmServiceBuildSupport {
 
     /**
      * scenario 생성 프롬프트용 컨텍스트 JSON 문자열을 구성한다.
+     * api_flow traces가 존재하면 진입점 호출 경로 요약을 컨텍스트에 추가한다.
      */
     public String buildScenarioContext(
             JsonNode structure,
@@ -1412,7 +1413,207 @@ public class LlmServiceBuildSupport {
         context.set("methodFlowSeed", takeFirst(structure.path("methodFlowSeed"), 6));
         context.set("cautions", takeFirst(refinedRules.path("cautions"), 8));
         context.set("evidence", toEvidenceNode(evidence, 12));
+
+        // api_flow 보강: 진입점별 호출 경로 요약 (상위 10개)
+        JsonNode apiFlowTraces = structure.path("apiFlowTraces");
+        if (apiFlowTraces.isArray() && !apiFlowTraces.isEmpty()) {
+            context.set("apiFlowSummary", buildApiFlowSummary(apiFlowTraces, 10));
+        }
+
         return toJson(context);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Phase 4-A: super-cluster 기반 서브시스템 문서 / 모듈 라벨
+    // ──────────────────────────────────────────────────────────────────────
+
+    /**
+     * super-cluster 단위로 서브시스템 문서를 생성한다.
+     * 각 super-cluster가 요약 단위(모듈 수준)가 되고, level-1 memberSubsystemIds는 근거로 첨부된다.
+     */
+    public ArrayNode buildSuperClusterSubsystemDocs(
+            JsonNode superSubsystems,
+            JsonNode coreClasses,
+            JsonNode scenarioSpecs,
+            JsonNode refinedRules
+    ) {
+        List<String> scenarioIds = collectIds(scenarioSpecs.path("scenarios"), "scenarioId");
+        List<String> ruleIds = collectIds(refinedRules.path("rules"), "ruleId");
+
+        // coreClass fqn → super-cluster displayName 매핑
+        Map<String, String> packageToSuperLabel = buildPackageToSuperLabel(superSubsystems);
+
+        ArrayNode out = objectMapper.createArrayNode();
+        if (!superSubsystems.isArray()) return out;
+
+        for (int i = 0; i < superSubsystems.size(); i++) {
+            JsonNode sup = superSubsystems.get(i);
+            String supId = sup.path("superSubsystemId").asText(String.format("sup_%03d", i + 1));
+            String displayName = firstNonBlank(
+                    sup.path("displayName").asText(""),
+                    sup.path("canonicalKey").asText("module-" + (i + 1))
+            );
+
+            ObjectNode item = out.addObject();
+            item.put("subsystemId", supId);
+            item.put("label", displayName);
+            item.put("description", "모듈 수준 서브시스템: " + displayName);
+            item.put("layer", "module");
+            item.put("moduleDisplayName", displayName);
+            item.put("canonicalKey", sup.path("canonicalKey").asText(""));
+
+            // level-1 근거 (memberSubsystemIds)
+            JsonNode memberIds = sup.path("memberSubsystemIds");
+            ArrayNode memberSubsystems = item.putArray("memberSubsystems");
+            if (memberIds.isArray()) {
+                for (JsonNode id : memberIds) {
+                    memberSubsystems.add(id.asText(""));
+                }
+            }
+
+            // moduleAffinity 보존
+            item.set("moduleAffinity", sup.path("moduleAffinity").deepCopy());
+
+            // topSymbols: memberSymbolIds 앞 5개
+            ArrayNode topSymbols = item.putArray("topSymbols");
+            JsonNode memberSymbols = sup.path("memberSymbolIds");
+            if (memberSymbols.isArray()) {
+                for (int j = 0; j < memberSymbols.size() && j < 5; j++) {
+                    topSymbols.add(memberSymbols.get(j).asText(""));
+                }
+            }
+
+            // relatedScenarios (전체 시나리오를 공유, 최대 3개)
+            ArrayNode relatedScenarios = item.putArray("relatedScenarios");
+            for (int j = 0; j < scenarioIds.size() && j < 3; j++) {
+                relatedScenarios.add(scenarioIds.get(j));
+            }
+
+            // ruleIds (전체 규칙을 공유, 최대 4개)
+            ArrayNode relatedRules = item.putArray("ruleIds");
+            for (int j = 0; j < ruleIds.size() && j < 4; j++) {
+                relatedRules.add(ruleIds.get(j));
+            }
+
+            item.put("memberCount", sup.path("memberCount").asInt(0));
+        }
+        return out;
+    }
+
+    /**
+     * super-cluster 목록에서 module-grain 라벨 배열을 생성한다.
+     * step ⑤ file_tree_docs의 보조 입력으로 사용한다.
+     */
+    public ArrayNode buildModuleLabels(JsonNode superSubsystems) {
+        ArrayNode out = objectMapper.createArrayNode();
+        if (!superSubsystems.isArray()) return out;
+
+        for (JsonNode sup : superSubsystems) {
+            ObjectNode label = out.addObject();
+            label.put("superSubsystemId", sup.path("superSubsystemId").asText(""));
+            label.put("canonicalKey", sup.path("canonicalKey").asText(""));
+            label.put("displayName", firstNonBlank(
+                    sup.path("displayName").asText(""),
+                    sup.path("canonicalKey").asText("")
+            ));
+            label.set("packageRoots", sup.path("packageRoots").deepCopy());
+            label.put("memberCount", sup.path("memberCount").asInt(0));
+        }
+        return out;
+    }
+
+    private Map<String, String> buildPackageToSuperLabel(JsonNode superSubsystems) {
+        Map<String, String> out = new HashMap<>();
+        if (!superSubsystems.isArray()) return out;
+        for (JsonNode sup : superSubsystems) {
+            String displayName = firstNonBlank(sup.path("displayName").asText(""), sup.path("canonicalKey").asText(""));
+            JsonNode roots = sup.path("packageRoots");
+            if (roots.isArray()) {
+                for (JsonNode root : roots) {
+                    out.putIfAbsent(root.asText(""), displayName);
+                }
+            }
+        }
+        return out;
+    }
+
+    private List<String> collectIds(JsonNode array, String idField) {
+        List<String> ids = new ArrayList<>();
+        if (!array.isArray()) return ids;
+        for (JsonNode item : array) {
+            String id = item.path(idField).asText("");
+            if (!id.isBlank()) ids.add(id);
+        }
+        return ids;
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Phase 4-B: api_flow 보강 메서드
+    // ──────────────────────────────────────────────────────────────────────
+
+    /**
+     * API flow traces에서 컨텍스트 요약을 생성한다 (step ② 시나리오 컨텍스트 보강).
+     */
+    public ArrayNode buildApiFlowSummary(JsonNode apiFlowTraces, int maxEntries) {
+        ArrayNode out = objectMapper.createArrayNode();
+        if (!apiFlowTraces.isArray()) return out;
+
+        for (int i = 0; i < apiFlowTraces.size() && out.size() < maxEntries; i++) {
+            JsonNode trace = apiFlowTraces.get(i);
+            ObjectNode summary = out.addObject();
+            summary.put("entryPoint", firstNonBlank(
+                    trace.path("entryName").asText(""),
+                    trace.path("entryQualifiedName").asText("")
+            ));
+            summary.put("entryQualifiedName", trace.path("entryQualifiedName").asText(""));
+            summary.put("exposure", trace.path("exposure").asText(""));
+            summary.put("reachableCount", trace.path("reachableNodes").size());
+            summary.put("maxDepth", trace.path("maxDepth").asInt(0));
+            summary.put("truncated", trace.path("truncated").asBoolean(false));
+
+            // 직접 호출되는 메서드 이름 (depth=1, 최대 5개)
+            ArrayNode directCallees = summary.putArray("directCallees");
+            JsonNode nodes = trace.path("reachableNodes");
+            if (nodes.isArray()) {
+                for (JsonNode node : nodes) {
+                    if (node.path("bfsDepth").asInt(0) == 1 && directCallees.size() < 5) {
+                        directCallees.add(firstNonBlank(
+                                node.path("name").asText(""),
+                                node.path("qualifiedName").asText("")
+                        ));
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * apiEntries에 flow trace 요약을 연결한다 (step ④ API docs 보강).
+     * entryQualifiedName 또는 fqn 매핑으로 연결한다.
+     */
+    public void enrichApiEntriesWithFlowTraces(ArrayNode apiEntries, JsonNode apiFlowTraces) {
+        if (!apiFlowTraces.isArray() || apiFlowTraces.isEmpty()) return;
+
+        // fqn → trace 인덱스 구성
+        Map<String, JsonNode> traceByFqn = new HashMap<>();
+        for (JsonNode trace : apiFlowTraces) {
+            String qn = trace.path("entryQualifiedName").asText("");
+            if (!qn.isBlank()) traceByFqn.put(qn, trace);
+        }
+
+        for (JsonNode entry : apiEntries) {
+            if (!entry.isObject()) continue;
+            String fqn = entry.path("fqn").asText("");
+            JsonNode trace = traceByFqn.get(fqn);
+            if (trace == null) continue;
+
+            ObjectNode entryObj = (ObjectNode) entry;
+            ObjectNode flowRef = entryObj.putObject("apiFlowRef");
+            flowRef.put("reachableCount", trace.path("reachableNodes").size());
+            flowRef.put("maxDepth", trace.path("maxDepth").asInt(0));
+            flowRef.put("truncated", trace.path("truncated").asBoolean(false));
+        }
     }
 
     private ArrayNode takeFirst(JsonNode arrayNode, int limit) {

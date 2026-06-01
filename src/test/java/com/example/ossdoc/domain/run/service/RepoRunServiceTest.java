@@ -22,6 +22,7 @@ import com.example.ossdoc.domain.run.support.WorkspaceManager;
 import com.example.ossdoc.domain.user.entity.User;
 import com.example.ossdoc.domain.user.enums.AuthProvider;
 import com.example.ossdoc.domain.user.enums.UserRole;
+import com.example.ossdoc.domain.membership.service.MembershipAccessService;
 import com.example.ossdoc.domain.user.repository.UserRepository;
 import com.example.ossdoc.global.properties.AnalysisCacheProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -68,6 +69,8 @@ class RepoRunServiceTest {
     private RunPipelineStepExecutionRepository runPipelineStepExecutionRepository;
     @Mock
     private ArtifactRepository artifactRepository;
+    @Mock
+    private MembershipAccessService membershipAccessService;
 
     private RepoRunService repoRunService;
 
@@ -92,7 +95,8 @@ class RepoRunServiceTest {
                 cacheProperties,
                 runPipelineJobRepository,
                 runPipelineStepExecutionRepository,
-                artifactRepository
+                artifactRepository,
+                membershipAccessService
         );
 
         lenient().when(analysisCacheLookupService.lookupFailedCooldown(any(), any(), any()))
@@ -113,7 +117,8 @@ class RepoRunServiceTest {
                 "commons-cli",
                 "master",
                 "e717fd63",
-                "C:/data/ossdoc/run_cached_001"
+                "C:/data/ossdoc/run_cached_001",
+                null
         );
         cachedRun.markSuccess();
 
@@ -154,7 +159,8 @@ class RepoRunServiceTest {
                 "commons-cli",
                 "master",
                 "e717fd63",
-                "C:/data/ossdoc/run_source_001"
+                "C:/data/ossdoc/run_source_001",
+                null
         );
         sourceRun.markSuccess();
 
@@ -205,7 +211,8 @@ class RepoRunServiceTest {
                 "commons-cli",
                 "master",
                 "e717fd63",
-                "C:/data/ossdoc/run_source_partial_001"
+                "C:/data/ossdoc/run_source_partial_001",
+                null
         );
         sourceRun.markPartialSuccess();
 
@@ -274,7 +281,8 @@ class RepoRunServiceTest {
                 "commons-cli",
                 "master",
                 "e717fd63",
-                "C:/data/ossdoc/run_active_001"
+                "C:/data/ossdoc/run_active_001",
+                null
         );
 
         when(userRepository.findById(userId)).thenReturn(Optional.of(owner));
@@ -313,7 +321,8 @@ class RepoRunServiceTest {
                 "commons-cli",
                 "master",
                 "e717fd63",
-                "C:/data/ossdoc/run_active_002"
+                "C:/data/ossdoc/run_active_002",
+                null
         );
 
         when(userRepository.findById(userId)).thenReturn(Optional.of(requester));
@@ -356,7 +365,8 @@ class RepoRunServiceTest {
                 "commons-cli",
                 "master",
                 "e717fd63",
-                "C:/data/ossdoc/run_active_003"
+                "C:/data/ossdoc/run_active_003",
+                null
         );
 
         Artifact buildManifest = new Artifact(
@@ -409,7 +419,8 @@ class RepoRunServiceTest {
                 "commons-cli",
                 "master",
                 "e717fd63",
-                "C:/data/ossdoc/run_failed_001"
+                "C:/data/ossdoc/run_failed_001",
+                null
         );
         failedRun.markFailed();
 
@@ -453,7 +464,8 @@ class RepoRunServiceTest {
                 "commons-cli",
                 "master",
                 "e717fd63",
-                "C:/data/ossdoc/run_failed_002"
+                "C:/data/ossdoc/run_failed_002",
+                null
         );
         failedRunOfAnotherUser.markFailed();
 

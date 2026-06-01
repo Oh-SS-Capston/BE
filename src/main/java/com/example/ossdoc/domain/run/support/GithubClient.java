@@ -27,10 +27,15 @@ public class GithubClient {
     private static final Duration ZIP_TIMEOUT = Duration.ofSeconds(120);
     private static final int ERROR_BODY_PREVIEW_LEN = 300;
 
+    // commits/{ref} 응답은 대형 머지 커밋이면 변경 파일 목록·patch까지 포함돼 기본 256KB 한도를 넘는다.
+    // SHA만 필요하지만 응답 전체를 버퍼링하므로 한도를 넉넉히(16MB) 올려 DataBufferLimitException을 막는다.
+    private static final int MAX_IN_MEMORY_SIZE = 16 * 1024 * 1024;
+
     private final ObjectMapper objectMapper;
 
     private final WebClient webClient = WebClient.builder()
             .defaultHeader(HttpHeaders.USER_AGENT, "ossdoc")
+            .codecs(configurer -> configurer.defaultCodecs().maxInMemorySize(MAX_IN_MEMORY_SIZE))
             .build();
 
     public String resolveDefaultBranch(String owner, String repo) {

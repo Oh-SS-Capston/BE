@@ -19,7 +19,10 @@ public enum ClusterErrorCode implements BaseCode {
     CLUSTER_ASSEMBLY_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "CLUSTER500_3", "subsystem 조립에 실패했습니다."),
     CLUSTER_RANKING_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "CLUSTER500_4", "중요도 산정에 실패했습니다."),
     CLUSTER_ARTIFACT_SAVE_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "CLUSTER500_5", "cluster 산출물 저장에 실패했습니다."),
-    CLUSTER_REFINE_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "CLUSTER500_6", "subsystem 보정에 실패했습니다.");
+    CLUSTER_REFINE_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "CLUSTER500_6", "subsystem 보정에 실패했습니다."),
+    CLUSTER_SUPER_BUILD_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "CLUSTER500_7", "super-cluster 병합에 실패했습니다."),
+    CLUSTER_LEVEL1_NOT_FOUND(HttpStatus.NOT_FOUND, "CLUSTER404_2", "SUBSYSTEMS_JSON artifact가 없습니다. 먼저 /clusters/build를 실행하세요."),
+    CLUSTER_SUPER_DISABLED(HttpStatus.BAD_REQUEST, "CLUSTER400_3", "superCluster 기능이 비활성화 상태입니다.");
 
     private final HttpStatus httpStatus;
     private final String code;

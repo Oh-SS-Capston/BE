@@ -12,6 +12,11 @@ import java.util.*;
 /**
  * 공개 API 진입점에서 BFS로 도달 가능한 노드들끼리 약한 결합을 주입한다. (refactplan.md 5순위)
  *
+ * @deprecated Phase 4-B(Second_Clustering_Plan.md)에서 BFS 핵심 로직이
+ *             {@link com.example.ossdoc.domain.publicapi.service.ApiFlowTraceService}로 이관되었다.
+ *             cluster 가상 엣지 목적의 이 신호 프로바이더는 비활성(enabled=false) 상태이며
+ *             추후 PR 4B-3에서 제거 예정이다.
+ *
  * <p>동작 요약:
  * <ol>
  *   <li>{@code ProjectedNode.entryPoint == true} 인 노드를 진입점으로 설정 (DB 재조회 없음)</li>
@@ -29,6 +34,7 @@ import java.util.*;
 @Slf4j
 @Component
 @RequiredArgsConstructor
+@Deprecated(since = "Phase 4-B", forRemoval = true)
 public class PublicApiFlowSignalProvider implements SemanticSignalProvider {
 
     /** flow set 이 전체 노드 수의 이 비율을 초과하면 해당 진입점을 건너뛴다. */

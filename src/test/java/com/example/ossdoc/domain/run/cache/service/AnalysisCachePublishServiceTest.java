@@ -204,7 +204,8 @@ class AnalysisCachePublishServiceTest {
                 "commons-cli",
                 "master",
                 "e717fd63",
-                "C:/data/ossdoc/" + runId
+                "C:/data/ossdoc/" + runId,
+                null
         );
     }
 

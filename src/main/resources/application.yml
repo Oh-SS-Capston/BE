@@ -105,6 +105,14 @@ ossdoc:
         enabled: ${CLUSTER_SIGNAL_DOC_ENABLED:false}
       api-flow:
         enabled: ${CLUSTER_SIGNAL_API_FLOW_ENABLED:false}
+    super-cluster:
+      enabled: ${CLUSTER_SUPER_CLUSTER_ENABLED:false}
+  llm:
+    input:
+      super-cluster:
+        enabled: ${LLM_INPUT_SUPER_CLUSTER_ENABLED:false}
+      api-flow:
+        enabled: ${LLM_INPUT_API_FLOW_ENABLED:false}
 
 app:
   cors:

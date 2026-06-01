@@ -20,6 +20,9 @@ public class ClusterSignalProperties {
     /** refactplan.md 2~5순위 의미 신호(가상 엣지). 실험적 augmentation 이라 기본 OFF. */
     private Signals signals = new Signals();
 
+    /** level-2 super-cluster 설정. 기본 OFF로 도입, 검증 후 ON 전환. */
+    private SuperCluster superCluster = new SuperCluster();
+
     @Getter
     @Setter
     public static class Refiner {
@@ -138,6 +141,25 @@ public class ClusterSignalProperties {
         private int maxBfsDepth = 4;
         /** 진입점 seed 최소 confidence. 이 등급 미만은 seed에서 제외된다. HIGH|MED|LOW */
         private String minConfidence = "MED";
+    }
+
+    @Getter
+    @Setter
+    public static class SuperCluster {
+        /** true 이면 level-2 super-cluster 산출 활성화. 검증 완료 후 ON 전환. */
+        private boolean enabled = false;
+        /** 병합 전략. MODULE_ID(결정적) 또는 META_LEIDEN(통계적, Phase 2). */
+        private String strategy = "MODULE_ID";
+        /** 이 크기 미만의 super-cluster는 부모 모듈로 흡수하거나 super_misc로 분리. */
+        private int minSuperSize = 10;
+        private Fallback fallback = new Fallback();
+    }
+
+    @Getter
+    @Setter
+    public static class Fallback {
+        /** moduleId 미보유 노드(외부·생성 코드)에만 적용되는 packageRoot prefix 깊이. */
+        private int packageRootCommonPrefixDepth = 4;
     }
 
     /**
