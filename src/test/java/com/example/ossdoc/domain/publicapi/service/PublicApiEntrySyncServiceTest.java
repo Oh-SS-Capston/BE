@@ -56,7 +56,6 @@ class PublicApiEntrySyncServiceTest {
 
         SymbolEntity methodSymbol = mock(SymbolEntity.class);
         when(methodSymbol.getSymbolKind()).thenReturn(SymbolKind.METHOD);
-        when(methodSymbol.getAccess()).thenReturn(AccessLevel.PUBLIC);
 
         when(symbolRepository.findAllByRun_RunIdAndSymbolKind("run-1", SymbolKind.TYPE))
                 .thenReturn(List.of(publicType, protectedType, privateType, methodSymbol));

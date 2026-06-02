@@ -19,7 +19,7 @@ class SymbolScoringServiceTest {
             new SymbolScoringService(new ScoreNormalizer());
 
     @Test
-    @DisplayName("public API controller가 non-public symbol보다 높은 점수를 가진다")
+    @DisplayName("entryPoint=true인 controller가 entryPoint=false인 symbol보다 높은 apiScore를 가진다")
     void scoreSymbols_shouldPrioritizePublicApiController() {
         // given
         ProjectedGraph graph = ProjectedGraph.builder()
@@ -31,7 +31,7 @@ class SymbolScoringServiceTest {
                                 .simpleName("AuthController")
                                 .packageName("com.example.auth")
                                 .moduleId("m1")
-                                .publicApi(true)
+                                .entryPoint(true)
                                 .symbolKind("TYPE")
                                 .ownerSymbol(null)
                                 .sourceFile("src/main/java/com/example/auth/AuthController.java")
@@ -44,7 +44,7 @@ class SymbolScoringServiceTest {
                                 .simpleName("AuthService")
                                 .packageName("com.example.auth")
                                 .moduleId("m1")
-                                .publicApi(false)
+                                .entryPoint(false)
                                 .symbolKind("TYPE")
                                 .ownerSymbol(null)
                                 .sourceFile("src/main/java/com/example/auth/AuthService.java")

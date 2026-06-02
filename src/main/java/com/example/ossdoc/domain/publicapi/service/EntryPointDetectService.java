@@ -10,9 +10,8 @@ import com.example.ossdoc.domain.graphstore.enums.EdgeType;
 import com.example.ossdoc.domain.graphstore.enums.SymbolKind;
 import com.example.ossdoc.domain.graphstore.repository.EdgeRepository;
 import com.example.ossdoc.domain.graphstore.repository.SymbolRepository;
-import com.example.ossdoc.domain.publicapi.entity.PublicApiEntry;
 import com.example.ossdoc.domain.publicapi.model.EntryPointCandidate;
-import com.example.ossdoc.domain.publicapi.repository.PublicApiEntryRepository;
+import com.example.ossdoc.domain.publicapi.support.PublicSymbolFilter;
 import com.fasterxml.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -27,11 +26,12 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * 역할: EntryPointPlan.md 파이프라인 구현체.
  *
- * Phase 1 (HIGH 신호): README 언급, Javadoc @apiNote 키워드, 예제 코드 참조
+ * Phase 1 (HIGH 신호): README 언급, Javadoc @apiNote 키워드
  * Phase 2 (점수 누적): public 생성자 / static factory / builder
  * Phase 3 (점수 누적): 네이밍 컨벤션, facade 구조(public 메서드 수)
  * Phase 4 (점수 누적): 다른 public API 반환 타입 등장 빈도
@@ -47,6 +47,15 @@ public class EntryPointDetectService {
     private static final Set<String> EXCLUDED_PKG_SEGMENTS = Set.of(
             "internal", "impl", "util", "utils", "helper", "helpers"
     );
+    // P0-1: 예제/샘플/테스트 소스 경로 배제 (ExtensionPointDetectService.EXCLUDED_PATH_MARKERS와 동형)
+    private static final Set<String> EXCLUDED_PATH_MARKERS = Set.of(
+            "src/test/", "src/it/", "src/integrationtest/", "src/integration-test/",
+            "/example/", "/examples/", "/sample/", "/samples/", "/demo/", "/demos/"
+    );
+    // P0-1: com.example.* / example.* 패키지는 라이브러리가 아닌 예제 코드
+    private static final Set<String> EXAMPLE_PKG_PREFIXES = Set.of(
+            "com.example.", "example."
+    );
     private static final Set<String> HIGH_SUFFIX = Set.of(
             "client", "builder", "template", "bootstrap", "launcher", "runner", "application"
     );
@@ -56,6 +65,8 @@ public class EntryPointDetectService {
     private static final Set<String> FACTORY_METHOD_PREFIXES = Set.of(
             "create", "of", "from", "builder", "newbuilder", "newinstance", "getinstance"
     );
+    // P1-2: apiguardian @API 어노테이션 감지용 fragment (소문자 비교)
+    private static final String API_GUARDIAN_ANNOTATION_FRAGMENT = "apiguardian";
     private static final List<String> JAVADOC_KEYWORDS = List.of(
             "main entry point", "primary api", "use this class",
             "start with", "bootstrap", "configure", "@apiNote"
@@ -63,43 +74,42 @@ public class EntryPointDetectService {
     private static final int MIN_FACADE_METHODS = 5;
     private static final int MED_MIN_SCORE = 3;
 
-    private final PublicApiEntryRepository publicApiEntryRepository;
     private final SymbolRepository symbolRepository;
     private final EdgeRepository edgeRepository;
     private final ArtifactRepository artifactRepository;
 
     public List<EntryPointCandidate> detect(String runId) {
-        Set<String> publicSymbolIds = loadPublicSymbolIds(runId);
+        // 모든 심볼 한 번에 로드 → first-level cache로 lazy 연관 N+1 방지
+        List<SymbolEntity> allSymbols = symbolRepository.findAllByRun_RunId(runId);
+        Set<String> publicSymbolIds = loadPublicSymbolIds(allSymbols);
         if (publicSymbolIds.isEmpty()) {
             return List.of();
         }
 
-        // 모든 심볼 한 번에 로드 → first-level cache로 lazy 연관 N+1 방지
-        List<SymbolEntity> allSymbols = symbolRepository.findAllByRun_RunId(runId);
         ChildMaps childMaps = buildChildMaps(allSymbols);
 
         Map<String, Integer> returnedByPublicApi =
                 countReturnedByPublicApi(runId, publicSymbolIds, childMaps.methodOwnerIndex());
 
         FactsSignals factsSignals = loadFactsSignals(runId);
-        SubsystemMaps subsystemMaps = loadSubsystemMaps(runId);
         Set<String> exportedPackages = loadExportedPackages(allSymbols);
         Set<String> implementorSymbolIds = loadSymbolsWithOutboundInheritance(runId);
+        ModuleRoleIndex moduleRoleIndex = loadModuleRoleIndex(runId);
 
         List<EntryPointCandidate> candidates = new ArrayList<>();
 
         for (SymbolEntity symbol : allSymbols) {
             if (symbol.getSymbolKind() != SymbolKind.TYPE) continue;
             if (!publicSymbolIds.contains(symbol.getSymbolId())) continue;
+            if (isExampleCandidate(symbol, moduleRoleIndex)) {
+                candidates.add(exampleCandidate(symbol));
+                continue;
+            }
             if (shouldExclude(symbol, exportedPackages, childMaps)) continue;
 
             PhaseResult result = evaluatePhases(
-                    symbol, childMaps, returnedByPublicApi, factsSignals, implementorSymbolIds);
+                    symbol, childMaps, returnedByPublicApi, factsSignals, implementorSymbolIds, moduleRoleIndex);
             if ("NONE".equals(result.confidence())) continue;
-
-            String subsystemId    = subsystemMaps.memberToSubsystem().get(symbol.getSymbolId());
-            String subsystemLabel = subsystemId != null
-                    ? subsystemMaps.labelBySubsystem().get(subsystemId) : null;
 
             candidates.add(EntryPointCandidate.builder()
                     .symbolId(symbol.getSymbolId())
@@ -110,8 +120,6 @@ public class EntryPointDetectService {
                     .sourceFile(resolveSourceFilePath(symbol))
                     .startLine(symbol.getSourceStartLine())
                     .endLine(symbol.getSourceEndLine())
-                    .subsystemId(subsystemId)
-                    .subsystemLabel(subsystemLabel)
                     .role(result.role())
                     .confidence(result.confidence())
                     .signals(List.copyOf(result.signals()))
@@ -121,6 +129,7 @@ public class EntryPointDetectService {
 
         candidates.sort(Comparator
                 .comparingInt((EntryPointCandidate c) -> confidenceOrder(c.getConfidence()))
+                .thenComparingInt(c -> "EXAMPLE".equals(c.getRole()) ? 1 : 0)
                 .thenComparingInt(c -> -c.getScore()));
 
         return List.copyOf(candidates);
@@ -128,13 +137,13 @@ public class EntryPointDetectService {
 
     // ─── 데이터 로딩 ────────────────────────────────────────────────────────────
 
-    private Set<String> loadPublicSymbolIds(String runId) {
-        List<PublicApiEntry> entries = publicApiEntryRepository.findAllByRun_RunId(runId);
-        Set<String> ids = new HashSet<>(entries.size());
-        for (PublicApiEntry entry : entries) {
-            ids.add(entry.getSymbol().getSymbolId());
-        }
-        return ids;
+    private Set<String> loadPublicSymbolIds(List<SymbolEntity> allSymbols) {
+        // allSymbols는 detect() 상단에서 이미 로드됨 — 추가 DB 쿼리 없음
+        // 판정 기준은 PublicSymbolFilter에서 단일 관리 (sync와 parity 보장)
+        return allSymbols.stream()
+                .filter(PublicSymbolFilter::isPublicApiType)
+                .map(SymbolEntity::getSymbolId)
+                .collect(Collectors.toSet());
     }
 
     private ChildMaps buildChildMaps(List<SymbolEntity> allSymbols) {
@@ -230,33 +239,6 @@ public class EntryPointDetectService {
                 Set.copyOf(exampleReferenced));
     }
 
-    private SubsystemMaps loadSubsystemMaps(String runId) {
-        Optional<Artifact> opt = artifactRepository
-                .findTopByRun_RunIdAndKindOrderByCreatedAtDesc(runId, ArtifactKind.SUBSYSTEMS_JSON);
-        if (opt.isEmpty()) return new SubsystemMaps(Map.of(), Map.of());
-
-        JsonNode meta       = opt.get().getMeta();
-        JsonNode subsystems = meta.path("subsystems");
-        if (!subsystems.isArray()) return new SubsystemMaps(Map.of(), Map.of());
-
-        Map<String, String> memberToSubsystem = new HashMap<>();
-        Map<String, String> labelBySubsystem  = new HashMap<>();
-
-        for (JsonNode ss : subsystems) {
-            String subsystemId = ss.path("subsystemId").asText(null);
-            String name        = ss.path("name").asText(null);
-            if (subsystemId == null) continue;
-            if (name != null) labelBySubsystem.put(subsystemId, name);
-            JsonNode members = ss.path("memberSymbolIds");
-            if (members.isArray()) {
-                for (JsonNode m : members) {
-                    memberToSubsystem.put(m.asText(), subsystemId);
-                }
-            }
-        }
-        return new SubsystemMaps(memberToSubsystem, labelBySubsystem);
-    }
-
     /**
      * JPMS를 사용하는 프로젝트에서 module-info.java의 exports 패키지만 반환한다.
      * MODULE 심볼이 없으면 빈 Set을 반환해 범위 필터를 건너뛴다.
@@ -289,21 +271,61 @@ public class EntryPointDetectService {
         return Set.copyOf(result);
     }
 
+    private ModuleRoleIndex loadModuleRoleIndex(String runId) {
+        Optional<Artifact> opt = artifactRepository
+                .findTopByRun_RunIdAndKindOrderByCreatedAtDesc(runId, ArtifactKind.BUILD_MANIFEST);
+        if (opt.isEmpty()) {
+            return ModuleRoleIndex.empty();
+        }
+
+        Map<String, ModuleRole> bySourceRoot = new HashMap<>();
+        JsonNode modules = opt.get().getMeta().path("modules");
+        if (!modules.isArray()) {
+            return ModuleRoleIndex.empty();
+        }
+
+        for (JsonNode module : modules) {
+            String moduleId = module.path("moduleId").asText("");
+            String name = module.path("name").asText("");
+            String artifactId = module.path("artifactId").asText("");
+            String groupId = module.path("groupId").asText("");
+            String roleText = (moduleId + " " + name + " " + artifactId).toLowerCase(Locale.ROOT);
+            boolean exampleModule = containsAny(roleText,
+                    "example", "examples", "sample", "samples", "demo", "demos", "documentation", "docs", "test", "tests");
+            boolean publishedLibrary = !exampleModule && !groupId.isBlank() && !artifactId.isBlank();
+            ModuleRole role = new ModuleRole(exampleModule, publishedLibrary);
+            registerModuleRoots(bySourceRoot, module.path("sourceRoots"), role);
+            registerModuleRoots(bySourceRoot, module.path("testRoots"), new ModuleRole(true, false));
+        }
+        return new ModuleRoleIndex(Map.copyOf(bySourceRoot));
+    }
+
     // ─── 필터 ────────────────────────────────────────────────────────────────
 
     /**
      * 제외 조건 하나라도 해당하면 true.
      *
-     * 1. internal / impl / util / helper 패키지 세그먼트
-     * 2. JPMS 범위 필터 (module-info.java exports 미포함 패키지)
-     * 3. @Deprecated
-     * 4. abstract class (인터페이스 제외)
-     * 5. public 생성자도 없고 static factory도 없는 class / record
+     * 1. 예제/샘플/테스트 소스 경로 (P0-1)
+     * 2. com.example.* / example.* 패키지 (P0-1)
+     * 3. internal / impl / util / helper 패키지 세그먼트
+     * 4. JPMS 범위 필터 (module-info.java exports 미포함 패키지)
+     * 5. @Deprecated
+     * 6. abstract class (static factory/facade가 없는 경우)
+     * 7. public 생성자도 없고 static factory도 없고 static facade도 아닌 class / record
      */
     private boolean shouldExclude(SymbolEntity symbol,
                                    Set<String> exportedPackages,
                                    ChildMaps childMaps) {
         String qualifiedName = symbol.getQualifiedName();
+
+        // P1-2: @API(INTERNAL/DEPRECATED) → 공개 API 후보 제외
+        String apiGuardianStatus = detectApiGuardianStatus(symbol);
+        if ("INTERNAL".equals(apiGuardianStatus) || "DEPRECATED".equals(apiGuardianStatus)) return true;
+
+        // P0-1: 예제/샘플/테스트 소스 경로 배제
+        if (hasExcludedSourcePath(symbol)) return true;
+        // P0-1: com.example.* / example.* 패키지 배제
+        if (hasExamplePackage(qualifiedName)) return true;
 
         if (hasExcludedPackageSegment(qualifiedName)) return true;
 
@@ -317,14 +339,14 @@ public class EntryPointDetectService {
         String typeKind = resolveTypeKind(symbol);
 
         if ("class".equals(typeKind) && hasAbstractModifier(symbol.getModifiers())) {
-            // abstract class는 static factory가 있을 때만 후보 유지 (예: HttpClient.newBuilder())
             List<SymbolEntity> methods =
                     childMaps.methodsByOwner().getOrDefault(symbol.getSymbolId(), List.of());
             boolean hasStaticFactory = methods.stream()
                     .anyMatch(m -> m.getAccess() == AccessLevel.PUBLIC
                             && isStaticMethod(m)
                             && isFactoryMethodName(m.getSimpleName()));
-            if (!hasStaticFactory) return true;
+            // P0-5: 정적 facade도 허용 (abstract + static factory 없어도 static 메서드가 다수면 유지)
+            if (!hasStaticFactory && !isStaticFacadeType(methods)) return true;
         }
 
         if (("class".equals(typeKind) || "record".equals(typeKind))) {
@@ -332,7 +354,8 @@ public class EntryPointDetectService {
                     childMaps.constructorsByOwner().getOrDefault(symbol.getSymbolId(), List.of());
             List<SymbolEntity> methods =
                     childMaps.methodsByOwner().getOrDefault(symbol.getSymbolId(), List.of());
-            if (!hasInstantiationPath(constructors, methods)) return true;
+            // P0-5: public static 메서드가 다수인 정적 facade(Mockito 등)는 생성자/factory 없어도 허용
+            if (!hasInstantiationPath(constructors, methods) && !isStaticFacadeType(methods)) return true;
         }
 
         return false;
@@ -344,25 +367,33 @@ public class EntryPointDetectService {
                                         ChildMaps childMaps,
                                         Map<String, Integer> returnedByPublicApi,
                                         FactsSignals factsSignals,
-                                        Set<String> implementorSymbolIds) {
+                                        Set<String> implementorSymbolIds,
+                                        ModuleRoleIndex moduleRoleIndex) {
         List<String> signals  = new ArrayList<>();
         String simpleName     = symbol.getSimpleName();
         String symbolId       = symbol.getSymbolId();
 
         // Phase 1 — 문서 직접 언급 신호 (HIGH 즉시 확정)
+        // P0-1: EXAMPLE_CODE_REFERENCE는 HIGH 승격 신호에서 제거. 예제 경로 심볼은 shouldExclude()에서 차단.
         if (simpleName != null && factsSignals.readmeMentionedSimpleNames().contains(simpleName)) {
             signals.add("README_MENTION");
         }
         if (hasJavadocEntryPointSignal(symbol)) {
             signals.add("JAVADOC_ENTRY_POINT");
         }
-        if (simpleName != null && factsSignals.exampleReferencedSimpleNames().contains(simpleName)) {
-            signals.add("EXAMPLE_CODE_REFERENCE");
+        // P1-2: @API(STABLE/MAINTAINED) → Phase 1 HIGH 신호 (shouldExclude에서 INTERNAL/DEPRECATED 이미 차단됨)
+        String apiGuardianStatus = detectApiGuardianStatus(symbol);
+        if ("STABLE".equals(apiGuardianStatus) || "MAINTAINED".equals(apiGuardianStatus)) {
+            signals.add("API_GUARDIAN_STABLE");
         }
 
         if (!signals.isEmpty()) {
             int bonus = phase2Score(symbolId, childMaps, signals)
                     + phase3Score(symbol, childMaps, signals);
+            if (moduleRoleIndex.isPublishedLibrary(symbol)) {
+                signals.add("PUBLISHED_LIBRARY_MODULE");
+                bonus += 1;
+            }
             String role = determineRole(symbolId, signals, returnedByPublicApi);
             return new PhaseResult("HIGH", role, signals, 10 + bonus);
         }
@@ -371,6 +402,16 @@ public class EntryPointDetectService {
         int score = phase2Score(symbolId, childMaps, signals)
                 + phase3Score(symbol, childMaps, signals)
                 + phase4Score(symbolId, returnedByPublicApi, signals);
+
+        // P1-2: @API(EXPERIMENTAL) → MED_MIN_SCORE 이상 보장 (애너테이션/인터페이스 타입 포함)
+        if ("EXPERIMENTAL".equals(apiGuardianStatus)) {
+            signals.add("API_GUARDIAN_EXPERIMENTAL");
+            score = Math.max(score, MED_MIN_SCORE);
+        }
+        if (score > 0 && moduleRoleIndex.isPublishedLibrary(symbol)) {
+            signals.add("PUBLISHED_LIBRARY_MODULE");
+            score += 1;
+        }
 
         if (score == 0) return new PhaseResult("NONE", null, signals, 0);
 
@@ -421,7 +462,7 @@ public class EntryPointDetectService {
 
     /**
      * Phase 3: 네이밍 컨벤션 + facade 구조(public 메서드 수)
-     * HIGH 이름 접미사 +2, MED +1, facade(public 메서드 ≥ 5) +1.
+     * HIGH 이름 접미사 +2, MED +1, facade(public 메서드 ≥ 5) +1, 정적 facade(public static ≥ 5) +2.
      */
     private int phase3Score(SymbolEntity symbol, ChildMaps childMaps, List<String> signals) {
         int score  = 0;
@@ -437,13 +478,24 @@ public class EntryPointDetectService {
             }
         }
 
-        long publicMethodCount = childMaps.methodsByOwner()
-                .getOrDefault(symbol.getSymbolId(), List.of()).stream()
+        List<SymbolEntity> ownedMethods = childMaps.methodsByOwner()
+                .getOrDefault(symbol.getSymbolId(), List.of());
+
+        long publicMethodCount = ownedMethods.stream()
                 .filter(m -> m.getAccess() == AccessLevel.PUBLIC)
                 .count();
         if (publicMethodCount >= MIN_FACADE_METHODS) {
             signals.add("FACADE_STRUCTURE");
             score += 1;
+        }
+
+        // P0-5: 정적 facade 신호 — public static 메서드가 다수인 타입(Mockito.mock/spy 등)
+        long publicStaticCount = ownedMethods.stream()
+                .filter(m -> m.getAccess() == AccessLevel.PUBLIC && isStaticMethod(m))
+                .count();
+        if (publicStaticCount >= MIN_FACADE_METHODS) {
+            signals.add("PUBLIC_STATIC_API");
+            score += 2;
         }
 
         return score;
@@ -485,6 +537,59 @@ public class EntryPointDetectService {
     }
 
     // ─── 유틸 ────────────────────────────────────────────────────────────────
+
+    // P0-1: 소스 경로 기반 예제 배제 (ExtensionPointDetectService와 동형)
+    private boolean hasExcludedSourcePath(SymbolEntity symbol) {
+        if (symbol.getSourceFile() == null) return false;
+        String path = symbol.getSourceFile().getPath();
+        if (path == null) return false;
+        String normalized = path.replace('\\', '/').toLowerCase(Locale.ROOT);
+        return EXCLUDED_PATH_MARKERS.stream().anyMatch(normalized::contains);
+    }
+
+    private boolean isExampleCandidate(SymbolEntity symbol, ModuleRoleIndex moduleRoleIndex) {
+        return hasExampleSourcePath(symbol)
+                || hasExamplePackage(symbol.getQualifiedName())
+                || moduleRoleIndex.isExampleModule(symbol);
+    }
+
+    private boolean hasExampleSourcePath(SymbolEntity symbol) {
+        if (symbol.getSourceFile() == null || symbol.getSourceFile().getPath() == null) return false;
+        String normalized = symbol.getSourceFile().getPath().replace('\\', '/').toLowerCase(Locale.ROOT);
+        return containsAny(normalized, "/example/", "/examples/", "/sample/", "/samples/", "/demo/", "/demos/");
+    }
+
+    private EntryPointCandidate exampleCandidate(SymbolEntity symbol) {
+        return EntryPointCandidate.builder()
+                .symbolId(symbol.getSymbolId())
+                .qualifiedName(symbol.getQualifiedName())
+                .ownerTypeFqn(resolveOwnerTypeFqn(symbol))
+                .simpleName(symbol.getSimpleName())
+                .typeKind(resolveTypeKind(symbol))
+                .sourceFile(resolveSourceFilePath(symbol))
+                .startLine(symbol.getSourceStartLine())
+                .endLine(symbol.getSourceEndLine())
+                .role("EXAMPLE")
+                .confidence("LOW")
+                .signals(List.of("EXAMPLE_CODE_REFERENCE"))
+                .score(0)
+                .build();
+    }
+
+    // P0-1: com.example.* / example.* 패키지는 예제 코드이므로 Public API 후보에서 제외
+    private boolean hasExamplePackage(String qualifiedName) {
+        if (qualifiedName == null) return false;
+        String lower = qualifiedName.toLowerCase(Locale.ROOT);
+        return EXAMPLE_PKG_PREFIXES.stream().anyMatch(lower::startsWith);
+    }
+
+    // P0-5: public static 메서드가 다수인 정적 facade(Mockito 등) — 생성자/factory 없어도 entry 후보로 허용
+    private boolean isStaticFacadeType(List<SymbolEntity> methods) {
+        long publicStaticCount = methods.stream()
+                .filter(m -> m.getAccess() == AccessLevel.PUBLIC && isStaticMethod(m))
+                .count();
+        return publicStaticCount >= MIN_FACADE_METHODS;
+    }
 
     private boolean hasExcludedPackageSegment(String qualifiedName) {
         if (qualifiedName == null) return false;
@@ -603,6 +708,80 @@ public class EntryPointDetectService {
         return colon >= 0 ? name.substring(colon + 1) : name;
     }
 
+    // P1-2: apiguardian @API status 감지 — NONE / STABLE / MAINTAINED / EXPERIMENTAL / INTERNAL / DEPRECATED
+    private String detectApiGuardianStatus(SymbolEntity symbol) {
+        JsonNode sig = symbol.getSignature();
+        if (sig == null || sig.isNull()) return "NONE";
+        JsonNode annotations = sig.path("annotations");
+        if (!annotations.isArray()) return "NONE";
+        for (JsonNode ann : annotations) {
+            if (ann.isTextual()) {
+                if (ann.asText("").toLowerCase(Locale.ROOT).contains(API_GUARDIAN_ANNOTATION_FRAGMENT)) {
+                    return "STABLE";
+                }
+            } else if (ann.isObject()) {
+                String annName = resolveAnnotationName(ann).toLowerCase(Locale.ROOT);
+                if (annName.contains(API_GUARDIAN_ANNOTATION_FRAGMENT) || "api".equals(annName)) {
+                    String status = ann.path("status").asText("");
+                    if (status.isBlank()) status = ann.path("attributes").path("status").asText("");
+                    if (status.isBlank()) status = ann.path("params").path("status").asText("");
+                    return status.isBlank() ? "STABLE" : status.toUpperCase(Locale.ROOT);
+                }
+            }
+        }
+        return "NONE";
+    }
+
+    private String resolveAnnotationName(JsonNode ann) {
+        for (String key : List.of("name", "type", "fqn", "qualifiedName")) {
+            String val = ann.path(key).asText("");
+            if (!val.isBlank()) return val;
+        }
+        return "";
+    }
+
+    private void registerModuleRoots(Map<String, ModuleRole> bySourceRoot, JsonNode roots, ModuleRole role) {
+        if (!roots.isArray()) return;
+        for (JsonNode root : roots) {
+            String normalized = normalizeSourceRoot(root.asText(""));
+            if (!normalized.isBlank()) {
+                bySourceRoot.putIfAbsent(normalized, role);
+            }
+        }
+    }
+
+    private String normalizeSourceRoot(String path) {
+        if (path == null || path.isBlank()) return "";
+        String normalized = path.replace('\\', '/').trim();
+        int repoIdx = normalized.lastIndexOf("/repo/");
+        if (repoIdx >= 0) {
+            normalized = normalized.substring(repoIdx + "/repo/".length());
+        }
+        while (normalized.startsWith("/")) {
+            normalized = normalized.substring(1);
+        }
+        return normalized;
+    }
+
+    private boolean containsAny(String value, String... needles) {
+        if (value == null || value.isBlank()) return false;
+        for (String needle : needles) {
+            if (value.contains(needle)) return true;
+        }
+        return false;
+    }
+
+    /** 강도 비교용 등급. HIGH > MED > LOW. 알 수 없는 값은 0. 대소문자·공백 무시. */
+    public static int confidenceRank(String confidence) {
+        if (confidence == null) return 0;
+        return switch (confidence.trim().toUpperCase(Locale.ROOT)) {
+            case "HIGH" -> 3;
+            case "MED"  -> 2;
+            case "LOW"  -> 1;
+            default     -> 0;
+        };
+    }
+
     private int confidenceOrder(String confidence) {
         return switch (confidence) {
             case "HIGH" -> 0;
@@ -624,15 +803,46 @@ public class EntryPointDetectService {
             Set<String> exampleReferencedSimpleNames
     ) {}
 
-    private record SubsystemMaps(
-            Map<String, String> memberToSubsystem,
-            Map<String, String> labelBySubsystem
-    ) {}
-
     private record PhaseResult(
             String confidence,
             String role,
             List<String> signals,
             int score
     ) {}
+
+    private record ModuleRole(boolean exampleModule, boolean publishedLibrary) {}
+
+    private record ModuleRoleIndex(Map<String, ModuleRole> bySourceRoot) {
+        private static ModuleRoleIndex empty() {
+            return new ModuleRoleIndex(Map.of());
+        }
+
+        private boolean isExampleModule(SymbolEntity symbol) {
+            ModuleRole role = resolve(symbol);
+            return role != null && role.exampleModule();
+        }
+
+        private boolean isPublishedLibrary(SymbolEntity symbol) {
+            ModuleRole role = resolve(symbol);
+            return role != null && role.publishedLibrary();
+        }
+
+        private ModuleRole resolve(SymbolEntity symbol) {
+            if (symbol == null || symbol.getSourceRoot() == null) return null;
+            return bySourceRoot.get(normalize(symbol.getSourceRoot()));
+        }
+
+        private static String normalize(String path) {
+            if (path == null || path.isBlank()) return "";
+            String normalized = path.replace('\\', '/').trim();
+            int repoIdx = normalized.lastIndexOf("/repo/");
+            if (repoIdx >= 0) {
+                normalized = normalized.substring(repoIdx + "/repo/".length());
+            }
+            while (normalized.startsWith("/")) {
+                normalized = normalized.substring(1);
+            }
+            return normalized;
+        }
+    }
 }

@@ -6,7 +6,7 @@ import lombok.Getter;
 import java.util.List;
 
 @Getter
-@Builder
+@Builder(toBuilder = true)
 public class EntryPointCandidate {
     private String symbolId;
     private String qualifiedName;

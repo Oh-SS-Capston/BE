@@ -119,11 +119,11 @@ public class LlmService {
 
         LlmResult result = LlmResult.builder()
                 .runId(request.getRunId())
-                .refinedRules(refinedRules)
-                .scenarioSpecs(scenarioSpecs)
-                .subsystemSummaries(subsystemSummaries)
-                .apiDocs(apiDocs)
-                .fileTreeDocs(fileTreeDocs)
+                .refinedRules(toSerializable(refinedRules))
+                .scenarioSpecs(toSerializable(scenarioSpecs))
+                .subsystemSummaries(toSerializable(subsystemSummaries))
+                .apiDocs(toSerializable(apiDocs))
+                .fileTreeDocs(toSerializable(fileTreeDocs))
                 .scenarioCacheId(scenarioCache.getCacheId())
                 .build();
 
@@ -160,6 +160,7 @@ public class LlmService {
 
     /**
      * Step 2: 프로젝트 개요 + 대표 시나리오 + 메서드 사용 순서를 생성한다.
+     * api_flow toggle ON이면 진입점 호출 경로 요약을 컨텍스트에 추가한다.
      */
     private JsonNode generateScenarioSpecs(
             JsonNode structure,
@@ -183,6 +184,7 @@ public class LlmService {
 
     /**
      * Step 3: 서브시스템 요약 결과를 조합한다.
+     * super-cluster toggle ON이면 요약 단위를 super-cluster(모듈 수준)로 전환한다.
      */
     private JsonNode buildSubsystemSummaries(JsonNode structure, JsonNode scenarioSpecs, JsonNode refinedRules) {
         log.info("[LlmService] {} (deterministic)", STEP3_SUBSYSTEM_SUMMARIES);
@@ -190,7 +192,18 @@ public class LlmService {
         out.set("coreClasses", llmServiceBuildSupport.buildCoreClassDocs(structure.path("coreClassSeed"), structure.path("coreMethodSeed")));
         llmServiceBuildSupport.fillCoreClassRelatedScenarios((com.fasterxml.jackson.databind.node.ArrayNode) out.path("coreClasses"), scenarioSpecs);
         out.set("extensionPoints", llmServiceBuildSupport.buildExtensionPointDocs(structure.path("extensionSeed")));
-        out.set("subsystems", llmServiceBuildSupport.buildSubsystemDocs(out.path("coreClasses"), scenarioSpecs, refinedRules));
+
+        JsonNode superSubsystems = structure.path("superSubsystems");
+        if (superSubsystems.isArray() && !superSubsystems.isEmpty()) {
+            out.set("subsystems", llmServiceBuildSupport.buildSuperClusterSubsystemDocs(
+                    superSubsystems, out.path("coreClasses"), scenarioSpecs, refinedRules));
+            out.put("superClusterApplied", true);
+            log.info("[LlmService] step③: super-cluster 요약 단위 적용. superCount={}", superSubsystems.size());
+        } else {
+            out.set("subsystems", llmServiceBuildSupport.buildSubsystemDocs(out.path("coreClasses"), scenarioSpecs, refinedRules));
+            out.put("superClusterApplied", false);
+        }
+
         out.put("fallbackApplied", false);
         out.put("deterministicSeedApplied", true);
         out.put("contractVersion", "guide-v1");
@@ -199,6 +212,7 @@ public class LlmService {
 
     /**
      * Step 4: API 문서 결과를 조합한다.
+     * api_flow toggle ON이면 각 메서드 카드에 호출 경로 참고 정보를 보강한다.
      */
     private JsonNode buildApiDocs(JsonNode structure, JsonNode scenarioSpecs, JsonNode refinedRules) {
         log.info("[LlmService] {} (deterministic)", STEP4_API_DOCS);
@@ -210,12 +224,21 @@ public class LlmService {
                 refinedRules.path("cautions"),
                 scenarioSpecs.path("scenarios")
         ));
+
+        // api_flow 보강: TYPE FQN 기준으로 coreMethods에 연결 후 apiEntries가 상속
+        JsonNode apiFlowTraces = structure.path("apiFlowTraces");
+        if (apiFlowTraces.isArray() && !apiFlowTraces.isEmpty()) {
+            llmServiceBuildSupport.enrichCoreMethodsWithFlowTraces(
+                    (com.fasterxml.jackson.databind.node.ArrayNode) out.path("coreMethods"), apiFlowTraces);
+        }
+
         out.set("methodUsageOrder", llmServiceBuildSupport.buildMethodUsageOrder(
                 structure.path("methodFlowSeed"),
                 scenarioSpecs.path("scenarios")
         ));
         out.set("apiEntries", llmServiceBuildSupport.buildApiEntriesCompat(out.path("coreMethods")));
         out.set("qualityGate", llmServiceBuildSupport.buildApiDocQualityGate(out.path("coreMethods")));
+
         out.put("fallbackApplied", false);
         out.put("deterministicSeedApplied", true);
         out.put("contractVersion", "guide-v1");
@@ -224,6 +247,7 @@ public class LlmService {
 
     /**
      * Step 5: 파일 트리/근거 위치 결과를 조합한다.
+     * super-cluster toggle ON이면 디렉터리 항목에 모듈 라벨을 추가한다.
      */
     private JsonNode buildFileTreeDocs(JsonNode structure) {
         log.info("[LlmService] {} (deterministic)", STEP5_FILE_TREE_DOCS);
@@ -236,6 +260,13 @@ public class LlmService {
                 llmServiceBuildSupport.buildClassSourceMap(structure.path("coreClassSeed"))
         );
         out.set("coreMethods", coreMethods);
+
+        // super-cluster module-grain 라벨 주입 (보조 입력)
+        JsonNode superSubsystems = structure.path("superSubsystems");
+        if (superSubsystems.isArray() && !superSubsystems.isEmpty()) {
+            out.set("moduleLabels", llmServiceBuildSupport.buildModuleLabels(superSubsystems));
+        }
+
         out.set("qualityGate", llmServiceBuildSupport.buildFileTreeDocQualityGate(coreMethods));
         out.put("fallbackApplied", false);
         out.put("deterministicSeedApplied", true);
@@ -279,6 +310,11 @@ public class LlmService {
             log.warn("[LlmService] {} fallback applied.", stepName);
             return fallbackSupplier.get();
         }
+    }
+
+    private Object toSerializable(JsonNode node) {
+        if (node == null || node.isNull()) return null;
+        return objectMapper.convertValue(node, Object.class);
     }
 
     private boolean isResponseParseFailed(LlmException e) {

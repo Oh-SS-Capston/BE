@@ -63,6 +63,7 @@ build:
     - ${JAVA11_HOME}
     - ${JAVA17_HOME}
     - ${JAVA21_HOME}
+    - ${JAVA25_HOME}
   isolated-execution: true
   # 기본은 데몬 재사용(false)으로 반복 빌드 시작 비용을 줄인다.
   gradle-no-daemon: ${GRADLE_NO_DAEMON:false}
@@ -93,6 +94,25 @@ ossdoc:
     worker:
       fixed-delay-ms: ${PIPELINE_WORKER_FIXED_DELAY_MS:2000}
       max-jobs-per-tick: ${PIPELINE_WORKER_MAX_JOBS_PER_TICK:1}
+  # refactplan.md 2~5순위 의미 신호(가상 엣지) ablation 토글. 기본 OFF, 환경변수로 개별 ON 가능.
+  cluster:
+    signals:
+      package:
+        enabled: ${CLUSTER_SIGNAL_PACKAGE_ENABLED:false}
+      name:
+        enabled: ${CLUSTER_SIGNAL_NAME_ENABLED:false}
+      doc:
+        enabled: ${CLUSTER_SIGNAL_DOC_ENABLED:false}
+      api-flow:
+        enabled: ${CLUSTER_SIGNAL_API_FLOW_ENABLED:false}
+    super-cluster:
+      enabled: ${CLUSTER_SUPER_CLUSTER_ENABLED:false}
+  llm:
+    input:
+      super-cluster:
+        enabled: ${LLM_INPUT_SUPER_CLUSTER_ENABLED:false}
+      api-flow:
+        enabled: ${LLM_INPUT_API_FLOW_ENABLED:false}
 
 app:
   cors:

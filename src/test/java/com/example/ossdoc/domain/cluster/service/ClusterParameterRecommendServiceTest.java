@@ -82,7 +82,7 @@ class ClusterParameterRecommendServiceTest {
         assertThat(response.getSizeTier()).isEqualTo("MEDIUM");
         assertThat(response.getEdgePerType()).isEqualTo(10.0);
         assertThat(response.getClusterRecommended().getResolution()).isEqualTo(0.2);
-        assertThat(response.getClusterRecommended().getIterations()).isEqualTo(10);
+        assertThat(response.getClusterRecommended().getIterations()).isEqualTo(12);
         assertThat(response.getClusterRecommended().getMinClusterSize()).isEqualTo(2);
         assertThat(response.getClusterRecommended().getTopK()).isEqualTo(30);
         assertThat(response.getClassMapRecommended().getMaxNodes()).isEqualTo(36);

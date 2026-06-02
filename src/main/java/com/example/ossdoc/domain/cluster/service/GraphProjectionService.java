@@ -6,14 +6,13 @@ import com.example.ossdoc.domain.cluster.model.ProjectedEdge;
 import com.example.ossdoc.domain.cluster.model.ProjectedGraph;
 import com.example.ossdoc.domain.cluster.model.ProjectedNode;
 import com.example.ossdoc.domain.cluster.support.EdgeWeightPolicy;
+import com.example.ossdoc.domain.cluster.support.signal.SemanticSignalAugmenter;
 import com.example.ossdoc.domain.graphstore.entity.Edge;
 import com.example.ossdoc.domain.graphstore.entity.SymbolEntity;
 import com.example.ossdoc.domain.graphstore.enums.SymbolKind;
 import com.example.ossdoc.domain.graphstore.repository.EdgeRepository;
 import com.example.ossdoc.domain.graphstore.repository.SymbolEvidenceRepository;
 import com.example.ossdoc.domain.graphstore.repository.SymbolRepository;
-import com.example.ossdoc.domain.publicapi.entity.PublicApiEntry;
-import com.example.ossdoc.domain.publicapi.repository.PublicApiEntryRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -21,6 +20,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.Locale;
 
 @Slf4j
 @Service
@@ -31,13 +31,31 @@ public class GraphProjectionService {
     private final SymbolRepository symbolRepository;
     private final EdgeRepository edgeRepository;
     private final SymbolEvidenceRepository symbolEvidenceRepository;
-    private final PublicApiEntryRepository publicApiEntryRepository;
     private final EdgeWeightPolicy edgeWeightPolicy;
+    private final SemanticSignalAugmenter semanticSignalAugmenter;
+
+    // refactplan.md 4순위: Javadoc 토큰화 시 제거할 영어 불용어 + Javadoc 지시어.
+    private static final Set<String> DOC_STOPWORDS = Set.of(
+            "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for", "of",
+            "with", "by", "from", "is", "are", "was", "were", "be", "been", "being",
+            "have", "has", "had", "do", "does", "did", "will", "would", "shall", "should",
+            "may", "might", "must", "can", "could", "this", "that", "these", "those",
+            "it", "its", "they", "them", "their", "we", "our", "you", "your", "he",
+            "she", "his", "her", "not", "no", "nor", "if", "as", "when", "where",
+            "which", "who", "what", "how", "all", "any", "both", "each", "few", "more",
+            "most", "other", "some", "such", "only", "than", "then", "so", "too", "very",
+            "just", "also", "into", "out", "off", "over", "under", "again", "once",
+            "param", "return", "returns", "throws", "see", "since", "deprecated",
+            "author", "version", "note", "true", "false", "null"
+    );
 
     /**
      * graphstore와 public_api_entry를 합쳐 군집화용 투영 그래프를 구성한다.
+     *
+     * @param refinedEntrySymbolIds EntryPointDetectService 기반 정제 진입점 symbolId 집합.
+     *                              빈 set이면 모든 노드의 entryPoint = false.
      */
-    public ProjectedGraph loadProjectedGraph(String runId) {
+    public ProjectedGraph loadProjectedGraph(String runId, Set<String> refinedEntrySymbolIds) {
         List<SymbolEntity> typeSymbols;
         try {
             // 노드 인덱스를 매 실행 동일하게 만들기 위해 심볼 ID 기준 정렬 조회를 사용한다.
@@ -64,16 +82,6 @@ public class GraphProjectionService {
             throw new ClusterException(ClusterErrorCode.CLUSTER_GRAPH_EMPTY);
         }
 
-        Set<String> publicApiSymbolIds;
-        try {
-            publicApiSymbolIds = publicApiEntryRepository.findAllByRun_RunId(runId).stream()
-                    .map(PublicApiEntry::getSymbol)
-                    .map(SymbolEntity::getSymbolId)
-                    .collect(Collectors.toSet());
-        } catch (Exception e) {
-            throw new ClusterException(ClusterErrorCode.CLUSTER_PROJECTION_FAILED);
-        }
-
         Map<String, Integer> evidenceCountBySymbolId;
         try {
             evidenceCountBySymbolId = symbolEvidenceRepository.countBySymbolIdForRun(runId).stream()
@@ -98,7 +106,7 @@ public class GraphProjectionService {
                     .simpleName(symbol.getSimpleName())
                     .packageName(packageName)
                     .moduleId(symbol.getModule() == null ? null : symbol.getModule().getModuleId())
-                    .publicApi(publicApiSymbolIds.contains(symbol.getSymbolId()))
+                    .entryPoint(refinedEntrySymbolIds.contains(symbol.getSymbolId()))
                     // rankings.json에서 "설명 가능한 위치"를 만들기 위한 메타데이터를 함께 투영한다.
                     .symbolKind(symbol.getSymbolKind() == null ? null : symbol.getSymbolKind().name())
                     .ownerSymbol(symbol.getOwner() == null ? null : symbol.getOwner().getQualifiedName())
@@ -106,6 +114,8 @@ public class GraphProjectionService {
                     .sourceStartLine(symbol.getSourceStartLine())
                     .sourceEndLine(symbol.getSourceEndLine())
                     .evidenceCount(evidenceCountBySymbolId.getOrDefault(symbol.getSymbolId(), 0))
+                    // refactplan.md 4순위: Javadoc 본문을 소문자 토큰 리스트로 사전 투영한다.
+                    .docTokens(tokenizeDocComment(symbol.getDocComment()))
                     .build());
 
             nodeIndexMap.put(symbol.getSymbolId(), i);
@@ -151,6 +161,18 @@ public class GraphProjectionService {
             undirectedWeightMap.merge(key, weight, Double::sum);
         }
 
+        // refactplan.md 2~5순위: 의미 신호 가상 엣지를 코드 엣지와 동일한 weight map 에 합산한다.
+        // EdgeWeightPolicy·graphstore DB 는 손대지 않고 메모리 상에서만 보강한다.
+        Map<String, Object> signalMeta;
+        try {
+            signalMeta = semanticSignalAugmenter.augment(nodes, nodeIndexMap, undirectedWeightMap);
+        } catch (Exception e) {
+            // 신호 보강 실패가 군집화 자체를 막지 않도록 코드 엣지만으로 진행한다.
+            log.error("[CLUSTER] semantic signal augmentation failed. proceeding with code edges only. runId={}",
+                    runId, e);
+            signalMeta = Map.of("error", e.getClass().getSimpleName());
+        }
+
         List<ProjectedEdge> projectedEdges = new ArrayList<>();
         for (Map.Entry<String, Double> entry : undirectedWeightMap.entrySet()) {
             String[] split = entry.getKey().split(":");
@@ -166,6 +188,7 @@ public class GraphProjectionService {
                 .nodes(nodes)
                 .edges(projectedEdges)
                 .nodeIndexMap(nodeIndexMap)
+                .signalMeta(signalMeta)
                 .build();
     }
 
@@ -207,5 +230,29 @@ public class GraphProjectionService {
             return "";
         }
         return symbol.getSymbolId();
+    }
+
+    /**
+     * Javadoc 본문을 소문자 토큰 리스트로 변환한다. (refactplan.md 4순위 DocCommentSignalProvider 용)
+     * HTML 태그·Javadoc 지시어 제거 → 영어 불용어·단자(3자 미만) 필터링.
+     * 중복 토큰을 보존해 TF-IDF 계산 시 term frequency를 정확히 반영한다.
+     */
+    private List<String> tokenizeDocComment(String docComment) {
+        if (docComment == null || docComment.isBlank()) {
+            return List.of();
+        }
+        String text = docComment
+                .replaceAll("<[^>]+>", " ")
+                .replaceAll("@\\w+", " ")
+                .replaceAll("[{}]", " ");
+        List<String> tokens = new ArrayList<>();
+        for (String token : text.split("[^a-zA-Z]+")) {
+            if (token.length() < 3) continue;
+            String lower = token.toLowerCase(Locale.ROOT);
+            if (!DOC_STOPWORDS.contains(lower)) {
+                tokens.add(lower);
+            }
+        }
+        return List.copyOf(tokens);
     }
 }

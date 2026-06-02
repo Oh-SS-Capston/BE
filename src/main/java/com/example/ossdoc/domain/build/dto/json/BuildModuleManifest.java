@@ -11,6 +11,10 @@ public class BuildModuleManifest {
     private String moduleId; // gradle projectPath (":core")
     private String name;
 
+    private String groupId;
+    private String artifactId;
+    private String version;
+
     private List<String> sourceRoots;
     private List<String> testRoots;
     private List<String> resourceRoots;
@@ -19,6 +23,6 @@ public class BuildModuleManifest {
     private List<String> compileClasspath;  // 있으면 타입해결 향상
     private List<String> runtimeClasspath;
 
-    private String status; // OK|PARTIAL|FAILED
+    private String status; // OK|PARTIAL|SKIPPED|FAILED
     private BuildFailure failReason;
 }

@@ -27,7 +27,7 @@ public class RawSymbolFactDto {
     @JsonProperty("qualified_name")
     private String qualifiedName;
 
-    @JsonAlias({"owner_type_symbol", "ownerSymbol", "owner_symbol"})
+    @JsonAlias({"owner_type_symbol", "ownerSymbol", "owner_symbol", "nested_in"})
     @JsonProperty("owner_type_symbol")
     private String ownerTypeSymbol;
 

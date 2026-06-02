@@ -28,12 +28,14 @@ public class SymbolScoringService {
     public List<SymbolRankingItem> scoreSymbols(ProjectedGraph graph, Map<String, String> subsystemBySymbolId) {
         Map<String, Double> degreeMap = buildDegreeMap(graph);
         Map<String, Double> bridgeMap = buildBridgeMap(graph, subsystemBySymbolId);
+        Map<String, Double> intraDegreeMap = buildIntraDegreeMap(graph, subsystemBySymbolId);
 
         double maxDegree = degreeMap.values().stream().mapToDouble(v -> v).max().orElse(1.0);
         double maxBridge = bridgeMap.values().stream().mapToDouble(v -> v).max().orElse(1.0);
         double maxEvidence = graph.getNodes().stream()
                 .mapToDouble(n -> n.getEvidenceCount())
                 .max().orElse(1.0);
+        double maxIntraDegree = intraDegreeMap.values().stream().mapToDouble(v -> v).max().orElse(1.0);
 
         List<SymbolRankingItem> items = new ArrayList<>();
 
@@ -46,9 +48,14 @@ public class SymbolScoringService {
                     bridgeMap.getOrDefault(node.getSymbolId(), 0.0),
                     maxBridge
             );
-            double api = node.isPublicApi() ? 1.0 : 0.0;
+            double api = node.isEntryPoint() ? 1.0 : 0.0;
             double evidence = scoreNormalizer.normalize(node.getEvidenceCount(), maxEvidence);
-            double subsystemCentrality = structural;
+            // subsystem 내부 엣지 가중치 합을 정규화한 값: subsystem 안에서의 집중도를 측정한다.
+            // bridge(서브시스템 간 연결)와 상보적 지표로, structural 중복을 제거한다.
+            double subsystemCentrality = scoreNormalizer.normalize(
+                    intraDegreeMap.getOrDefault(node.getSymbolId(), 0.0),
+                    maxIntraDegree
+            );
 
             double total = 0.35 * structural
                     + 0.25 * bridge
@@ -167,5 +174,28 @@ public class SymbolScoringService {
         }
 
         return bridgeMap;
+    }
+
+    private Map<String, Double> buildIntraDegreeMap(ProjectedGraph graph, Map<String, String> subsystemBySymbolId) {
+        Map<String, Double> intraDegreeMap = new HashMap<>();
+
+        for (ProjectedNode node : graph.getNodes()) {
+            intraDegreeMap.put(node.getSymbolId(), 0.0);
+        }
+
+        for (ProjectedEdge edge : graph.getEdges()) {
+            ProjectedNode from = graph.getNodes().get(edge.getFromIndex());
+            ProjectedNode to = graph.getNodes().get(edge.getToIndex());
+
+            String fromSubsystem = subsystemBySymbolId.get(from.getSymbolId());
+            String toSubsystem = subsystemBySymbolId.get(to.getSymbolId());
+
+            if (fromSubsystem != null && toSubsystem != null && fromSubsystem.equals(toSubsystem)) {
+                intraDegreeMap.merge(from.getSymbolId(), edge.getWeight(), Double::sum);
+                intraDegreeMap.merge(to.getSymbolId(), edge.getWeight(), Double::sum);
+            }
+        }
+
+        return intraDegreeMap;
     }
 }

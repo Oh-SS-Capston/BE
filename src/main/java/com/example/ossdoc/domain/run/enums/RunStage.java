@@ -36,16 +36,34 @@ public enum RunStage {
             "코드 구조 그래프를 저장 중입니다."
     ),
 
+    ENTRYPOINT(
+            72,
+            false,
+            "공개 API 진입점을 탐지 중입니다."
+    ),
+
     CLUSTER(
             78,
             false,
             "주요 모듈과 군집을 분석 중입니다."
     ),
 
+    SUPER_CLUSTER(
+            83,
+            false,
+            "모듈 수퍼 클러스터를 생성 중입니다."
+    ),
+
     PUBLICAPI(
             87,
             false,
             "공개 API 진입점·확장 포인트를 분석 중입니다."
+    ),
+
+    API_FLOW_TRACE(
+            89,
+            false,
+            "API 호출 경로를 추적 중입니다."
     ),
 
     CLASSMAP(

@@ -7,6 +7,8 @@ import com.example.ossdoc.domain.artifact.service.ArtifactService;
 import com.example.ossdoc.domain.publicapi.dto.response.ApiMapBuildResponse;
 import com.example.ossdoc.domain.publicapi.model.EntryPointCandidate;
 import com.example.ossdoc.domain.publicapi.model.ExtensionPointCandidate;
+import com.example.ossdoc.domain.publicapi.support.EntryPointJsonCodec;
+import com.example.ossdoc.domain.publicapi.support.EntryPointSubsystemLabeler;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.exception.RunException;
 import com.example.ossdoc.domain.run.exception.code.RunErrorCode;
@@ -38,11 +40,12 @@ public class ApiMapBuildService {
     private static final String API_MAP_FILE     = "api_map.json";
 
     private final RepoRunRepository           repoRunRepository;
-    private final PublicApiEntrySyncService   publicApiEntrySyncService;
     private final EntryPointDetectService     entryPointDetectService;
     private final ExtensionPointDetectService extensionPointDetectService;
     private final ArtifactService             artifactService;
     private final ArtifactRepository          artifactRepository;
+    private final EntryPointJsonCodec         entryPointJsonCodec;
+    private final EntryPointSubsystemLabeler  entryPointSubsystemLabeler;
     private final ObjectMapper                objectMapper;
 
     @Transactional
@@ -50,17 +53,29 @@ public class ApiMapBuildService {
         RepoRun run = repoRunRepository.findById(runId)
                 .orElseThrow(() -> new RunException(RunErrorCode.RUN_NOT_FOUND));
 
-        publicApiEntrySyncService.ensureTypeEntries(run);
+        // 정상 경로: ENTRY_POINTS_JSON(라벨 없음) 읽기 → subsystem 라벨 join
+        // fallback: ENTRYPOINT 단계 실패/스킵 시 detect() 직접 호출 (이 시점에 SUBSYSTEMS_JSON이 존재하므로 라벨 포함)
+        List<EntryPointCandidate> entryPoints = artifactRepository
+                .findTopByRun_RunIdAndKindOrderByCreatedAtDesc(runId, ArtifactKind.ENTRY_POINTS_JSON)
+                .map(a -> entryPointSubsystemLabeler.label(
+                        runId, entryPointJsonCodec.deserialize(a.getMeta())))
+                .orElseGet(() -> {
+                    log.warn("[PUBLICAPI] ENTRY_POINTS_JSON not found. falling back to detect(). runId={}", runId);
+                    return entryPointDetectService.detect(runId);
+                });
 
-        List<EntryPointCandidate>   entryPoints     = entryPointDetectService.detect(runId);
         List<ExtensionPointCandidate> extensionPoints = extensionPointDetectService.detect(runId);
 
         // Extension Point 우선 원칙: 동일 symbolId가 양쪽에 존재하면 entry_points에서 제거
         // HIGH confidence entry point는 예외 유지 (직접 진입점 신호가 충분히 강한 경우)
-        List<EntryPointCandidate> dedupedEntryPoints = deduplicateEntryPoints(entryPoints, extensionPoints);
+        List<EntryPointCandidate> apiEntryPoints = entryPoints.stream()
+                .filter(ep -> !"EXAMPLE".equals(ep.getRole()))
+                .toList();
+        List<EntryPointCandidate> dedupedEntryPoints = deduplicateEntryPoints(apiEntryPoints, extensionPoints);
 
-        log.info("[PUBLICAPI] runId={}, entryPoints={} (deduped from {}), extensionPoints={}",
-                runId, dedupedEntryPoints.size(), entryPoints.size(), extensionPoints.size());
+        log.info("[PUBLICAPI] runId={}, entryPoints={} (deduped from {}, examples excluded={}), extensionPoints={}",
+                runId, dedupedEntryPoints.size(), apiEntryPoints.size(),
+                entryPoints.size() - apiEntryPoints.size(), extensionPoints.size());
 
         String generatedAt = Instant.now().toString();
 

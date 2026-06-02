@@ -6,6 +6,7 @@ import com.example.ossdoc.domain.cluster.model.CommunityResult;
 import com.example.ossdoc.domain.cluster.model.ProjectedEdge;
 import com.example.ossdoc.domain.cluster.model.ProjectedGraph;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import nl.cwts.networkanalysis.Clustering;
 import nl.cwts.networkanalysis.LeidenAlgorithm;
 import nl.cwts.networkanalysis.Network;
@@ -15,6 +16,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.Random;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class LeidenCommunityService {
@@ -66,6 +68,8 @@ public class LeidenCommunityService {
         } catch (ClusterException e) {
             throw e;
         } catch (Exception e) {
+            log.error("[LEIDEN] detect failed. nNodes={}, edges={}, resolution={}, iterations={}",
+                    graph.getNodes().size(), graph.getEdges().size(), resolution, iterations, e);
             throw new ClusterException(ClusterErrorCode.CLUSTER_LEIDEN_FAILED);
         }
     }

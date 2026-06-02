@@ -5,12 +5,17 @@ import com.example.ossdoc.domain.build.dto.response.BuildResolveResponse;
 import com.example.ossdoc.domain.build.enums.BuildMode;
 import com.example.ossdoc.domain.classmap.dto.request.ClassMapBuildRequest;
 import com.example.ossdoc.domain.classmap.service.ClassMapBuildService;
+import com.example.ossdoc.domain.cluster.config.ClusterSignalProperties;
 import com.example.ossdoc.domain.cluster.dto.request.ClusterBuildRequest;
+import com.example.ossdoc.domain.cluster.dto.request.SuperClusterBuildRequest;
 import com.example.ossdoc.domain.cluster.dto.response.ClusterParameterRecommendResponse;
 import com.example.ossdoc.domain.cluster.service.ClusterBuildService;
 import com.example.ossdoc.domain.cluster.service.ClusterParameterRecommendService;
+import com.example.ossdoc.domain.cluster.service.SuperClusterBuildService;
 import com.example.ossdoc.domain.extraction.dto.request.FactsExtractRequest;
+import com.example.ossdoc.domain.publicapi.service.ApiFlowTraceService;
 import com.example.ossdoc.domain.publicapi.service.ApiMapBuildService;
+import com.example.ossdoc.domain.publicapi.service.EntryPointBuildService;
 import com.example.ossdoc.domain.extraction.facade.FactsExtractionFacade;
 import com.example.ossdoc.domain.graphstore.dto.request.GraphStoreIngestRequest;
 import com.example.ossdoc.domain.graphstore.service.GraphStoreIngestService;
@@ -64,8 +69,12 @@ public class RunPipelineExecutor {
     private final GraphStoreIngestService graphStoreIngestService;
 
     private final ClusterParameterRecommendService clusterParameterRecommendService;
+    private final EntryPointBuildService entryPointBuildService;
     private final ClusterBuildService clusterBuildService;
+    private final SuperClusterBuildService superClusterBuildService;
+    private final ClusterSignalProperties clusterSignalProperties;
     private final ApiMapBuildService apiMapBuildService;
+    private final ApiFlowTraceService apiFlowTraceService;
     private final ClassMapBuildService classMapBuildService;
 
     private final RuleCandidateMiningService ruleCandidateMiningService;
@@ -146,6 +155,15 @@ public class RunPipelineExecutor {
 
             executeOptional(
                     jobId,
+                    RunStage.ENTRYPOINT,
+                    "공개 API 진입점을 탐지 중입니다.",
+                    "공개 API 진입점 탐지에 실패했습니다.",
+                    optionalFailures,
+                    () -> entryPointBuildService.build(runId)
+            );
+
+            boolean clusterSucceeded = executeOptional(
+                    jobId,
                     RunStage.CLUSTER,
                     "주요 모듈과 군집을 분석 중입니다.",
                     "군집화 생성에 실패했습니다.",
@@ -161,6 +179,29 @@ public class RunPipelineExecutor {
                     )
             );
 
+            if (clusterSucceeded && clusterSignalProperties.getSuperCluster().isEnabled()) {
+                executeOptional(
+                        jobId,
+                        RunStage.SUPER_CLUSTER,
+                        "모듈 수퍼 클러스터를 생성 중입니다.",
+                        "수퍼 클러스터 생성에 실패했습니다.",
+                        optionalFailures,
+                        () -> superClusterBuildService.build(
+                                SuperClusterBuildRequest.builder()
+                                        .runId(runId)
+                                        .build()
+                        )
+                );
+            } else {
+                stepService.skipStep(
+                        jobId,
+                        RunStage.SUPER_CLUSTER,
+                        clusterSucceeded
+                                ? "super-cluster 설정이 비활성화되어 있습니다. (ossdoc.cluster.super-cluster.enabled=true 로 활성화)"
+                                : "군집화 생성 실패로 수퍼 클러스터 생성을 건너뜁니다."
+                );
+            }
+
             executeOptional(
                     jobId,
                     RunStage.PUBLICAPI,
@@ -168,6 +209,15 @@ public class RunPipelineExecutor {
                     "API map 생성에 실패했습니다.",
                     optionalFailures,
                     () -> apiMapBuildService.build(runId)
+            );
+
+            executeOptional(
+                    jobId,
+                    RunStage.API_FLOW_TRACE,
+                    "API 호출 경로를 추적 중입니다.",
+                    "API 호출 경로 추적에 실패했습니다.",
+                    optionalFailures,
+                    () -> apiFlowTraceService.trace(runId)
             );
 
             executeOptional(

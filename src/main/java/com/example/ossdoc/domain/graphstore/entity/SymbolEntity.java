@@ -94,6 +94,10 @@ public class SymbolEntity extends BaseAuditedEntity {
         this.owner = owner;
     }
 
+    public void assignModule(ModuleEntity module) {
+        this.module = module;
+    }
+
     /**
      * 역할: 심볼이 선언된 소스 파일(FileIndex)을 연결한다.
      */

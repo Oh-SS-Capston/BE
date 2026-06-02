@@ -5,6 +5,7 @@ import com.example.ossdoc.domain.artifact.enums.ArtifactKind;
 import com.example.ossdoc.domain.artifact.service.ArtifactService;
 import com.example.ossdoc.domain.cluster.artifact.output.RankingsJson;
 import com.example.ossdoc.domain.cluster.artifact.output.SubsystemsJson;
+import com.example.ossdoc.domain.cluster.artifact.output.SuperSubsystemsJson;
 import com.example.ossdoc.domain.cluster.exception.ClusterException;
 import com.example.ossdoc.domain.cluster.exception.code.ClusterErrorCode;
 import com.example.ossdoc.domain.run.entity.RepoRun;
@@ -45,6 +46,23 @@ public class ClusterArtifactPublisher {
                     ArtifactKind.SUBSYSTEMS_JSON,
                     "1.0",
                     "analysis/subsystems.json",
+                    content
+            );
+        } catch (ClusterException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new ClusterException(ClusterErrorCode.CLUSTER_ARTIFACT_SAVE_FAILED);
+        }
+    }
+
+    public Artifact publishSuperSubsystems(RepoRun run, SuperSubsystemsJson dto) {
+        try {
+            JsonNode content = objectMapper.valueToTree(dto);
+            return artifactService.saveJsonArtifact(
+                    run,
+                    ArtifactKind.SUPER_SUBSYSTEMS_JSON,
+                    "1.0",
+                    "analysis/super_subsystems.json",
                     content
             );
         } catch (ClusterException e) {

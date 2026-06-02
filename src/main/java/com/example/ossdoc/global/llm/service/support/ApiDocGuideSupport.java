@@ -62,14 +62,17 @@ public final class ApiDocGuideSupport {
 
         GuideSlots slots = new GuideSlots(beforeCall, doCall, successCheck, failureSymptom, nextAction);
         String narrative = composeNarrative(slots);
-        GuideQuality quality = evaluateQuality(slots, anchor, narrative);
+        SlotEvidence slotEvidence = buildSlotEvidence(filePath, startLine, endLine);
+        GuideQuality quality = evaluateQuality(slots, anchor, narrative, methodName, methodFqn, classFqn, filePath,
+                slotEvidence.confidence());
 
         return new GuideView(
                 normalizedSummary,
                 narrative,
                 slots,
                 quality,
-                anchor
+                anchor,
+                slotEvidence
         );
     }
 
@@ -158,7 +161,24 @@ public final class ApiDocGuideSupport {
         };
     }
 
-    private static GuideQuality evaluateQuality(GuideSlots slots, String anchor, String narrative) {
+    // P1-3: 합성 메서드·예제·내부 클래스 여부를 검사해 0.0(부적합) 또는 1.0(적합)을 반환한다.
+    private static double computeTargetSuitabilityScore(String methodName, String methodFqn,
+            String classFqn, String filePath) {
+        String fqnToCheck = safeText(methodFqn).isBlank() ? safeText(methodName) : safeText(methodFqn);
+        if (fqnToCheck.contains("lambda$") || fqnToCheck.contains("$anonymous")) return 0.0;
+        String simpleName = fqnToCheck;
+        int hashIdx = fqnToCheck.lastIndexOf('#');
+        if (hashIdx >= 0) simpleName = fqnToCheck.substring(hashIdx + 1);
+        if (simpleName.matches(".*\\$\\d+.*")) return 0.0;
+        String cls = safeText(classFqn);
+        if (cls.contains("$$") || cls.matches(".*\\$\\d+$") || cls.matches(".*\\$\\d+[^.]*$")) return 0.0;
+        String pathNorm = safeText(filePath).replace('\\', '/').toLowerCase(Locale.ROOT);
+        if (pathNorm.contains("/test/") || pathNorm.contains("/example/") || pathNorm.contains("/sample/")) return 0.0;
+        return 1.0;
+    }
+
+    private static GuideQuality evaluateQuality(GuideSlots slots, String anchor, String narrative,
+            String methodName, String methodFqn, String classFqn, String filePath, String slotEvidenceConfidence) {
         List<String> texts = List.of(
                 slots.beforeCall(),
                 slots.doCall(),
@@ -206,7 +226,10 @@ public final class ApiDocGuideSupport {
                 + 0.15d * (1.0d - repetitionRate);
 
         int actionabilityScore = Math.max(0, Math.min(100, (int) Math.round(weighted * 100.0d)));
-        return new GuideQuality(actionabilityScore, slotCoverage, evidenceCoverage, forbiddenRate, repetitionRate);
+        // P1-3: targetSuitabilityScore + slotEvidenceConfidence
+        double targetSuitability = computeTargetSuitabilityScore(methodName, methodFqn, classFqn, filePath);
+        return new GuideQuality(actionabilityScore, slotCoverage, evidenceCoverage, forbiddenRate, repetitionRate,
+                targetSuitability, slotEvidenceConfidence);
     }
 
     private static String sanitizeSlot(String text) {
@@ -244,6 +267,28 @@ public final class ApiDocGuideSupport {
             return path + ":" + startLine + "-" + endLine;
         }
         return path + ":" + startLine;
+    }
+
+    private static SlotEvidence buildSlotEvidence(String filePath, Integer startLine, Integer endLine) {
+        String path = safeText(filePath);
+        String methodAnchor = buildEvidenceAnchor(filePath, startLine, endLine);
+        if (path.isBlank() || startLine == null || startLine <= 0 || endLine == null || endLine < startLine) {
+            return SlotEvidence.methodLevel(methodAnchor);
+        }
+
+        int lineCount = endLine - startLine + 1;
+        if (lineCount < SLOT_COUNT) {
+            return SlotEvidence.methodLevel(methodAnchor);
+        }
+
+        return new SlotEvidence(
+                path + ":" + startLine,
+                path + ":" + (startLine + Math.max(1, lineCount / 4)),
+                path + ":" + (startLine + Math.max(2, lineCount / 2)),
+                path + ":" + (startLine + Math.max(3, (lineCount * 3) / 4)),
+                path + ":" + endLine,
+                "slot_line"
+        );
     }
 
     private static String normalizeForRepeat(String text) {
@@ -310,8 +355,23 @@ public final class ApiDocGuideSupport {
             double slotCoverage,
             double evidenceCoverage,
             double forbiddenPhraseRate,
-            double repetitionRate
+            double repetitionRate,
+            double targetSuitabilityScore,
+            String slotEvidenceConfidence
     ) {
+    }
+
+    public record SlotEvidence(
+            String beforeCall,
+            String doCall,
+            String successCheck,
+            String failureSymptom,
+            String nextAction,
+            String confidence
+    ) {
+        private static SlotEvidence methodLevel(String anchor) {
+            return new SlotEvidence(anchor, anchor, anchor, anchor, anchor, "method_level");
+        }
     }
 
     public record GuideView(
@@ -319,7 +379,8 @@ public final class ApiDocGuideSupport {
             String narrative,
             GuideSlots slots,
             GuideQuality quality,
-            String evidenceAnchor
+            String evidenceAnchor,
+            SlotEvidence slotEvidence
     ) {
     }
 }

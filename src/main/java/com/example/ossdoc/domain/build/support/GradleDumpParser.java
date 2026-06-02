@@ -21,7 +21,7 @@ import java.util.regex.Pattern;
  * 책임:
  * 1) OSS_DOC_DUMP JSON 라인 추출
  * 2) source/test/resource/classes/classpath 경로 정규화
- * 3) 모듈 상태(OK/PARTIAL/FAILED) 판정
+ * 3) 모듈 상태(OK/PARTIAL/SKIPPED/FAILED) 판정
  * 4) 파싱 실패를 BuildFailure로 누적
  */
 @Component
@@ -47,6 +47,10 @@ public class GradleDumpParser {
             try {
                 Map<String, Object> map = objectMapper.readValue(m.group(1), Map.class);
 
+                String groupId = emptyToNull((String) map.get("group"));
+                String artifactId = emptyToNull((String) map.getOrDefault("name", ""));
+                String version = emptyToNull((String) map.get("version"));
+
                 List<String> sourceRoots = readPathList(map, "sourceRoots", repoRoot);
                 List<String> testRoots = readPathList(map, "testRoots", repoRoot);
                 List<String> resourceRoots = readPathList(map, "resourceRoots", repoRoot);
@@ -55,17 +59,30 @@ public class GradleDumpParser {
                 List<String> runtimeClasspath = readPathList(map, "runtimeClasspath", repoRoot);
 
                 String status;
+                BuildFailure failReason = null;
+                boolean hasAnySource = !sourceRoots.isEmpty() || !testRoots.isEmpty() || !resourceRoots.isEmpty();
+                String projectPath = (String) map.getOrDefault("projectPath", "");
+
                 if (!classesDirs.isEmpty()) {
                     status = "OK";
-                } else if (!sourceRoots.isEmpty() || !testRoots.isEmpty() || !resourceRoots.isEmpty()) {
+                } else if (hasAnySource) {
                     status = "PARTIAL";
                 } else {
-                    status = "FAILED";
+                    // 소스/산출물이 모두 비어있는 모듈은 BOM·aggregator 등 Java 코드가 없는 모듈로 간주한다.
+                    status = "SKIPPED";
+                    failReason = BuildFailure.builder()
+                            .code("NO_JAVA_SOURCES")
+                            .message("Module has no Java sources or classes (likely BOM/aggregator).")
+                            .moduleHint(projectPath)
+                            .build();
                 }
 
                 modules.add(BuildModuleManifest.builder()
-                        .moduleId((String) map.getOrDefault("projectPath", ""))
+                        .moduleId(projectPath)
                         .name((String) map.getOrDefault("name", ""))
+                        .groupId(groupId)
+                        .artifactId(artifactId)
+                        .version(version)
                         .sourceRoots(sourceRoots)
                         .testRoots(testRoots)
                         .resourceRoots(resourceRoots)
@@ -73,6 +90,7 @@ public class GradleDumpParser {
                         .compileClasspath(compileClasspath)
                         .runtimeClasspath(runtimeClasspath)
                         .status(status)
+                        .failReason(failReason)
                         .build());
 
             } catch (Exception e) {
@@ -83,6 +101,10 @@ public class GradleDumpParser {
             }
         }
         return modules;
+    }
+
+    private static String emptyToNull(String s) {
+        return (s == null || s.isBlank()) ? null : s;
     }
 
     private List<String> readPathList(Map<String, Object> map, String key, Path repoRoot) {

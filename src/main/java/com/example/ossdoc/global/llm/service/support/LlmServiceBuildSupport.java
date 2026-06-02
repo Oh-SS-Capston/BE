@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -29,6 +30,7 @@ import java.util.function.Supplier;
  * LlmService의 출력 정규화/문서 조합 로직을 분리한 지원 컴포넌트.
  * 서비스 본체는 흐름 제어만 담당하고, 세부 변환은 이 클래스가 담당한다.
  */
+@Slf4j
 @Component
 @RequiredArgsConstructor
 public class LlmServiceBuildSupport {
@@ -184,16 +186,15 @@ public class LlmServiceBuildSupport {
             guideQuality.put("evidenceCoverage", guide.quality().evidenceCoverage());
             guideQuality.put("forbiddenPhraseRate", guide.quality().forbiddenPhraseRate());
             guideQuality.put("repetitionRate", guide.quality().repetitionRate());
+            guideQuality.put("targetSuitabilityScore", guide.quality().targetSuitabilityScore());
+            guideQuality.put("slotEvidenceConfidence", guide.quality().slotEvidenceConfidence());
             guideQuality.put("threshold", ACTIONABILITY_THRESHOLD);
-            guideQuality.put("meetsThreshold", guide.quality().actionabilityScore() >= ACTIONABILITY_THRESHOLD);
+            guideQuality.put("meetsThreshold", guide.quality().actionabilityScore() >= ACTIONABILITY_THRESHOLD
+                    && guide.quality().targetSuitabilityScore() >= 1.0);
             item.put("actionabilityScore", guide.quality().actionabilityScore());
 
             ObjectNode slotEvidence = item.putObject("slotEvidence");
-            putIfText(slotEvidence, "beforeCall", guide.evidenceAnchor());
-            putIfText(slotEvidence, "doCall", guide.evidenceAnchor());
-            putIfText(slotEvidence, "successCheck", guide.evidenceAnchor());
-            putIfText(slotEvidence, "failureSymptom", guide.evidenceAnchor());
-            putIfText(slotEvidence, "nextAction", guide.evidenceAnchor());
+            writeSlotEvidence(slotEvidence, guide.slotEvidence());
 
             ObjectNode evidence = item.putObject("evidence");
             putIfText(evidence, "filePath", filePath);
@@ -605,6 +606,7 @@ public class LlmServiceBuildSupport {
         putIfText(slotEvidence, "successCheck", evidenceAnchor);
         putIfText(slotEvidence, "failureSymptom", evidenceAnchor);
         putIfText(slotEvidence, "nextAction", evidenceAnchor);
+        slotEvidence.put("slotEvidenceConfidence", "method_level");
 
         double slotCoverage = computeSlotCoverage(before, call, success, failure, next);
         double evidenceCoverage = evidenceAnchor.isBlank() ? 0.0d : 1.0d;
@@ -625,6 +627,7 @@ public class LlmServiceBuildSupport {
         quality.put("evidenceCoverage", round2(evidenceCoverage));
         quality.put("forbiddenPhraseRate", round2(forbiddenRate));
         quality.put("repetitionRate", round2(repetitionRate));
+        quality.put("slotEvidenceConfidence", "method_level");
         quality.put("threshold", ACTIONABILITY_THRESHOLD);
         quality.put("meetsThreshold", actionabilityScore >= ACTIONABILITY_THRESHOLD);
     }
@@ -1046,6 +1049,30 @@ public class LlmServiceBuildSupport {
             card.put("whatItDoesTruncated", false);
             card.put("whenToUse", whenToUse);
 
+            ObjectNode guideSlots = card.putObject("guideSlots");
+            guideSlots.put("beforeCall", guide.slots().beforeCall());
+            guideSlots.put("doCall", guide.slots().doCall());
+            guideSlots.put("successCheck", guide.slots().successCheck());
+            guideSlots.put("failureSymptom", guide.slots().failureSymptom());
+            guideSlots.put("nextAction", guide.slots().nextAction());
+
+            ObjectNode guideQuality = card.putObject("guideQuality");
+            guideQuality.put("actionabilityScore", guide.quality().actionabilityScore());
+            guideQuality.put("slotCoverage", guide.quality().slotCoverage());
+            guideQuality.put("evidenceCoverage", guide.quality().evidenceCoverage());
+            guideQuality.put("forbiddenPhraseRate", guide.quality().forbiddenPhraseRate());
+            guideQuality.put("repetitionRate", guide.quality().repetitionRate());
+            guideQuality.put("targetSuitabilityScore", guide.quality().targetSuitabilityScore());
+            guideQuality.put("slotEvidenceConfidence", guide.quality().slotEvidenceConfidence());
+            guideQuality.put("threshold", ACTIONABILITY_THRESHOLD);
+            // P1-3: meetsThreshold = actionability 충족 AND targetSuitability 충족(합성/예제 제외)
+            guideQuality.put("meetsThreshold", guide.quality().actionabilityScore() >= ACTIONABILITY_THRESHOLD
+                    && guide.quality().targetSuitabilityScore() >= 1.0);
+            card.put("actionabilityScore", guide.quality().actionabilityScore());
+
+            ObjectNode slotEvidence = card.putObject("slotEvidence");
+            writeSlotEvidence(slotEvidence, guide.slotEvidence());
+
             attachUsageScenario(card, scenarioStep);
             card.put("inputs", extractInputs(seed.path("signatureHint").asText("")));
             card.put("returns", extractReturns(seed.path("signatureHint").asText("")));
@@ -1341,6 +1368,8 @@ public class LlmServiceBuildSupport {
             }
             entry.put("actionabilityScore", method.path("actionabilityScore").asInt(0));
             entry.put("subsystem", shortenText(method.path("classFqn").asText("core"), 80));
+            if (method.has("apiFlowRef")) entry.set("apiFlowRef", method.path("apiFlowRef").deepCopy());
+            if (method.has("flowTraceSummary")) entry.put("flowTraceSummary", method.path("flowTraceSummary").asText(""));
             ArrayNode relatedScenarios = entry.putArray("relatedScenarios");
             relatedScenarios.add("SCN-001");
         }
@@ -1364,6 +1393,8 @@ public class LlmServiceBuildSupport {
             out.put("evidenceCoverageAvg", 0.0d);
             out.put("forbiddenPhraseRateAvg", 0.0d);
             out.put("repetitionRateAvg", 0.0d);
+            out.put("targetSuitabilityAvg", 0.0d);
+            out.put("narrativeDiversityAvg", 0.0d);
             out.put("meetsThreshold", false);
             return out;
         }
@@ -1376,6 +1407,8 @@ public class LlmServiceBuildSupport {
         double evidenceCoverageSum = 0.0d;
         double forbiddenRateSum = 0.0d;
         double repetitionRateSum = 0.0d;
+        double targetSuitabilitySum = 0.0d;
+        double narrativeDiversitySum = 0.0d;
 
         for (int i = 0; i < coreMethods.size(); i++) {
             JsonNode method = coreMethods.get(i);
@@ -1385,17 +1418,23 @@ public class LlmServiceBuildSupport {
             double evidenceCoverage = quality.path("evidenceCoverage").asDouble(0.0d);
             double forbiddenRate = quality.path("forbiddenPhraseRate").asDouble(0.0d);
             double repetitionRate = quality.path("repetitionRate").asDouble(0.0d);
+            // P1-3: targetSuitability + narrativeDiversity (= 1 - repetitionRate)
+            double targetSuitability = quality.path("targetSuitabilityScore").asDouble(1.0d);
+            double narrativeDiversity = 1.0d - repetitionRate;
 
             count++;
             totalScore += score;
             minScore = Math.min(minScore, score);
-            if (score < ACTIONABILITY_THRESHOLD) {
+            // P1-3: meetsThreshold = actionability 기준 AND targetSuitability 충족
+            if (score < ACTIONABILITY_THRESHOLD || targetSuitability < 1.0d) {
                 belowThreshold++;
             }
             slotCoverageSum += slotCoverage;
             evidenceCoverageSum += evidenceCoverage;
             forbiddenRateSum += forbiddenRate;
             repetitionRateSum += repetitionRate;
+            targetSuitabilitySum += targetSuitability;
+            narrativeDiversitySum += narrativeDiversity;
         }
 
         out.put("methodCount", count);
@@ -1406,6 +1445,8 @@ public class LlmServiceBuildSupport {
         out.put("evidenceCoverageAvg", round2(evidenceCoverageSum / count));
         out.put("forbiddenPhraseRateAvg", round2(forbiddenRateSum / count));
         out.put("repetitionRateAvg", round2(repetitionRateSum / count));
+        out.put("targetSuitabilityAvg", round2(targetSuitabilitySum / count));
+        out.put("narrativeDiversityAvg", round2(narrativeDiversitySum / count));
         out.put("meetsThreshold", belowThreshold == 0);
         return out;
     }
@@ -1562,6 +1603,7 @@ public class LlmServiceBuildSupport {
 
     /**
      * scenario 생성 프롬프트용 컨텍스트 JSON 문자열을 구성한다.
+     * api_flow traces가 존재하면 진입점 호출 경로 요약을 컨텍스트에 추가한다.
      */
     public String buildScenarioContext(
             JsonNode structure,
@@ -1575,7 +1617,273 @@ public class LlmServiceBuildSupport {
         context.set("methodFlowSeed", takeFirst(structure.path("methodFlowSeed"), 6));
         context.set("cautions", takeFirst(refinedRules.path("cautions"), 8));
         context.set("evidence", toEvidenceNode(evidence, 12));
+
+        // api_flow 보강: 진입점별 호출 경로 요약 (상위 10개)
+        JsonNode apiFlowTraces = structure.path("apiFlowTraces");
+        if (apiFlowTraces.isArray() && !apiFlowTraces.isEmpty()) {
+            context.set("apiFlowSummary", buildApiFlowSummary(apiFlowTraces, 10));
+        }
+
         return toJson(context);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Phase 4-A: super-cluster 기반 서브시스템 문서 / 모듈 라벨
+    // ──────────────────────────────────────────────────────────────────────
+
+    /**
+     * super-cluster 단위로 서브시스템 문서를 생성한다.
+     * 각 super-cluster가 요약 단위(모듈 수준)가 되고, level-1 memberSubsystemIds는 근거로 첨부된다.
+     */
+    public ArrayNode buildSuperClusterSubsystemDocs(
+            JsonNode superSubsystems,
+            JsonNode coreClasses,
+            JsonNode scenarioSpecs,
+            JsonNode refinedRules
+    ) {
+        List<String> scenarioIds = collectIds(scenarioSpecs.path("scenarios"), "scenarioId");
+        List<String> ruleIds = collectIds(refinedRules.path("rules"), "ruleId");
+
+        // coreClass fqn → super-cluster displayName 매핑
+        Map<String, String> packageToSuperLabel = buildPackageToSuperLabel(superSubsystems);
+
+        ArrayNode out = objectMapper.createArrayNode();
+        if (!superSubsystems.isArray()) return out;
+
+        for (int i = 0; i < superSubsystems.size(); i++) {
+            JsonNode sup = superSubsystems.get(i);
+            String supId = sup.path("superSubsystemId").asText(String.format("sup_%03d", i + 1));
+            String displayName = firstNonBlank(
+                    sup.path("displayName").asText(""),
+                    sup.path("canonicalKey").asText("module-" + (i + 1))
+            );
+
+            ObjectNode item = out.addObject();
+            item.put("subsystemId", supId);
+            item.put("label", displayName);
+            item.put("description", "모듈 수준 서브시스템: " + displayName);
+            item.put("layer", "module");
+            item.put("moduleDisplayName", displayName);
+            item.put("canonicalKey", sup.path("canonicalKey").asText(""));
+
+            // level-1 근거 (memberSubsystemIds)
+            JsonNode memberIds = sup.path("memberSubsystemIds");
+            ArrayNode memberSubsystems = item.putArray("memberSubsystems");
+            if (memberIds.isArray()) {
+                for (JsonNode id : memberIds) {
+                    memberSubsystems.add(id.asText(""));
+                }
+            }
+
+            // moduleAffinity 보존
+            item.set("moduleAffinity", sup.path("moduleAffinity").deepCopy());
+
+            // topSymbols: memberSymbolIds 앞 5개
+            ArrayNode topSymbols = item.putArray("topSymbols");
+            JsonNode memberSymbols = sup.path("memberSymbolIds");
+            if (memberSymbols.isArray()) {
+                for (int j = 0; j < memberSymbols.size() && j < 5; j++) {
+                    topSymbols.add(memberSymbols.get(j).asText(""));
+                }
+            }
+
+            // relatedScenarios (전체 시나리오를 공유, 최대 3개)
+            ArrayNode relatedScenarios = item.putArray("relatedScenarios");
+            for (int j = 0; j < scenarioIds.size() && j < 3; j++) {
+                relatedScenarios.add(scenarioIds.get(j));
+            }
+
+            // ruleIds (전체 규칙을 공유, 최대 4개)
+            ArrayNode relatedRules = item.putArray("ruleIds");
+            for (int j = 0; j < ruleIds.size() && j < 4; j++) {
+                relatedRules.add(ruleIds.get(j));
+            }
+
+            item.put("memberCount", sup.path("memberCount").asInt(0));
+        }
+        return out;
+    }
+
+    /**
+     * super-cluster 목록에서 module-grain 라벨 배열을 생성한다.
+     * step ⑤ file_tree_docs의 보조 입력으로 사용한다.
+     */
+    public ArrayNode buildModuleLabels(JsonNode superSubsystems) {
+        ArrayNode out = objectMapper.createArrayNode();
+        if (!superSubsystems.isArray()) return out;
+
+        for (JsonNode sup : superSubsystems) {
+            ObjectNode label = out.addObject();
+            label.put("superSubsystemId", sup.path("superSubsystemId").asText(""));
+            label.put("canonicalKey", sup.path("canonicalKey").asText(""));
+            label.put("displayName", firstNonBlank(
+                    sup.path("displayName").asText(""),
+                    sup.path("canonicalKey").asText("")
+            ));
+            label.set("packageRoots", sup.path("packageRoots").deepCopy());
+            label.put("memberCount", sup.path("memberCount").asInt(0));
+        }
+        return out;
+    }
+
+    private Map<String, String> buildPackageToSuperLabel(JsonNode superSubsystems) {
+        Map<String, String> out = new HashMap<>();
+        if (!superSubsystems.isArray()) return out;
+        for (JsonNode sup : superSubsystems) {
+            String displayName = firstNonBlank(sup.path("displayName").asText(""), sup.path("canonicalKey").asText(""));
+            JsonNode roots = sup.path("packageRoots");
+            if (roots.isArray()) {
+                for (JsonNode root : roots) {
+                    out.putIfAbsent(root.asText(""), displayName);
+                }
+            }
+        }
+        return out;
+    }
+
+    private List<String> collectIds(JsonNode array, String idField) {
+        List<String> ids = new ArrayList<>();
+        if (!array.isArray()) return ids;
+        for (JsonNode item : array) {
+            String id = item.path(idField).asText("");
+            if (!id.isBlank()) ids.add(id);
+        }
+        return ids;
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Phase 4-B: api_flow 보강 메서드
+    // ──────────────────────────────────────────────────────────────────────
+
+    /**
+     * API flow traces에서 컨텍스트 요약을 생성한다 (step ② 시나리오 컨텍스트 보강).
+     */
+    public ArrayNode buildApiFlowSummary(JsonNode apiFlowTraces, int maxEntries) {
+        ArrayNode out = objectMapper.createArrayNode();
+        if (!apiFlowTraces.isArray()) return out;
+
+        for (int i = 0; i < apiFlowTraces.size() && out.size() < maxEntries; i++) {
+            JsonNode trace = apiFlowTraces.get(i);
+            ObjectNode summary = out.addObject();
+            summary.put("entryPoint", firstNonBlank(
+                    trace.path("entryName").asText(""),
+                    trace.path("entryQualifiedName").asText("")
+            ));
+            summary.put("entryQualifiedName", trace.path("entryQualifiedName").asText(""));
+            summary.put("exposure", trace.path("exposure").asText(""));
+            summary.put("reachableCount", trace.path("reachableNodes").size());
+            summary.put("maxDepth", trace.path("maxDepth").asInt(0));
+            summary.put("truncated", trace.path("truncated").asBoolean(false));
+
+            // 직접 호출되는 메서드 이름 (depth=1, 최대 5개)
+            ArrayNode directCallees = summary.putArray("directCallees");
+            JsonNode nodes = trace.path("reachableNodes");
+            if (nodes.isArray()) {
+                for (JsonNode node : nodes) {
+                    if (node.path("bfsDepth").asInt(0) == 1 && directCallees.size() < 5) {
+                        directCallees.add(firstNonBlank(
+                                node.path("name").asText(""),
+                                node.path("qualifiedName").asText("")
+                        ));
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * coreMethods에 flow trace 요약을 연결한다 (step ④ API docs 보강).
+     *
+     * <p>trace의 entryQualifiedName은 TYPE FQN("org.foo.Bar")이고,
+     * coreMethods의 fqn은 METHOD FQN("org.foo.Bar.method")이다.
+     * 단위가 달라 직접 매칭이 불가능하므로 method.classFqn → TYPE FQN으로 변환하여 연결한다.
+     * 같은 타입에 속한 여러 메서드는 동일 flow trace 요약을 공유한다.
+     */
+    public void enrichCoreMethodsWithFlowTraces(ArrayNode coreMethods, JsonNode apiFlowTraces) {
+        if (!apiFlowTraces.isArray() || apiFlowTraces.isEmpty()) return;
+
+        // TYPE FQN → trace 인덱스 구성
+        // entryQualifiedName 형식: "type:org.foo.Bar"
+        // normalizeEntryQualifiedName 후: "org.foo.Bar" (TYPE FQN)
+        Map<String, JsonNode> traceByTypeFqn = new HashMap<>();
+        for (JsonNode trace : apiFlowTraces) {
+            String qn = trace.path("entryQualifiedName").asText("");
+            if (qn.isBlank()) continue;
+            String typeFqn = normalizeEntryQualifiedName(qn);
+            if (!typeFqn.isBlank()) traceByTypeFqn.put(typeFqn, trace);
+        }
+
+        int matched = 0;
+        int unmatched = 0;
+        for (JsonNode method : coreMethods) {
+            if (!method.isObject()) continue;
+            // classFqn이 TYPE FQN과 직접 매칭됨. 없으면 method fqn에서 추출
+            String classFqn = firstNonBlank(
+                    method.path("classFqn").asText(""),
+                    ownerFromMethodFqn(method.path("fqn").asText(""))
+            );
+            JsonNode trace = traceByTypeFqn.get(classFqn);
+            if (trace == null) {
+                unmatched++;
+                continue;
+            }
+            matched++;
+
+            ObjectNode methodObj = (ObjectNode) method;
+            int reachableCount = trace.path("reachableNodes").size();
+            int maxDepth = trace.path("maxDepth").asInt(0);
+            boolean truncated = trace.path("truncated").asBoolean(false);
+
+            ObjectNode flowRef = methodObj.putObject("apiFlowRef");
+            flowRef.put("reachableCount", reachableCount);
+            flowRef.put("maxDepth", maxDepth);
+            flowRef.put("truncated", truncated);
+
+            // directCallees (bfsDepth=1, 최대 5개)
+            List<String> directCallees = new java.util.ArrayList<>();
+            JsonNode nodes = trace.path("reachableNodes");
+            if (nodes.isArray()) {
+                for (JsonNode node : nodes) {
+                    if (node.path("bfsDepth").asInt(0) == 1 && directCallees.size() < 5) {
+                        String name = firstNonBlank(
+                                node.path("name").asText(""),
+                                node.path("qualifiedName").asText(""));
+                        if (!name.isBlank()) directCallees.add(name);
+                    }
+                }
+            }
+
+            // flowTraceSummary: "진입점이 최대 N단계, M개 노드 도달. 직접 호출: a, b, c"
+            StringBuilder sb = new StringBuilder();
+            sb.append("진입점이 최대 ").append(maxDepth).append("단계 깊이로 ")
+              .append(reachableCount).append("개 노드에 도달");
+            if (truncated) sb.append(" (경로 일부 생략)");
+            sb.append(".");
+            if (!directCallees.isEmpty()) {
+                sb.append(" 직접 호출: ").append(String.join(", ", directCallees)).append(".");
+            }
+            methodObj.put("flowTraceSummary", sb.toString());
+        }
+        log.info("[LLM] flowTrace enrich: coreMethods={}, traces={}, matched={}, unmatched={}",
+                coreMethods.size(), apiFlowTraces.size(), matched, unmatched);
+    }
+
+    /**
+     * API_FLOW_TRACE_JSON entryQualifiedName → TYPE FQN으로 정규화.
+     * "type:org.foo.Bar" → "org.foo.Bar"
+     * "method:org.foo.Bar#doSomething(params)" → "org.foo.Bar.doSomething" (레거시 대비)
+     */
+    private static String normalizeEntryQualifiedName(String qn) {
+        if (qn == null || qn.isBlank()) return "";
+        // kind prefix 제거 ("method:", "type:", "ctor:" 등)
+        int colonIdx = qn.indexOf(':');
+        String stripped = colonIdx >= 0 ? qn.substring(colonIdx + 1) : qn;
+        // 파라미터 제거 ("(..." 이후)
+        int parenIdx = stripped.indexOf('(');
+        if (parenIdx >= 0) stripped = stripped.substring(0, parenIdx);
+        // '#' → '.' (class#method → class.method)
+        return stripped.replace('#', '.');
     }
 
     private ArrayNode takeFirst(JsonNode arrayNode, int limit) {
@@ -1687,6 +1995,18 @@ public class LlmServiceBuildSupport {
         }
     }
 
+    private void writeSlotEvidence(ObjectNode node, ApiDocGuideSupport.SlotEvidence evidence) {
+        if (node == null || evidence == null) {
+            return;
+        }
+        putIfText(node, "beforeCall", evidence.beforeCall());
+        putIfText(node, "doCall", evidence.doCall());
+        putIfText(node, "successCheck", evidence.successCheck());
+        putIfText(node, "failureSymptom", evidence.failureSymptom());
+        putIfText(node, "nextAction", evidence.nextAction());
+        node.put("slotEvidenceConfidence", firstNonBlank(evidence.confidence(), "method_level"));
+    }
+
     private void copyTextFields(JsonNode source, ObjectNode target, List<String> fieldNames) {
         if (source == null || target == null || fieldNames == null) {
             return;
@@ -1733,7 +2053,5 @@ public class LlmServiceBuildSupport {
         }
     }
 }
-
-
 
 

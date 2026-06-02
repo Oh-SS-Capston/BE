@@ -4,6 +4,7 @@ import com.example.ossdoc.domain.cluster.model.ProjectedEdge;
 import com.example.ossdoc.domain.cluster.model.ProjectedGraph;
 import com.example.ossdoc.domain.cluster.model.ProjectedNode;
 import com.example.ossdoc.domain.cluster.support.EdgeWeightPolicy;
+import com.example.ossdoc.domain.cluster.support.signal.SemanticSignalAugmenter;
 import com.example.ossdoc.domain.graphstore.entity.Edge;
 import com.example.ossdoc.domain.graphstore.entity.SymbolEntity;
 import com.example.ossdoc.domain.graphstore.enums.EdgeType;
@@ -12,8 +13,6 @@ import com.example.ossdoc.domain.graphstore.enums.SymbolKind;
 import com.example.ossdoc.domain.graphstore.repository.EdgeRepository;
 import com.example.ossdoc.domain.graphstore.repository.SymbolEvidenceRepository;
 import com.example.ossdoc.domain.graphstore.repository.SymbolRepository;
-import com.example.ossdoc.domain.publicapi.entity.PublicApiEntry;
-import com.example.ossdoc.domain.publicapi.repository.PublicApiEntryRepository;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -21,8 +20,10 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -36,18 +37,20 @@ class GraphProjectionServiceTest {
         SymbolRepository symbolRepository = mock(SymbolRepository.class);
         EdgeRepository edgeRepository = mock(EdgeRepository.class);
         SymbolEvidenceRepository symbolEvidenceRepository = mock(SymbolEvidenceRepository.class);
-        PublicApiEntryRepository publicApiEntryRepository = mock(PublicApiEntryRepository.class);
         EdgeWeightPolicy edgeWeightPolicy = new EdgeWeightPolicy();
 
         when(symbolEvidenceRepository.countBySymbolIdForRun(org.mockito.ArgumentMatchers.anyString()))
                 .thenReturn(List.of());
 
+        SemanticSignalAugmenter semanticSignalAugmenter = mock(SemanticSignalAugmenter.class);
+        when(semanticSignalAugmenter.augment(any(), any(), any())).thenReturn(java.util.Map.of());
+
         GraphProjectionService graphProjectionService = new GraphProjectionService(
                 symbolRepository,
                 edgeRepository,
                 symbolEvidenceRepository,
-                publicApiEntryRepository,
-                edgeWeightPolicy
+                edgeWeightPolicy,
+                semanticSignalAugmenter
         );
 
         SymbolEntity authController = mock(SymbolEntity.class);
@@ -65,12 +68,6 @@ class GraphProjectionServiceTest {
         // TYPE 조회 결과에는 타입 심볼만 포함된다.
         when(symbolRepository.findAllByRun_RunIdAndSymbolKindOrderBySymbolIdAsc("run-1", SymbolKind.TYPE))
                 .thenReturn(List.of(authController, authService));
-
-        PublicApiEntry publicApiEntry = mock(PublicApiEntry.class);
-        when(publicApiEntry.getSymbol()).thenReturn(authController);
-
-        when(publicApiEntryRepository.findAllByRun_RunId("run-1"))
-                .thenReturn(List.of(publicApiEntry));
 
         Edge edge1 = mock(Edge.class);
         when(edge1.getFromSymbol()).thenReturn(authController);
@@ -90,7 +87,7 @@ class GraphProjectionServiceTest {
                 .thenReturn(List.of(edge1, edge2));
 
         // when
-        ProjectedGraph projectedGraph = graphProjectionService.loadProjectedGraph("run-1");
+        ProjectedGraph projectedGraph = graphProjectionService.loadProjectedGraph("run-1", Set.of());
 
         // then
         assertThat(projectedGraph.getNodes()).hasSize(2);
@@ -101,10 +98,10 @@ class GraphProjectionServiceTest {
         ProjectedNode second = projectedGraph.getNodes().get(1);
 
         assertThat(first.getQualifiedName()).isEqualTo("com.example.auth.AuthController");
-        assertThat(first.isPublicApi()).isTrue();
+        assertThat(first.isEntryPoint()).isFalse(); // refinedEntryIds=Set.of() → 모두 false
 
         assertThat(second.getQualifiedName()).isEqualTo("com.example.auth.AuthService");
-        assertThat(second.isPublicApi()).isFalse();
+        assertThat(second.isEntryPoint()).isFalse();
 
         // directed 2개가 하나의 undirected edge로 합쳐져야 한다.
         assertThat(projectedGraph.getEdges()).hasSize(1);
@@ -118,5 +115,54 @@ class GraphProjectionServiceTest {
         // edge2 = 1.5 * 1.0 * 0.5 = 0.75
         // 합계 = 2.25
         assertThat(mergedEdge.getWeight()).isEqualTo(2.25);
+    }
+
+    @Test
+    @DisplayName("refinedEntrySymbolIds에 포함된 symbol은 entryPoint=true, 아닌 symbol은 entryPoint=false")
+    void loadProjectedGraph_entryPoint_setCorrectly() {
+        // given
+        SymbolRepository symbolRepository = mock(SymbolRepository.class);
+        EdgeRepository edgeRepository = mock(EdgeRepository.class);
+        SymbolEvidenceRepository symbolEvidenceRepository = mock(SymbolEvidenceRepository.class);
+        EdgeWeightPolicy edgeWeightPolicy = new EdgeWeightPolicy();
+        SemanticSignalAugmenter semanticSignalAugmenter = mock(SemanticSignalAugmenter.class);
+        when(semanticSignalAugmenter.augment(any(), any(), any())).thenReturn(java.util.Map.of());
+        when(symbolEvidenceRepository.countBySymbolIdForRun(any())).thenReturn(List.of());
+
+        GraphProjectionService svc = new GraphProjectionService(
+                symbolRepository, edgeRepository, symbolEvidenceRepository,
+                edgeWeightPolicy, semanticSignalAugmenter);
+
+        SymbolEntity alpha = mock(SymbolEntity.class);
+        when(alpha.getSymbolId()).thenReturn("sym-alpha");
+        when(alpha.getQualifiedName()).thenReturn("com.example.Alpha");
+        when(alpha.getSimpleName()).thenReturn("Alpha");
+        when(alpha.getModule()).thenReturn(null);
+
+        SymbolEntity beta = mock(SymbolEntity.class);
+        when(beta.getSymbolId()).thenReturn("sym-beta");
+        when(beta.getQualifiedName()).thenReturn("com.example.Beta");
+        when(beta.getSimpleName()).thenReturn("Beta");
+        when(beta.getModule()).thenReturn(null);
+
+        when(symbolRepository.findAllByRun_RunIdAndSymbolKindOrderBySymbolIdAsc("run-2", SymbolKind.TYPE))
+                .thenReturn(List.of(alpha, beta));
+
+        when(edgeRepository.findAllByRun_RunId("run-2")).thenReturn(List.of());
+
+        // entryPoint: beta만 정제 진입점 (publicApi와 의도적으로 다르게 설정)
+        Set<String> refinedEntryIds = Set.of("sym-beta");
+
+        // when
+        ProjectedGraph graph = svc.loadProjectedGraph("run-2", refinedEntryIds);
+
+        // then
+        ProjectedNode nodeAlpha = graph.getNodes().stream()
+                .filter(n -> "sym-alpha".equals(n.getSymbolId())).findFirst().orElseThrow();
+        ProjectedNode nodeBeta = graph.getNodes().stream()
+                .filter(n -> "sym-beta".equals(n.getSymbolId())).findFirst().orElseThrow();
+
+        assertThat(nodeAlpha.isEntryPoint()).isFalse(); // refinedEntryIds에 없음
+        assertThat(nodeBeta.isEntryPoint()).isTrue();   // refinedEntryIds에 포함
     }
 }

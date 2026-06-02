@@ -33,12 +33,17 @@ import com.example.ossdoc.domain.graphstore.repository.EvidenceRepository;
 import com.example.ossdoc.domain.graphstore.repository.ObservationRepository;
 import com.example.ossdoc.domain.graphstore.repository.SymbolEvidenceRepository;
 import com.example.ossdoc.domain.graphstore.repository.SymbolRepository;
+import com.example.ossdoc.domain.build.dto.json.BuildManifest;
+import com.example.ossdoc.domain.build.dto.json.BuildModuleManifest;
 import com.example.ossdoc.domain.module.entity.FileIndex;
+import com.example.ossdoc.domain.module.entity.ModuleEntity;
 import com.example.ossdoc.domain.module.repository.FileIndexRepository;
+import com.example.ossdoc.domain.module.repository.ModuleRepository;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -53,8 +58,10 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
 
 @Service
 @Slf4j
@@ -73,6 +80,7 @@ public class GraphStoreIngestService {
     private final ObservationRepository observationRepository;
     private final SymbolEvidenceRepository symbolEvidenceRepository;
     private final FileIndexRepository fileIndexRepository;
+    private final ModuleRepository moduleRepository;
 
     private final FactsEvidenceConverter factsEvidenceConverter;
     private final FactsSymbolConverter factsSymbolConverter;
@@ -90,6 +98,9 @@ public class GraphStoreIngestService {
         if (run.getOwner() == null || !run.getOwner().getId().equals(userId)) {
             throw new GraphStoreException(GraphStoreErrorCode.RUN_ACCESS_DENIED);
         }
+
+        // C-1: module 테이블 적재 / C-2: symbol.module_id 연결에 사용
+        Map<String, ModuleEntity> moduleCache = persistModules(run);
 
         Artifact factsArtifact = resolveFactsArtifact(request);
 
@@ -110,7 +121,7 @@ public class GraphStoreIngestService {
         validateFacts(facts);
 
         EvidenceSaveResult evidenceSaveResult = saveEvidence(run, facts);
-        SymbolSaveResult symbolSaveResult = saveSymbols(run, facts, evidenceSaveResult.evidenceMap());
+        SymbolSaveResult symbolSaveResult = saveSymbols(run, facts, evidenceSaveResult.evidenceMap(), moduleCache);
         EdgeSaveResult edgeSaveResult = saveEdges(run, facts, symbolSaveResult.symbolMap(), evidenceSaveResult.evidenceMap());
         int observationsSaved = saveObservations(run, facts);
 
@@ -126,6 +137,78 @@ public class GraphStoreIngestService {
                 .observationsDetected(facts.observations().size())
                 .observationsSaved(observationsSaved)
                 .build();
+    }
+
+    /**
+     * BUILD_MANIFEST artifact를 읽어 module 테이블에 적재하고,
+     * gradle projectPath → ModuleEntity 맵을 반환한다.
+     *
+     * - artifact 부재 또는 역직렬화 실패 시 warn 로그 + 빈 맵 반환 (graceful degrade)
+     * - PK: runId + "::" + gradleProjectPath (run 간 충돌 방지)
+     * - sourceRoots/testRoots/resourceRoots가 null이면 빈 배열로 채움 (NOT NULL JSONB 제약)
+     * - 재실행 시 중복 INSERT 방지: 기존 적재분은 건너뜀
+     */
+    private Map<String, ModuleEntity> persistModules(RepoRun run) {
+        Optional<Artifact> opt = artifactRepository
+                .findTopByRun_RunIdAndKindOrderByCreatedAtDesc(run.getRunId(), ArtifactKind.BUILD_MANIFEST);
+        if (opt.isEmpty()) {
+            log.warn("[GRAPHSTORE] BUILD_MANIFEST not found, skipping module persist. runId={}", run.getRunId());
+            return Map.of();
+        }
+
+        BuildManifest manifest;
+        try {
+            manifest = objectMapper.treeToValue(opt.get().getMeta(), BuildManifest.class);
+        } catch (Exception e) {
+            log.warn("[GRAPHSTORE] BUILD_MANIFEST deserialization failed, skipping. runId={}", run.getRunId(), e);
+            return Map.of();
+        }
+
+        // 재실행 시 기존 적재분을 건너뛰기 위해 미리 로드
+        Map<String, ModuleEntity> existing = moduleRepository.findAllByRun_RunId(run.getRunId())
+                .stream()
+                .collect(Collectors.toMap(ModuleEntity::getModuleId, m -> m));
+
+        String buildType = manifest.getBuildTool() != null ? manifest.getBuildTool().name() : null;
+        Map<String, ModuleEntity> result = new LinkedHashMap<>();
+        List<ModuleEntity> toSave = new ArrayList<>();
+
+        for (BuildModuleManifest dto : manifest.getModules()) {
+            if (dto.getModuleId() == null) continue;
+
+            String pk = run.getRunId() + "::" + dto.getModuleId();
+            ModuleEntity entity = existing.get(pk);
+
+            if (entity == null) {
+                String name = dto.getName() != null && !dto.getName().isBlank()
+                        ? dto.getName() : dto.getModuleId();
+                entity = new ModuleEntity(
+                        pk, run, name, buildType,
+                        null, null, // packaging, javaVersion
+                        dto.getGroupId(), dto.getArtifactId(), dto.getVersion(),
+                        toJsonArray(dto.getSourceRoots()),
+                        toJsonArray(dto.getTestRoots()),
+                        toJsonArray(dto.getResourceRoots())
+                );
+                toSave.add(entity);
+            }
+            result.put(dto.getModuleId(), entity);
+        }
+
+        if (!toSave.isEmpty()) {
+            moduleRepository.saveAll(toSave);
+        }
+        log.info("[GRAPHSTORE] modules persisted: saved={}, total={}, runId={}",
+                toSave.size(), result.size(), run.getRunId());
+        return result;
+    }
+
+    private JsonNode toJsonArray(List<String> items) {
+        var arr = JsonNodeFactory.instance.arrayNode();
+        if (items != null) {
+            items.forEach(arr::add);
+        }
+        return arr;
     }
 
     private Artifact resolveFactsArtifact(GraphStoreIngestRequest request) {
@@ -340,13 +423,15 @@ public class GraphStoreIngestService {
     private SymbolSaveResult saveSymbols(
             RepoRun run,
             NormalizedFactsDocument facts,
-            Map<String, Evidence> evidenceMap
+            Map<String, Evidence> evidenceMap,
+            Map<String, ModuleEntity> moduleCache  // C-2: gradle projectPath → ModuleEntity
     ) {
         Map<String, SymbolEntity> symbolMap = new LinkedHashMap<>();
         Map<String, SymbolEntity> existingSymbolsByQualifiedName = loadExistingSymbolsByQualifiedName(run);
         Map<String, FileIndex> sourceFileCache = loadFileIndexCache(run);
         int savedCount = 0;
         int sourceFileLinkedCount = 0;
+        int moduleLinkedCount = 0;
 
         for (NormalizedSymbolFact dto : facts.symbols()) {
             if (dto.symbol() == null || dto.symbol().isBlank()) {
@@ -356,10 +441,20 @@ public class GraphStoreIngestService {
             SymbolEntity symbol = existingSymbolsByQualifiedName.get(dto.symbol());
             if (symbol == null) {
                 String symbolId = symbolIdGenerator.generate(run.getRunId(), dto.symbol());
+                // FactsSymbolConverter:23 — module은 여전히 null, 연결은 아래에서 서비스가 담당
                 SymbolEntity entity = factsSymbolConverter.toEntity(symbolId, run, dto);
                 symbol = symbolRepository.save(entity);
                 existingSymbolsByQualifiedName.put(dto.symbol(), symbol);
                 savedCount++;
+            }
+
+            // C-2: dto.module()은 gradle projectPath (":core" 등), moduleCache는 C-1에서 적재됨
+            if (dto.module() != null && symbol.getModule() == null) {
+                ModuleEntity moduleEntity = moduleCache.get(dto.module());
+                if (moduleEntity != null) {
+                    symbol.assignModule(moduleEntity);
+                    moduleLinkedCount++;
+                }
             }
 
             FileIndex sourceFile = resolveSymbolSourceFile(run, dto, sourceFileCache);
@@ -427,9 +522,10 @@ public class GraphStoreIngestService {
         saveAllInBatches(symbolEvidenceLinks, BATCH_SIZE, symbolEvidenceRepository::saveAll);
 
         log.info(
-                "[GRAPHSTORE] symbol source file linking summary. runId={}, linkedCount={}",
+                "[GRAPHSTORE] symbol linking summary. runId={}, sourceFileLinked={}, moduleLinked={}",
                 run.getRunId(),
-                sourceFileLinkedCount
+                sourceFileLinkedCount,
+                moduleLinkedCount
         );
 
         return new SymbolSaveResult(symbolMap, savedCount, symbolEvidenceLinks.size());
@@ -644,8 +740,11 @@ public class GraphStoreIngestService {
         int edgesSaved = 0;
         int skippedRelations = 0;
         int resolvedByRawRef = 0;
+        int resolvedBySimpleName = 0;
 
         Map<String, SymbolEntity> typeLookupIndex = buildTypeLookupIndex(symbolMap);
+        // P1-1: IMPLEMENTS/EXTENDS 단순명 폴백 — 크로스모듈 동일 repo 타입 해소용
+        Map<String, SymbolEntity> simpleNameInheritanceLookup = buildSimpleNameInheritanceLookup(symbolMap);
         Map<String, Evidence> symbolAstEvidenceMap = loadSymbolAstEvidenceMap(run.getRunId());
         Map<String, String> symbolToOwnerMap = buildSymbolToOwnerMap(facts.symbols());
 
@@ -655,7 +754,7 @@ public class GraphStoreIngestService {
             edgeLookup.putIfAbsent(toEdgeKey(existing), existing);
         }
 
-        Set<String> existingEdgeEvidenceKeys = loadExistingEdgeEvidenceKeys(existingEdges);
+        Set<String> existingEdgeEvidenceKeys = loadExistingEdgeEvidenceKeys(run.getRunId());
         List<Edge> newEdges = new ArrayList<>();
         List<PendingEdgeEvidence> pendingEdgeEvidence = new ArrayList<>();
 
@@ -671,12 +770,17 @@ public class GraphStoreIngestService {
                 continue;
             }
 
-            SymbolEntity to = resolveDestinationSymbol(dto, symbolMap, typeLookupIndex);
+            SymbolEntity to = resolveDestinationSymbol(dto, symbolMap, typeLookupIndex, simpleNameInheritanceLookup);
             if (to != null
                     && (dto.dstSymbol() == null || dto.dstSymbol().isBlank())
                     && dto.dstRawRef() != null
                     && !dto.dstRawRef().isBlank()) {
                 resolvedByRawRef++;
+            }
+            // P1-1: 단순명 폴백으로 해소된 EXTENDS/IMPLEMENTS 카운트
+            if (to != null && isInheritanceEdge(dto.kind())
+                    && !typeLookupIndex.containsKey(normalizeTypeRefForLookup(dto.dstSymbol()))) {
+                resolvedBySimpleName++;
             }
 
             Edge candidate = factsEdgeConverter.toEntity(run, dto, from, to);
@@ -735,10 +839,11 @@ public class GraphStoreIngestService {
         int edgeEvidenceSaved = linksToSave.size();
 
         log.info(
-                "[GRAPHSTORE] relation linking summary. runId={}, totalRelations={}, resolvedByRawRef={}, skippedRelations={}",
+                "[GRAPHSTORE] relation linking summary. runId={}, totalRelations={}, resolvedByRawRef={}, resolvedBySimpleName={}, skippedRelations={}",
                 run.getRunId(),
                 facts.relations().size(),
                 resolvedByRawRef,
+                resolvedBySimpleName,
                 skippedRelations
         );
 
@@ -785,20 +890,10 @@ public class GraphStoreIngestService {
 
     /**
      * 기존 edge-evidence 연결 키를 메모리 Set으로 로드한다.
+     * edge_id IN(...) 대신 run_id JOIN으로 조회해 PostgreSQL 65,535 파라미터 한도를 우회한다.
      */
-    private Set<String> loadExistingEdgeEvidenceKeys(List<Edge> existingEdges) {
-        List<Long> edgeIds = new ArrayList<>();
-        for (Edge edge : existingEdges) {
-            if (edge.getEdgeId() != null) {
-                edgeIds.add(edge.getEdgeId());
-            }
-        }
-
-        if (edgeIds.isEmpty()) {
-            return new HashSet<>();
-        }
-
-        List<EdgeEvidence> existingLinks = edgeEvidenceRepository.findAllByEdge_EdgeIdIn(edgeIds);
+    private Set<String> loadExistingEdgeEvidenceKeys(String runId) {
+        List<EdgeEvidence> existingLinks = edgeEvidenceRepository.findAllByEdge_Run_RunId(runId);
         Set<String> keys = new HashSet<>(Math.max(16, existingLinks.size() * 2));
         for (EdgeEvidence link : existingLinks) {
             if (link.getId() == null) {
@@ -845,11 +940,13 @@ public class GraphStoreIngestService {
 
     /**
      * 목적지 심볼을 우선 dstSymbol로 찾고, 없으면 dstRawRef를 기반으로 보조 해석한다.
+     * P1-1: EXTENDS/IMPLEMENTS에 한해 단순명 폴백 인덱스를 최후 수단으로 사용한다.
      */
     private SymbolEntity resolveDestinationSymbol(
             NormalizedRelationFact relation,
             Map<String, SymbolEntity> symbolMap,
-            Map<String, SymbolEntity> typeLookupIndex
+            Map<String, SymbolEntity> typeLookupIndex,
+            Map<String, SymbolEntity> simpleNameInheritanceLookup
     ) {
         if (relation.dstSymbol() != null && !relation.dstSymbol().isBlank()) {
             SymbolEntity direct = symbolMap.get(relation.dstSymbol());
@@ -862,16 +959,30 @@ public class GraphStoreIngestService {
             }
         }
 
-        if (relation.dstRawRef() == null || relation.dstRawRef().isBlank()) {
-            return null;
-        }
-
-        for (String candidate : buildTypeLookupCandidates(relation.dstRawRef())) {
-            SymbolEntity resolved = typeLookupIndex.get(candidate);
-            if (resolved != null) {
-                return resolved;
+        if (relation.dstRawRef() != null && !relation.dstRawRef().isBlank()) {
+            for (String candidate : buildTypeLookupCandidates(relation.dstRawRef())) {
+                SymbolEntity resolved = typeLookupIndex.get(candidate);
+                if (resolved != null) {
+                    return resolved;
+                }
             }
         }
+
+        // P1-1: EXTENDS/IMPLEMENTS 한정 단순명 폴백 — 크로스모듈 동일 repo 타입 해소
+        if (!simpleNameInheritanceLookup.isEmpty() && isInheritanceEdge(relation.kind())) {
+            String rawRef = relation.dstSymbol() != null && !relation.dstSymbol().isBlank()
+                    ? relation.dstSymbol() : relation.dstRawRef();
+            if (rawRef != null && !rawRef.isBlank()) {
+                String simpleName = extractSimpleNameFromTypeRef(rawRef);
+                if (simpleName != null) {
+                    SymbolEntity resolved = simpleNameInheritanceLookup.get(simpleName);
+                    if (resolved != null) {
+                        return resolved;
+                    }
+                }
+            }
+        }
+
         return null;
     }
 
@@ -889,6 +1000,45 @@ public class GraphStoreIngestService {
         }
 
         return index;
+    }
+
+    /**
+     * P1-1: IMPLEMENTS/EXTENDS 단순명 폴백 인덱스.
+     * 동일 단순명을 가진 TYPE이 하나뿐인 경우만 등록(모호성 방지).
+     * JDK/외부 라이브러리 타입은 symbolMap에 없으므로 자동으로 제외된다.
+     */
+    private Map<String, SymbolEntity> buildSimpleNameInheritanceLookup(Map<String, SymbolEntity> symbolMap) {
+        Map<String, List<SymbolEntity>> candidates = new HashMap<>();
+        for (SymbolEntity symbol : symbolMap.values()) {
+            if (symbol.getSymbolKind() != SymbolKind.TYPE) continue;
+            String simpleName = symbol.getSimpleName();
+            if (simpleName != null && !simpleName.isBlank()) {
+                candidates.computeIfAbsent(simpleName, k -> new ArrayList<>()).add(symbol);
+            }
+        }
+        Map<String, SymbolEntity> index = new HashMap<>();
+        for (Map.Entry<String, List<SymbolEntity>> entry : candidates.entrySet()) {
+            if (entry.getValue().size() == 1) {
+                index.put(entry.getKey(), entry.getValue().get(0));
+            }
+        }
+        log.debug("[GRAPHSTORE-P1-1] simpleNameInheritanceLookup: unambiguous={}, total candidates={}",
+                index.size(), candidates.size());
+        return index;
+    }
+
+    private boolean isInheritanceEdge(String kind) {
+        if (kind == null) return false;
+        String upper = kind.trim().toUpperCase(Locale.ROOT);
+        return "EXTENDS".equals(upper) || "IMPLEMENTS".equals(upper);
+    }
+
+    private String extractSimpleNameFromTypeRef(String typeRef) {
+        String normalized = normalizeTypeRefForLookup(typeRef);
+        if (normalized == null) return null;
+        int dot = normalized.lastIndexOf('.');
+        String simpleName = dot >= 0 ? normalized.substring(dot + 1) : normalized;
+        return simpleName.isBlank() ? null : simpleName;
     }
 
     private List<String> buildTypeLookupCandidates(String raw) {
