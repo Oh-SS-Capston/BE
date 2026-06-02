@@ -306,6 +306,16 @@ public class SuperClusterBuildService {
                     return s.getModuleAffinity().values().iterator().next(); // 첫 번째 = dominant (내림차순 정렬)
                 })
                 .average().orElse(0.0);
+        int weightedMemberCount = superSubsystems.stream()
+                .mapToInt(SuperSubsystem::getMemberCount)
+                .sum();
+        double memberWeightedDominantRatio = weightedMemberCount == 0 ? 0.0 : superSubsystems.stream()
+                .mapToDouble(s -> {
+                    if (s.getModuleAffinity() == null || s.getModuleAffinity().isEmpty()) return 0.0;
+                    double dominantRatio = s.getModuleAffinity().values().iterator().next();
+                    return dominantRatio * s.getMemberCount();
+                })
+                .sum() / weightedMemberCount;
 
         long nodesWithModuleId = nodeIndex.values().stream()
                 .filter(n -> n.getModuleId() != null).count();
@@ -319,6 +329,7 @@ public class SuperClusterBuildService {
                 .foldRatio(round3(foldRatio))
                 .superMiscCount(superMiscCount)
                 .avgDominantRatio(round3(avgDominantRatio))
+                .memberWeightedDominantRatio(round3(memberWeightedDominantRatio))
                 .moduleIdCoverage(round3(moduleIdCoverage))
                 .fallbackNodeCount(fallbackNodeCount)
                 .build();

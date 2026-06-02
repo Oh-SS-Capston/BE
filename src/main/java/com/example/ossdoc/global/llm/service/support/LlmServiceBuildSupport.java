@@ -156,12 +156,7 @@ public class LlmServiceBuildSupport {
             item.put("actionabilityScore", guide.quality().actionabilityScore());
 
             ObjectNode slotEvidence = item.putObject("slotEvidence");
-            putIfText(slotEvidence, "beforeCall", guide.evidenceAnchor());
-            putIfText(slotEvidence, "doCall", guide.evidenceAnchor());
-            putIfText(slotEvidence, "successCheck", guide.evidenceAnchor());
-            putIfText(slotEvidence, "failureSymptom", guide.evidenceAnchor());
-            putIfText(slotEvidence, "nextAction", guide.evidenceAnchor());
-            slotEvidence.put("slotEvidenceConfidence", guide.quality().slotEvidenceConfidence());
+            writeSlotEvidence(slotEvidence, guide.slotEvidence());
 
             ObjectNode evidence = item.putObject("evidence");
             putIfText(evidence, "filePath", filePath);
@@ -971,12 +966,7 @@ public class LlmServiceBuildSupport {
             card.put("actionabilityScore", guide.quality().actionabilityScore());
 
             ObjectNode slotEvidence = card.putObject("slotEvidence");
-            putIfText(slotEvidence, "beforeCall", guide.evidenceAnchor());
-            putIfText(slotEvidence, "doCall", guide.evidenceAnchor());
-            putIfText(slotEvidence, "successCheck", guide.evidenceAnchor());
-            putIfText(slotEvidence, "failureSymptom", guide.evidenceAnchor());
-            putIfText(slotEvidence, "nextAction", guide.evidenceAnchor());
-            slotEvidence.put("slotEvidenceConfidence", guide.quality().slotEvidenceConfidence());
+            writeSlotEvidence(slotEvidence, guide.slotEvidence());
             card.put("inputs", extractInputs(seed.path("signatureHint").asText("")));
             card.put("returns", extractReturns(seed.path("signatureHint").asText("")));
             card.put("changesState", inferStateChange(methodName));
@@ -1818,6 +1808,18 @@ public class LlmServiceBuildSupport {
         }
     }
 
+    private void writeSlotEvidence(ObjectNode node, ApiDocGuideSupport.SlotEvidence evidence) {
+        if (node == null || evidence == null) {
+            return;
+        }
+        putIfText(node, "beforeCall", evidence.beforeCall());
+        putIfText(node, "doCall", evidence.doCall());
+        putIfText(node, "successCheck", evidence.successCheck());
+        putIfText(node, "failureSymptom", evidence.failureSymptom());
+        putIfText(node, "nextAction", evidence.nextAction());
+        node.put("slotEvidenceConfidence", firstNonBlank(evidence.confidence(), "method_level"));
+    }
+
     private String safeText(String value) {
         return value == null ? "" : value.trim();
     }
@@ -1855,7 +1857,5 @@ public class LlmServiceBuildSupport {
         }
     }
 }
-
-
 
 

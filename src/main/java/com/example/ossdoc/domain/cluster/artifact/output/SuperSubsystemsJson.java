@@ -38,6 +38,7 @@ public class SuperSubsystemsJson {
         private double foldRatio;
         private int superMiscCount;
         private double avgDominantRatio;
+        private double memberWeightedDominantRatio;
         private double moduleIdCoverage;
         private int fallbackNodeCount;
     }

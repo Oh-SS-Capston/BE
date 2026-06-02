@@ -91,6 +91,9 @@ public class EntryPointJsonCodec {
         List<EntryPointCandidate> candidates = deserialize(meta);
         Set<String> ids = new HashSet<>();
         for (EntryPointCandidate c : candidates) {
+            if ("EXAMPLE".equals(c.getRole())) {
+                continue;
+            }
             if (EntryPointDetectService.confidenceRank(c.getConfidence()) >= minRank) {
                 ids.add(c.getSymbolId());
             }

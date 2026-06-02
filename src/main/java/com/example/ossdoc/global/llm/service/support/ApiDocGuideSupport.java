@@ -62,14 +62,17 @@ public final class ApiDocGuideSupport {
 
         GuideSlots slots = new GuideSlots(beforeCall, doCall, successCheck, failureSymptom, nextAction);
         String narrative = composeNarrative(slots);
-        GuideQuality quality = evaluateQuality(slots, anchor, narrative, methodName, methodFqn, classFqn, filePath);
+        SlotEvidence slotEvidence = buildSlotEvidence(filePath, startLine, endLine);
+        GuideQuality quality = evaluateQuality(slots, anchor, narrative, methodName, methodFqn, classFqn, filePath,
+                slotEvidence.confidence());
 
         return new GuideView(
                 normalizedSummary,
                 narrative,
                 slots,
                 quality,
-                anchor
+                anchor,
+                slotEvidence
         );
     }
 
@@ -175,7 +178,7 @@ public final class ApiDocGuideSupport {
     }
 
     private static GuideQuality evaluateQuality(GuideSlots slots, String anchor, String narrative,
-            String methodName, String methodFqn, String classFqn, String filePath) {
+            String methodName, String methodFqn, String classFqn, String filePath, String slotEvidenceConfidence) {
         List<String> texts = List.of(
                 slots.beforeCall(),
                 slots.doCall(),
@@ -226,7 +229,7 @@ public final class ApiDocGuideSupport {
         // P1-3: targetSuitabilityScore + slotEvidenceConfidence
         double targetSuitability = computeTargetSuitabilityScore(methodName, methodFqn, classFqn, filePath);
         return new GuideQuality(actionabilityScore, slotCoverage, evidenceCoverage, forbiddenRate, repetitionRate,
-                targetSuitability, "method_level");
+                targetSuitability, slotEvidenceConfidence);
     }
 
     private static String sanitizeSlot(String text) {
@@ -264,6 +267,28 @@ public final class ApiDocGuideSupport {
             return path + ":" + startLine + "-" + endLine;
         }
         return path + ":" + startLine;
+    }
+
+    private static SlotEvidence buildSlotEvidence(String filePath, Integer startLine, Integer endLine) {
+        String path = safeText(filePath);
+        String methodAnchor = buildEvidenceAnchor(filePath, startLine, endLine);
+        if (path.isBlank() || startLine == null || startLine <= 0 || endLine == null || endLine < startLine) {
+            return SlotEvidence.methodLevel(methodAnchor);
+        }
+
+        int lineCount = endLine - startLine + 1;
+        if (lineCount < SLOT_COUNT) {
+            return SlotEvidence.methodLevel(methodAnchor);
+        }
+
+        return new SlotEvidence(
+                path + ":" + startLine,
+                path + ":" + (startLine + Math.max(1, lineCount / 4)),
+                path + ":" + (startLine + Math.max(2, lineCount / 2)),
+                path + ":" + (startLine + Math.max(3, (lineCount * 3) / 4)),
+                path + ":" + endLine,
+                "slot_line"
+        );
     }
 
     private static String normalizeForRepeat(String text) {
@@ -336,12 +361,26 @@ public final class ApiDocGuideSupport {
     ) {
     }
 
+    public record SlotEvidence(
+            String beforeCall,
+            String doCall,
+            String successCheck,
+            String failureSymptom,
+            String nextAction,
+            String confidence
+    ) {
+        private static SlotEvidence methodLevel(String anchor) {
+            return new SlotEvidence(anchor, anchor, anchor, anchor, anchor, "method_level");
+        }
+    }
+
     public record GuideView(
             String summaryRaw,
             String narrative,
             GuideSlots slots,
             GuideQuality quality,
-            String evidenceAnchor
+            String evidenceAnchor,
+            SlotEvidence slotEvidence
     ) {
     }
 }

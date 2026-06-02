@@ -31,7 +31,7 @@ import java.util.stream.Collectors;
 /**
  * 역할: EntryPointPlan.md 파이프라인 구현체.
  *
- * Phase 1 (HIGH 신호): README 언급, Javadoc @apiNote 키워드, 예제 코드 참조
+ * Phase 1 (HIGH 신호): README 언급, Javadoc @apiNote 키워드
  * Phase 2 (점수 누적): public 생성자 / static factory / builder
  * Phase 3 (점수 누적): 네이밍 컨벤션, facade 구조(public 메서드 수)
  * Phase 4 (점수 누적): 다른 public API 반환 타입 등장 빈도
@@ -94,16 +94,21 @@ public class EntryPointDetectService {
         FactsSignals factsSignals = loadFactsSignals(runId);
         Set<String> exportedPackages = loadExportedPackages(allSymbols);
         Set<String> implementorSymbolIds = loadSymbolsWithOutboundInheritance(runId);
+        ModuleRoleIndex moduleRoleIndex = loadModuleRoleIndex(runId);
 
         List<EntryPointCandidate> candidates = new ArrayList<>();
 
         for (SymbolEntity symbol : allSymbols) {
             if (symbol.getSymbolKind() != SymbolKind.TYPE) continue;
             if (!publicSymbolIds.contains(symbol.getSymbolId())) continue;
+            if (isExampleCandidate(symbol, moduleRoleIndex)) {
+                candidates.add(exampleCandidate(symbol));
+                continue;
+            }
             if (shouldExclude(symbol, exportedPackages, childMaps)) continue;
 
             PhaseResult result = evaluatePhases(
-                    symbol, childMaps, returnedByPublicApi, factsSignals, implementorSymbolIds);
+                    symbol, childMaps, returnedByPublicApi, factsSignals, implementorSymbolIds, moduleRoleIndex);
             if ("NONE".equals(result.confidence())) continue;
 
             candidates.add(EntryPointCandidate.builder()
@@ -124,6 +129,7 @@ public class EntryPointDetectService {
 
         candidates.sort(Comparator
                 .comparingInt((EntryPointCandidate c) -> confidenceOrder(c.getConfidence()))
+                .thenComparingInt(c -> "EXAMPLE".equals(c.getRole()) ? 1 : 0)
                 .thenComparingInt(c -> -c.getScore()));
 
         return List.copyOf(candidates);
@@ -265,6 +271,35 @@ public class EntryPointDetectService {
         return Set.copyOf(result);
     }
 
+    private ModuleRoleIndex loadModuleRoleIndex(String runId) {
+        Optional<Artifact> opt = artifactRepository
+                .findTopByRun_RunIdAndKindOrderByCreatedAtDesc(runId, ArtifactKind.BUILD_MANIFEST);
+        if (opt.isEmpty()) {
+            return ModuleRoleIndex.empty();
+        }
+
+        Map<String, ModuleRole> bySourceRoot = new HashMap<>();
+        JsonNode modules = opt.get().getMeta().path("modules");
+        if (!modules.isArray()) {
+            return ModuleRoleIndex.empty();
+        }
+
+        for (JsonNode module : modules) {
+            String moduleId = module.path("moduleId").asText("");
+            String name = module.path("name").asText("");
+            String artifactId = module.path("artifactId").asText("");
+            String groupId = module.path("groupId").asText("");
+            String roleText = (moduleId + " " + name + " " + artifactId).toLowerCase(Locale.ROOT);
+            boolean exampleModule = containsAny(roleText,
+                    "example", "examples", "sample", "samples", "demo", "demos", "documentation", "docs", "test", "tests");
+            boolean publishedLibrary = !exampleModule && !groupId.isBlank() && !artifactId.isBlank();
+            ModuleRole role = new ModuleRole(exampleModule, publishedLibrary);
+            registerModuleRoots(bySourceRoot, module.path("sourceRoots"), role);
+            registerModuleRoots(bySourceRoot, module.path("testRoots"), new ModuleRole(true, false));
+        }
+        return new ModuleRoleIndex(Map.copyOf(bySourceRoot));
+    }
+
     // ─── 필터 ────────────────────────────────────────────────────────────────
 
     /**
@@ -332,7 +367,8 @@ public class EntryPointDetectService {
                                         ChildMaps childMaps,
                                         Map<String, Integer> returnedByPublicApi,
                                         FactsSignals factsSignals,
-                                        Set<String> implementorSymbolIds) {
+                                        Set<String> implementorSymbolIds,
+                                        ModuleRoleIndex moduleRoleIndex) {
         List<String> signals  = new ArrayList<>();
         String simpleName     = symbol.getSimpleName();
         String symbolId       = symbol.getSymbolId();
@@ -354,6 +390,10 @@ public class EntryPointDetectService {
         if (!signals.isEmpty()) {
             int bonus = phase2Score(symbolId, childMaps, signals)
                     + phase3Score(symbol, childMaps, signals);
+            if (moduleRoleIndex.isPublishedLibrary(symbol)) {
+                signals.add("PUBLISHED_LIBRARY_MODULE");
+                bonus += 1;
+            }
             String role = determineRole(symbolId, signals, returnedByPublicApi);
             return new PhaseResult("HIGH", role, signals, 10 + bonus);
         }
@@ -367,6 +407,10 @@ public class EntryPointDetectService {
         if ("EXPERIMENTAL".equals(apiGuardianStatus)) {
             signals.add("API_GUARDIAN_EXPERIMENTAL");
             score = Math.max(score, MED_MIN_SCORE);
+        }
+        if (score > 0 && moduleRoleIndex.isPublishedLibrary(symbol)) {
+            signals.add("PUBLISHED_LIBRARY_MODULE");
+            score += 1;
         }
 
         if (score == 0) return new PhaseResult("NONE", null, signals, 0);
@@ -501,6 +545,35 @@ public class EntryPointDetectService {
         if (path == null) return false;
         String normalized = path.replace('\\', '/').toLowerCase(Locale.ROOT);
         return EXCLUDED_PATH_MARKERS.stream().anyMatch(normalized::contains);
+    }
+
+    private boolean isExampleCandidate(SymbolEntity symbol, ModuleRoleIndex moduleRoleIndex) {
+        return hasExampleSourcePath(symbol)
+                || hasExamplePackage(symbol.getQualifiedName())
+                || moduleRoleIndex.isExampleModule(symbol);
+    }
+
+    private boolean hasExampleSourcePath(SymbolEntity symbol) {
+        if (symbol.getSourceFile() == null || symbol.getSourceFile().getPath() == null) return false;
+        String normalized = symbol.getSourceFile().getPath().replace('\\', '/').toLowerCase(Locale.ROOT);
+        return containsAny(normalized, "/example/", "/examples/", "/sample/", "/samples/", "/demo/", "/demos/");
+    }
+
+    private EntryPointCandidate exampleCandidate(SymbolEntity symbol) {
+        return EntryPointCandidate.builder()
+                .symbolId(symbol.getSymbolId())
+                .qualifiedName(symbol.getQualifiedName())
+                .ownerTypeFqn(resolveOwnerTypeFqn(symbol))
+                .simpleName(symbol.getSimpleName())
+                .typeKind(resolveTypeKind(symbol))
+                .sourceFile(resolveSourceFilePath(symbol))
+                .startLine(symbol.getSourceStartLine())
+                .endLine(symbol.getSourceEndLine())
+                .role("EXAMPLE")
+                .confidence("LOW")
+                .signals(List.of("EXAMPLE_CODE_REFERENCE"))
+                .score(0)
+                .build();
     }
 
     // P0-1: com.example.* / example.* 패키지는 예제 코드이므로 Public API 후보에서 제외
@@ -667,6 +740,37 @@ public class EntryPointDetectService {
         return "";
     }
 
+    private void registerModuleRoots(Map<String, ModuleRole> bySourceRoot, JsonNode roots, ModuleRole role) {
+        if (!roots.isArray()) return;
+        for (JsonNode root : roots) {
+            String normalized = normalizeSourceRoot(root.asText(""));
+            if (!normalized.isBlank()) {
+                bySourceRoot.putIfAbsent(normalized, role);
+            }
+        }
+    }
+
+    private String normalizeSourceRoot(String path) {
+        if (path == null || path.isBlank()) return "";
+        String normalized = path.replace('\\', '/').trim();
+        int repoIdx = normalized.lastIndexOf("/repo/");
+        if (repoIdx >= 0) {
+            normalized = normalized.substring(repoIdx + "/repo/".length());
+        }
+        while (normalized.startsWith("/")) {
+            normalized = normalized.substring(1);
+        }
+        return normalized;
+    }
+
+    private boolean containsAny(String value, String... needles) {
+        if (value == null || value.isBlank()) return false;
+        for (String needle : needles) {
+            if (value.contains(needle)) return true;
+        }
+        return false;
+    }
+
     /** 강도 비교용 등급. HIGH > MED > LOW. 알 수 없는 값은 0. 대소문자·공백 무시. */
     public static int confidenceRank(String confidence) {
         if (confidence == null) return 0;
@@ -705,4 +809,40 @@ public class EntryPointDetectService {
             List<String> signals,
             int score
     ) {}
+
+    private record ModuleRole(boolean exampleModule, boolean publishedLibrary) {}
+
+    private record ModuleRoleIndex(Map<String, ModuleRole> bySourceRoot) {
+        private static ModuleRoleIndex empty() {
+            return new ModuleRoleIndex(Map.of());
+        }
+
+        private boolean isExampleModule(SymbolEntity symbol) {
+            ModuleRole role = resolve(symbol);
+            return role != null && role.exampleModule();
+        }
+
+        private boolean isPublishedLibrary(SymbolEntity symbol) {
+            ModuleRole role = resolve(symbol);
+            return role != null && role.publishedLibrary();
+        }
+
+        private ModuleRole resolve(SymbolEntity symbol) {
+            if (symbol == null || symbol.getSourceRoot() == null) return null;
+            return bySourceRoot.get(normalize(symbol.getSourceRoot()));
+        }
+
+        private static String normalize(String path) {
+            if (path == null || path.isBlank()) return "";
+            String normalized = path.replace('\\', '/').trim();
+            int repoIdx = normalized.lastIndexOf("/repo/");
+            if (repoIdx >= 0) {
+                normalized = normalized.substring(repoIdx + "/repo/".length());
+            }
+            while (normalized.startsWith("/")) {
+                normalized = normalized.substring(1);
+            }
+            return normalized;
+        }
+    }
 }

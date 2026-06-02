@@ -68,10 +68,14 @@ public class ApiMapBuildService {
 
         // Extension Point 우선 원칙: 동일 symbolId가 양쪽에 존재하면 entry_points에서 제거
         // HIGH confidence entry point는 예외 유지 (직접 진입점 신호가 충분히 강한 경우)
-        List<EntryPointCandidate> dedupedEntryPoints = deduplicateEntryPoints(entryPoints, extensionPoints);
+        List<EntryPointCandidate> apiEntryPoints = entryPoints.stream()
+                .filter(ep -> !"EXAMPLE".equals(ep.getRole()))
+                .toList();
+        List<EntryPointCandidate> dedupedEntryPoints = deduplicateEntryPoints(apiEntryPoints, extensionPoints);
 
-        log.info("[PUBLICAPI] runId={}, entryPoints={} (deduped from {}), extensionPoints={}",
-                runId, dedupedEntryPoints.size(), entryPoints.size(), extensionPoints.size());
+        log.info("[PUBLICAPI] runId={}, entryPoints={} (deduped from {}, examples excluded={}), extensionPoints={}",
+                runId, dedupedEntryPoints.size(), apiEntryPoints.size(),
+                entryPoints.size() - apiEntryPoints.size(), extensionPoints.size());
 
         String generatedAt = Instant.now().toString();
 
