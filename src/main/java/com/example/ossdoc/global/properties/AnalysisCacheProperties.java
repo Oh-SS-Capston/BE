@@ -28,19 +28,19 @@ public class AnalysisCacheProperties {
      * LLM 프로필 버전입니다.
      * 모델/파라미터 정책이 바뀌면 이 값을 올립니다.
      */
-    private String llmProfileVersion = "llm-profile-v1";
+    private String llmProfileVersion = "llm-profile-sonnet-v2";
 
     /**
      * 프롬프트 템플릿 버전입니다.
      * 프롬프트 문구/구조 변경 시 이 값을 올립니다.
      */
-    private String promptTemplateVersion = "prompt-v1";
+    private String promptTemplateVersion = "prompt-v2";
 
     /**
      * 출력 JSON 스키마 버전입니다.
      * 계약 필드가 바뀌면 이 값을 올립니다.
      */
-    private String outputSchemaVersion = "schema-v1";
+    private String outputSchemaVersion = "schema-v2";
 
     /**
      * 실행 옵션 시그니처 기본값입니다.

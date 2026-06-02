@@ -51,14 +51,14 @@ public class LlmService {
     private static final String PATH_API_DOCS = "llm/api_docs.json";
     private static final String PATH_FILE_TREE_DOCS = "llm/file_tree_docs.json";
 
-    private static final int MAX_CAUTIONS = 12;
-    private static final int MAX_SCENARIOS = 2;
-    private static final int MAX_STEPS_PER_SCENARIO = 4;
+    private static final int MAX_CAUTIONS = 20;
+    private static final int MAX_SCENARIOS = 4;
+    private static final int MAX_STEPS_PER_SCENARIO = 8;
 
-    private static final int TOKENS_CAUTIONS = 4000;
-    private static final int TOKENS_SCENARIOS = 10000;
-    private static final int CONTEXT_LIMIT_CAUTIONS_COMPACT = 14000;
-    private static final int CONTEXT_LIMIT_SCENARIOS_COMPACT = 22000;
+    private static final int TOKENS_CAUTIONS = 12000;
+    private static final int TOKENS_SCENARIOS = 20000;
+    private static final int CONTEXT_LIMIT_CAUTIONS_COMPACT = 32000;
+    private static final int CONTEXT_LIMIT_SCENARIOS_COMPACT = 48000;
 
     private final ObjectMapper objectMapper;
     private final ArtifactService artifactService;
@@ -221,7 +221,8 @@ public class LlmService {
         out.set("coreMethods", llmServiceBuildSupport.buildCoreMethodCards(
                 structure.path("coreMethodSeed"),
                 structure.path("methodFlowSeed"),
-                refinedRules.path("cautions")
+                refinedRules.path("cautions"),
+                scenarioSpecs.path("scenarios")
         ));
 
         // api_flow 보강: TYPE FQN 기준으로 coreMethods에 연결 후 apiEntries가 상속
