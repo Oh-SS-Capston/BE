@@ -148,8 +148,11 @@ public class LlmServiceBuildSupport {
             guideQuality.put("evidenceCoverage", guide.quality().evidenceCoverage());
             guideQuality.put("forbiddenPhraseRate", guide.quality().forbiddenPhraseRate());
             guideQuality.put("repetitionRate", guide.quality().repetitionRate());
+            guideQuality.put("targetSuitabilityScore", guide.quality().targetSuitabilityScore());
+            guideQuality.put("slotEvidenceConfidence", guide.quality().slotEvidenceConfidence());
             guideQuality.put("threshold", ACTIONABILITY_THRESHOLD);
-            guideQuality.put("meetsThreshold", guide.quality().actionabilityScore() >= ACTIONABILITY_THRESHOLD);
+            guideQuality.put("meetsThreshold", guide.quality().actionabilityScore() >= ACTIONABILITY_THRESHOLD
+                    && guide.quality().targetSuitabilityScore() >= 1.0);
             item.put("actionabilityScore", guide.quality().actionabilityScore());
 
             ObjectNode slotEvidence = item.putObject("slotEvidence");
@@ -158,6 +161,7 @@ public class LlmServiceBuildSupport {
             putIfText(slotEvidence, "successCheck", guide.evidenceAnchor());
             putIfText(slotEvidence, "failureSymptom", guide.evidenceAnchor());
             putIfText(slotEvidence, "nextAction", guide.evidenceAnchor());
+            slotEvidence.put("slotEvidenceConfidence", guide.quality().slotEvidenceConfidence());
 
             ObjectNode evidence = item.putObject("evidence");
             putIfText(evidence, "filePath", filePath);
@@ -530,6 +534,7 @@ public class LlmServiceBuildSupport {
         putIfText(slotEvidence, "successCheck", evidenceAnchor);
         putIfText(slotEvidence, "failureSymptom", evidenceAnchor);
         putIfText(slotEvidence, "nextAction", evidenceAnchor);
+        slotEvidence.put("slotEvidenceConfidence", "method_level");
 
         double slotCoverage = computeSlotCoverage(before, call, success, failure, next);
         double evidenceCoverage = evidenceAnchor.isBlank() ? 0.0d : 1.0d;
@@ -550,6 +555,7 @@ public class LlmServiceBuildSupport {
         quality.put("evidenceCoverage", round2(evidenceCoverage));
         quality.put("forbiddenPhraseRate", round2(forbiddenRate));
         quality.put("repetitionRate", round2(repetitionRate));
+        quality.put("slotEvidenceConfidence", "method_level");
         quality.put("threshold", ACTIONABILITY_THRESHOLD);
         quality.put("meetsThreshold", actionabilityScore >= ACTIONABILITY_THRESHOLD);
     }
@@ -956,8 +962,12 @@ public class LlmServiceBuildSupport {
             guideQuality.put("evidenceCoverage", guide.quality().evidenceCoverage());
             guideQuality.put("forbiddenPhraseRate", guide.quality().forbiddenPhraseRate());
             guideQuality.put("repetitionRate", guide.quality().repetitionRate());
+            guideQuality.put("targetSuitabilityScore", guide.quality().targetSuitabilityScore());
+            guideQuality.put("slotEvidenceConfidence", guide.quality().slotEvidenceConfidence());
             guideQuality.put("threshold", ACTIONABILITY_THRESHOLD);
-            guideQuality.put("meetsThreshold", guide.quality().actionabilityScore() >= ACTIONABILITY_THRESHOLD);
+            // P1-3: meetsThreshold = actionability 충족 AND targetSuitability 충족(합성/예제 제외)
+            guideQuality.put("meetsThreshold", guide.quality().actionabilityScore() >= ACTIONABILITY_THRESHOLD
+                    && guide.quality().targetSuitabilityScore() >= 1.0);
             card.put("actionabilityScore", guide.quality().actionabilityScore());
 
             ObjectNode slotEvidence = card.putObject("slotEvidence");
@@ -966,6 +976,7 @@ public class LlmServiceBuildSupport {
             putIfText(slotEvidence, "successCheck", guide.evidenceAnchor());
             putIfText(slotEvidence, "failureSymptom", guide.evidenceAnchor());
             putIfText(slotEvidence, "nextAction", guide.evidenceAnchor());
+            slotEvidence.put("slotEvidenceConfidence", guide.quality().slotEvidenceConfidence());
             card.put("inputs", extractInputs(seed.path("signatureHint").asText("")));
             card.put("returns", extractReturns(seed.path("signatureHint").asText("")));
             card.put("changesState", inferStateChange(methodName));
@@ -1205,6 +1216,8 @@ public class LlmServiceBuildSupport {
             out.put("evidenceCoverageAvg", 0.0d);
             out.put("forbiddenPhraseRateAvg", 0.0d);
             out.put("repetitionRateAvg", 0.0d);
+            out.put("targetSuitabilityAvg", 0.0d);
+            out.put("narrativeDiversityAvg", 0.0d);
             out.put("meetsThreshold", false);
             return out;
         }
@@ -1217,6 +1230,8 @@ public class LlmServiceBuildSupport {
         double evidenceCoverageSum = 0.0d;
         double forbiddenRateSum = 0.0d;
         double repetitionRateSum = 0.0d;
+        double targetSuitabilitySum = 0.0d;
+        double narrativeDiversitySum = 0.0d;
 
         for (int i = 0; i < coreMethods.size(); i++) {
             JsonNode method = coreMethods.get(i);
@@ -1226,17 +1241,23 @@ public class LlmServiceBuildSupport {
             double evidenceCoverage = quality.path("evidenceCoverage").asDouble(0.0d);
             double forbiddenRate = quality.path("forbiddenPhraseRate").asDouble(0.0d);
             double repetitionRate = quality.path("repetitionRate").asDouble(0.0d);
+            // P1-3: targetSuitability + narrativeDiversity (= 1 - repetitionRate)
+            double targetSuitability = quality.path("targetSuitabilityScore").asDouble(1.0d);
+            double narrativeDiversity = 1.0d - repetitionRate;
 
             count++;
             totalScore += score;
             minScore = Math.min(minScore, score);
-            if (score < ACTIONABILITY_THRESHOLD) {
+            // P1-3: meetsThreshold = actionability 기준 AND targetSuitability 충족
+            if (score < ACTIONABILITY_THRESHOLD || targetSuitability < 1.0d) {
                 belowThreshold++;
             }
             slotCoverageSum += slotCoverage;
             evidenceCoverageSum += evidenceCoverage;
             forbiddenRateSum += forbiddenRate;
             repetitionRateSum += repetitionRate;
+            targetSuitabilitySum += targetSuitability;
+            narrativeDiversitySum += narrativeDiversity;
         }
 
         out.put("methodCount", count);
@@ -1247,6 +1268,8 @@ public class LlmServiceBuildSupport {
         out.put("evidenceCoverageAvg", round2(evidenceCoverageSum / count));
         out.put("forbiddenPhraseRateAvg", round2(forbiddenRateSum / count));
         out.put("repetitionRateAvg", round2(repetitionRateSum / count));
+        out.put("targetSuitabilityAvg", round2(targetSuitabilitySum / count));
+        out.put("narrativeDiversityAvg", round2(narrativeDiversitySum / count));
         out.put("meetsThreshold", belowThreshold == 0);
         return out;
     }

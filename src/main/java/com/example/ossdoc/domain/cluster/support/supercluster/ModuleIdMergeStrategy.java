@@ -3,6 +3,7 @@ package com.example.ossdoc.domain.cluster.support.supercluster;
 import com.example.ossdoc.domain.cluster.model.ProjectedNode;
 import com.example.ossdoc.domain.cluster.model.subsystem.Subsystem;
 import com.example.ossdoc.domain.cluster.model.subsystem.SuperSubsystem;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
@@ -21,10 +22,15 @@ import java.util.stream.Stream;
  *   <li>sup_NNN ID 할당 (super_misc 마지막)</li>
  * </ol>
  */
+@Slf4j
 @Component
 public class ModuleIdMergeStrategy implements SuperClusterMergeStrategy {
 
     private static final String SUPER_MISC_KEY = "super_misc";
+    // P0-4: 단일 지배 모듈 감지 임계값
+    private static final double DOMINANCE_RATIO_THRESHOLD  = 0.7;
+    private static final int    DOMINANCE_MIN_LEVEL2_COUNT = 2;
+    private static final int    FALLBACK_PKG_PREFIX_DEPTH  = 3;
 
     @Override
     public String strategyName() {
@@ -48,6 +54,9 @@ public class ModuleIdMergeStrategy implements SuperClusterMergeStrategy {
         List<SuperSubsystem> initial = grouped.entrySet().stream()
                 .map(e -> buildSuperSubsystem(e.getKey(), e.getValue(), ctx))
                 .collect(Collectors.toList());
+
+        // Step 3-b: P0-4 — 단일 지배 모듈 감지 → 패키지 prefix 재분할
+        initial = handleDominance(initial, ctx);
 
         // Step 4: 소형 그룹 흡수 또는 super_misc
         int minSize = ctx.config().getMinSuperSize();
@@ -279,6 +288,94 @@ public class ModuleIdMergeStrategy implements SuperClusterMergeStrategy {
                 .moduleAffinity(computeAffinity(memberSymbolIds, ctx))
                 .packageRoots(packageRoots)
                 .build();
+    }
+
+    // ── P0-4: 단일 지배 모듈 감지 및 패키지 prefix 재분할 ──────────────────────
+
+    /**
+     * 단일 모듈이 super-cluster를 지배하는 경우(ratio ≥ 0.7 또는 level2Count ≤ 2),
+     * 지배 그룹을 packageRootCommonPrefixDepth=3 기준으로 재분할한다.
+     * 다중 모듈 repo는 조건 미충족 → 기존 흐름 보존.
+     */
+    private List<SuperSubsystem> handleDominance(List<SuperSubsystem> supers, MergeContext ctx) {
+        if (supers.isEmpty()) return supers;
+
+        int totalMembers = supers.stream().mapToInt(SuperSubsystem::getMemberCount).sum();
+        if (totalMembers == 0) return supers;
+
+        int maxMembers = supers.stream().mapToInt(SuperSubsystem::getMemberCount).max().orElse(0);
+        double largestRatio = (double) maxMembers / totalMembers;
+        int level2Count = supers.size();
+
+        boolean dominated = largestRatio >= DOMINANCE_RATIO_THRESHOLD || level2Count <= DOMINANCE_MIN_LEVEL2_COUNT;
+        if (!dominated) return supers;
+
+        SuperSubsystem dominantGroup = supers.stream()
+                .filter(s -> !SUPER_MISC_KEY.equals(s.getCanonicalKey()))
+                .max(Comparator.comparingInt(SuperSubsystem::getMemberCount))
+                .orElse(null);
+        if (dominantGroup == null) return supers;
+
+        log.info("[SUPER-CLUSTER] dominance detected. level2Count={}, largestRatio={}, key='{}'. re-splitting by pkg depth={}",
+                level2Count, String.format("%.2f", largestRatio), dominantGroup.getCanonicalKey(), FALLBACK_PKG_PREFIX_DEPTH);
+
+        List<SuperSubsystem> split = splitByPackagePrefix(dominantGroup, ctx, FALLBACK_PKG_PREFIX_DEPTH);
+
+        List<SuperSubsystem> result = new ArrayList<>();
+        for (SuperSubsystem s : supers) {
+            if (s == dominantGroup) {
+                result.addAll(split);
+            } else {
+                result.add(s);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * 지배 그룹의 level-1 subsystem들을 packageName prefix(depth) 다수결로 재분류한다.
+     * depth 3에서 분리가 안 되면 depth+1로 재귀 시도(최대 depth=5).
+     */
+    private List<SuperSubsystem> splitByPackagePrefix(SuperSubsystem dominant, MergeContext ctx, int depth) {
+        Set<String> dominantSubIds = new HashSet<>(dominant.getMemberSubsystemIds());
+
+        Map<String, List<Subsystem>> prefixGroups = new LinkedHashMap<>();
+        for (Subsystem sub : ctx.level1Subsystems()) {
+            if (!dominantSubIds.contains(sub.getSubsystemId())) continue;
+
+            Map<String, Integer> votes = new HashMap<>();
+            for (String symbolId : sub.getMemberSymbolIds()) {
+                ProjectedNode node = ctx.nodeIndex().get(symbolId);
+                if (node == null) continue;
+                String prefix = extractPackagePrefix(node.getPackageName(), depth);
+                if (prefix != null && !prefix.isBlank()) {
+                    votes.merge(prefix, 1, Integer::sum);
+                }
+            }
+
+            String prefix = votes.isEmpty() ? dominant.getCanonicalKey() :
+                    votes.entrySet().stream()
+                         .max(Map.Entry.comparingByValue())
+                         .map(Map.Entry::getKey)
+                         .orElse(dominant.getCanonicalKey());
+
+            prefixGroups.computeIfAbsent(prefix, k -> new ArrayList<>()).add(sub);
+        }
+
+        if (prefixGroups.size() <= 1 && depth < 5) {
+            return splitByPackagePrefix(dominant, ctx, depth + 1);
+        }
+        if (prefixGroups.size() <= 1) {
+            log.warn("[SUPER-CLUSTER] split failed even at depth={}. keeping dominant group as-is.", depth);
+            return List.of(dominant);
+        }
+
+        log.info("[SUPER-CLUSTER] split '{}' into {} groups at pkg depth={}",
+                dominant.getCanonicalKey(), prefixGroups.size(), depth);
+
+        return prefixGroups.entrySet().stream()
+                .map(e -> buildSuperSubsystem(e.getKey(), e.getValue(), ctx))
+                .collect(Collectors.toList());
     }
 
     // ── ID 할당 ───────────────────────────────────────────────────────────────

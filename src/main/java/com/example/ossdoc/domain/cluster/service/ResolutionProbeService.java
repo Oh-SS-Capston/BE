@@ -53,7 +53,8 @@ public class ResolutionProbeService {
         if (gammaMax <= gammaMin) gammaMax = gammaMin * 3.0;
 
         int minClusters = 3;
-        int maxClusters = Math.max(minClusters, Math.min(10, (int) Math.sqrt(n)));
+        // P0-3: 클러스터 상한 완화 — 기존 min(10,√N) 캡이 대규모 repo에서 거대 misc를 강제했으므로 상향
+        int maxClusters = Math.max(minClusters, Math.min(30, (int) Math.sqrt(n)));
 
         log.info("[CLUSTER-PROBE] start. n={}, totalWeight={}, gammaMin={}, gammaMax={}, targetClusters=[{},{}]",
                 n, String.format("%.3f", totalWeight),
@@ -78,15 +79,19 @@ public class ResolutionProbeService {
         ProbeResult best     = null;
         ProbeResult fallback = null; // 유효 범위 밖에서 범위에 가장 근접한 후보
         int bestIdx = -1;
+        // P0-3: 복합 목적함수 추적 (Q 단독 → Q - misc 페널티 - 최대클러스터 페널티)
+        double bestComposite = Double.NEGATIVE_INFINITY;
 
         for (int i = 0; i < candidates.size(); i++) {
             double resolution = candidates.get(i);
             CommunityResult cr = leidenCommunityService.detect(graph, resolution, iterations);
             int validCount = countValidClusters(cr.getClusters(), minClusterSize);
             double q = computeModularity(graph, cr);
+            double composite = computeCompositeScore(graph, cr, q, minClusterSize);
 
-            log.debug("[CLUSTER-PROBE] resolution={}, validClusters={}, Q={}",
-                    String.format("%.4f", resolution), validCount, String.format("%.4f", q));
+            log.debug("[CLUSTER-PROBE] resolution={}, validClusters={}, Q={}, composite={}",
+                    String.format("%.4f", resolution), validCount,
+                    String.format("%.4f", q), String.format("%.4f", composite));
 
             if (fallback == null || closerToRange(validCount, fallback.clusterCount(), minClusters, maxClusters)) {
                 fallback = new ProbeResult(resolution, cr, q, validCount);
@@ -94,9 +99,10 @@ public class ResolutionProbeService {
 
             if (validCount < minClusters || validCount > maxClusters) continue;
 
-            if (best == null || q > best.modularity()) {
+            if (best == null || composite > bestComposite) {
                 best = new ProbeResult(resolution, cr, q, validCount);
                 bestIdx = i;
+                bestComposite = composite;
             }
         }
 
@@ -113,14 +119,16 @@ public class ResolutionProbeService {
                         String.format("%.4f", gammaMin * 0.3), String.format("%.4f", gammaMin));
                 ProbeResult extended = probe(graph, gammaMin * 0.3, gammaMin, candidateCount,
                         minClusterSize, minClusters, maxClusters, iterations, extensionCount + 1);
-                return extended.modularity() > best.modularity() ? extended : best;
+                double extComposite = computeCompositeScore(graph, extended.communityResult(), extended.modularity(), minClusterSize);
+                return extComposite > bestComposite ? extended : best;
             }
             if (bestIdx == candidates.size() - 1) {
                 log.info("[CLUSTER-PROBE] best at upper bound. extending upper: [{}, {}]",
                         String.format("%.4f", gammaMax), String.format("%.4f", gammaMax * 2.5));
                 ProbeResult extended = probe(graph, gammaMax, gammaMax * 2.5, candidateCount,
                         minClusterSize, minClusters, maxClusters, iterations, extensionCount + 1);
-                return extended.modularity() > best.modularity() ? extended : best;
+                double extComposite = computeCompositeScore(graph, extended.communityResult(), extended.modularity(), minClusterSize);
+                return extComposite > bestComposite ? extended : best;
             }
         }
 
@@ -131,10 +139,45 @@ public class ResolutionProbeService {
             return fallback;
         }
 
-        log.info("[CLUSTER-PROBE] done. resolution={}, clusters={}, Q={}",
+        log.info("[CLUSTER-PROBE] done. resolution={}, clusters={}, Q={}, composite={}",
                 String.format("%.4f", best.resolution()), best.clusterCount(),
-                String.format("%.4f", best.modularity()));
+                String.format("%.4f", best.modularity()), String.format("%.4f", bestComposite));
         return best;
+    }
+
+    /**
+     * P0-3: 복합 목적함수 — Q 단독 선택 대신 misc 비율·최대 클러스터 비중 페널티 결합.
+     * score = Q - 0.5 × miscRatio - 0.3 × maxClusterShare
+     *
+     * α(0.5), β(0.3)는 초기 가중치; 4개 repo 결과로 튜닝 예정.
+     * miscRatio ↔ maxClusterShare 상관 관계를 고려해 β를 작게 설정.
+     */
+    private double computeCompositeScore(ProjectedGraph graph, CommunityResult cr, double q, int minClusterSize) {
+        int n = graph.getNodes().size();
+        if (n == 0) return q;
+        double miscRatio       = computeMiscRatio(cr.getClusters(), minClusterSize, n);
+        double maxClusterShare = computeMaxClusterShare(cr.getClusters(), n);
+        return q - 0.5 * miscRatio - 0.3 * maxClusterShare;
+    }
+
+    /** misc 비율: minClusterSize 미만 클러스터에 속한 노드 비율 */
+    private double computeMiscRatio(int[] clusters, int minClusterSize, int totalNodes) {
+        if (totalNodes == 0) return 0.0;
+        Map<Integer, Integer> counts = new HashMap<>();
+        for (int c : clusters) counts.merge(c, 1, Integer::sum);
+        int miscCount = counts.values().stream()
+                .filter(s -> s < minClusterSize)
+                .mapToInt(Integer::intValue).sum();
+        return (double) miscCount / totalNodes;
+    }
+
+    /** 최대 클러스터 비중: 단일 가장 큰 클러스터의 노드 비율 */
+    private double computeMaxClusterShare(int[] clusters, int totalNodes) {
+        if (totalNodes == 0) return 0.0;
+        Map<Integer, Integer> counts = new HashMap<>();
+        for (int c : clusters) counts.merge(c, 1, Integer::sum);
+        int max = counts.values().stream().mapToInt(Integer::intValue).max().orElse(0);
+        return (double) max / totalNodes;
     }
 
     /**

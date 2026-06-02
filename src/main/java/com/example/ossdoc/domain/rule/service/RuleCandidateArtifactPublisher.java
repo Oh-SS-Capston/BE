@@ -2,6 +2,7 @@ package com.example.ossdoc.domain.rule.service;
 
 import com.example.ossdoc.domain.artifact.entity.Artifact;
 import com.example.ossdoc.domain.artifact.enums.ArtifactKind;
+import com.example.ossdoc.domain.artifact.repository.ArtifactRepository;
 import com.example.ossdoc.domain.artifact.service.ArtifactService;
 import com.example.ossdoc.domain.graphstore.entity.Evidence;
 import com.example.ossdoc.domain.graphstore.entity.SymbolEntity;
@@ -78,6 +79,7 @@ public class RuleCandidateArtifactPublisher {
     private final SymbolEvidenceRepository symbolEvidenceRepository;
     private final EdgeRepository edgeRepository;
     private final ArtifactService artifactService;
+    private final ArtifactRepository artifactRepository;
     private final ObjectMapper objectMapper;
 
     /**
@@ -98,13 +100,15 @@ public class RuleCandidateArtifactPublisher {
 
         RuleCandidateSummaryJson summary = buildSummary(candidates);
 
+        Set<String> publicApiOwnerFqns = resolvePublicApiOwnerFqns(run.getRunId());
+
         List<RuleCandidateItem> items = new ArrayList<>();
         for (RuleCandidate candidate : candidates) {
             List<RuleCandidateEvidence> evidences =
                     evidencesByCandidateId.getOrDefault(candidate.getCandidateId(), List.of());
 
             CandidateQuality quality = evaluateQuality(candidate, evidences);
-            items.add(toItem(candidate, evidences, quality));
+            items.add(toItem(candidate, evidences, quality, publicApiOwnerFqns));
         }
 
         List<RuleMethodCardJson> methodCards = buildMethodCards(run.getRunId(), candidates);
@@ -440,14 +444,22 @@ public class RuleCandidateArtifactPublisher {
 
     /**
      * RuleCandidate 엔티티 + evidence 목록을 API/JSON 응답용 아이템으로 변환한다.
+     * publicApiOwnerFqns: API_SURFACE_JSON에서 추출한 공개 API 타입 FQN 집합 — 조인해 publicApiRelated를 산정한다.
      */
     private RuleCandidateItem toItem(
             RuleCandidate candidate,
             List<RuleCandidateEvidence> evidences,
-            CandidateQuality quality
+            CandidateQuality quality,
+            Set<String> publicApiOwnerFqns
     ) {
         SymbolEntity subject = candidate.getSubjectSymbol();
         List<RuleCandidateEvidenceJson> evidenceJson = toEvidenceJsonList(evidences);
+
+        boolean publicApiRelated = false;
+        if (subject != null && subject.getQualifiedName() != null) {
+            String ownerFqn = extractOwnerFqn(subject.getQualifiedName());
+            publicApiRelated = !ownerFqn.isBlank() && publicApiOwnerFqns.contains(ownerFqn);
+        }
 
         return RuleCandidateItem.builder()
                 .candidateId(candidate.getCandidateId())
@@ -464,7 +476,7 @@ public class RuleCandidateArtifactPublisher {
                 .fingerprint(candidate.getFingerprint())
                 .score(candidate.getScore())
                 .supportCount(candidate.getSupportCount())
-                .publicApiRelated(candidate.getPublicApiRelated())
+                .publicApiRelated(publicApiRelated)
                 .summary(candidate.getSummary())
                 .impact(candidate.getImpact())
                 .meta(candidate.getMeta())
@@ -474,6 +486,54 @@ public class RuleCandidateArtifactPublisher {
                 .evidenceCount(evidenceJson.size())
                 .evidences(evidenceJson)
                 .build();
+    }
+
+    /**
+     * API_SURFACE_JSON + API_MAP_JSON 에서 공개 API 타입 FQN 집합을 추출한다.
+     * entry_points + extension_points 양쪽을 수집해 규칙 대상 소유 타입과 조인에 사용한다.
+     */
+    private Set<String> resolvePublicApiOwnerFqns(String runId) {
+        Set<String> fqns = new HashSet<>();
+        try {
+            artifactRepository.findTopByRun_RunIdAndKindOrderByCreatedAtDesc(runId, ArtifactKind.API_SURFACE_JSON)
+                    .map(Artifact::getMeta)
+                    .ifPresent(meta -> {
+                        collectFqnsFromArray(fqns, meta.path("entry_points"));
+                        collectFqnsFromArray(fqns, meta.path("extension_points"));
+                    });
+            artifactRepository.findTopByRun_RunIdAndKindOrderByCreatedAtDesc(runId, ArtifactKind.API_MAP_JSON)
+                    .map(Artifact::getMeta)
+                    .ifPresent(meta -> {
+                        collectFqnsFromArray(fqns, meta.path("entry_points"));
+                        collectFqnsFromArray(fqns, meta.path("entryPoints"));
+                        collectFqnsFromArray(fqns, meta.path("extension_points"));
+                        collectFqnsFromArray(fqns, meta.path("extensionPoints"));
+                        collectFqnsFromArray(fqns, meta.path("coreClasses"));
+                    });
+        } catch (Exception e) {
+            log.warn("[RULE-MINING] publicApiOwnerFqns resolve failed. runId={}", runId, e);
+        }
+        return fqns;
+    }
+
+    private void collectFqnsFromArray(Set<String> fqns, com.fasterxml.jackson.databind.JsonNode array) {
+        if (array == null || !array.isArray()) return;
+        for (com.fasterxml.jackson.databind.JsonNode item : array) {
+            String fqn = firstNonBlank(
+                    item.path("fqn").asText(""),
+                    item.path("qualifiedName").asText(""),
+                    item.path("qualified_name").asText(""),
+                    item.path("classFqn").asText(""),
+                    item.path("class_fqn").asText("")
+            );
+            String symbolId = firstNonBlank(item.path("symbolId").asText(""), item.path("symbol_id").asText(""));
+            if (fqn.isBlank() && symbolId.startsWith("type:")) {
+                fqn = symbolId.substring("type:".length());
+            }
+            if (!fqn.isBlank()) {
+                fqns.add(fqn);
+            }
+        }
     }
 
     /**

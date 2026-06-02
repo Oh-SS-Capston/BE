@@ -47,6 +47,15 @@ public class EntryPointDetectService {
     private static final Set<String> EXCLUDED_PKG_SEGMENTS = Set.of(
             "internal", "impl", "util", "utils", "helper", "helpers"
     );
+    // P0-1: 예제/샘플/테스트 소스 경로 배제 (ExtensionPointDetectService.EXCLUDED_PATH_MARKERS와 동형)
+    private static final Set<String> EXCLUDED_PATH_MARKERS = Set.of(
+            "src/test/", "src/it/", "src/integrationtest/", "src/integration-test/",
+            "/example/", "/examples/", "/sample/", "/samples/", "/demo/", "/demos/"
+    );
+    // P0-1: com.example.* / example.* 패키지는 라이브러리가 아닌 예제 코드
+    private static final Set<String> EXAMPLE_PKG_PREFIXES = Set.of(
+            "com.example.", "example."
+    );
     private static final Set<String> HIGH_SUFFIX = Set.of(
             "client", "builder", "template", "bootstrap", "launcher", "runner", "application"
     );
@@ -56,6 +65,8 @@ public class EntryPointDetectService {
     private static final Set<String> FACTORY_METHOD_PREFIXES = Set.of(
             "create", "of", "from", "builder", "newbuilder", "newinstance", "getinstance"
     );
+    // P1-2: apiguardian @API 어노테이션 감지용 fragment (소문자 비교)
+    private static final String API_GUARDIAN_ANNOTATION_FRAGMENT = "apiguardian";
     private static final List<String> JAVADOC_KEYWORDS = List.of(
             "main entry point", "primary api", "use this class",
             "start with", "bootstrap", "configure", "@apiNote"
@@ -259,16 +270,27 @@ public class EntryPointDetectService {
     /**
      * 제외 조건 하나라도 해당하면 true.
      *
-     * 1. internal / impl / util / helper 패키지 세그먼트
-     * 2. JPMS 범위 필터 (module-info.java exports 미포함 패키지)
-     * 3. @Deprecated
-     * 4. abstract class (인터페이스 제외)
-     * 5. public 생성자도 없고 static factory도 없는 class / record
+     * 1. 예제/샘플/테스트 소스 경로 (P0-1)
+     * 2. com.example.* / example.* 패키지 (P0-1)
+     * 3. internal / impl / util / helper 패키지 세그먼트
+     * 4. JPMS 범위 필터 (module-info.java exports 미포함 패키지)
+     * 5. @Deprecated
+     * 6. abstract class (static factory/facade가 없는 경우)
+     * 7. public 생성자도 없고 static factory도 없고 static facade도 아닌 class / record
      */
     private boolean shouldExclude(SymbolEntity symbol,
                                    Set<String> exportedPackages,
                                    ChildMaps childMaps) {
         String qualifiedName = symbol.getQualifiedName();
+
+        // P1-2: @API(INTERNAL/DEPRECATED) → 공개 API 후보 제외
+        String apiGuardianStatus = detectApiGuardianStatus(symbol);
+        if ("INTERNAL".equals(apiGuardianStatus) || "DEPRECATED".equals(apiGuardianStatus)) return true;
+
+        // P0-1: 예제/샘플/테스트 소스 경로 배제
+        if (hasExcludedSourcePath(symbol)) return true;
+        // P0-1: com.example.* / example.* 패키지 배제
+        if (hasExamplePackage(qualifiedName)) return true;
 
         if (hasExcludedPackageSegment(qualifiedName)) return true;
 
@@ -282,14 +304,14 @@ public class EntryPointDetectService {
         String typeKind = resolveTypeKind(symbol);
 
         if ("class".equals(typeKind) && hasAbstractModifier(symbol.getModifiers())) {
-            // abstract class는 static factory가 있을 때만 후보 유지 (예: HttpClient.newBuilder())
             List<SymbolEntity> methods =
                     childMaps.methodsByOwner().getOrDefault(symbol.getSymbolId(), List.of());
             boolean hasStaticFactory = methods.stream()
                     .anyMatch(m -> m.getAccess() == AccessLevel.PUBLIC
                             && isStaticMethod(m)
                             && isFactoryMethodName(m.getSimpleName()));
-            if (!hasStaticFactory) return true;
+            // P0-5: 정적 facade도 허용 (abstract + static factory 없어도 static 메서드가 다수면 유지)
+            if (!hasStaticFactory && !isStaticFacadeType(methods)) return true;
         }
 
         if (("class".equals(typeKind) || "record".equals(typeKind))) {
@@ -297,7 +319,8 @@ public class EntryPointDetectService {
                     childMaps.constructorsByOwner().getOrDefault(symbol.getSymbolId(), List.of());
             List<SymbolEntity> methods =
                     childMaps.methodsByOwner().getOrDefault(symbol.getSymbolId(), List.of());
-            if (!hasInstantiationPath(constructors, methods)) return true;
+            // P0-5: public static 메서드가 다수인 정적 facade(Mockito 등)는 생성자/factory 없어도 허용
+            if (!hasInstantiationPath(constructors, methods) && !isStaticFacadeType(methods)) return true;
         }
 
         return false;
@@ -315,14 +338,17 @@ public class EntryPointDetectService {
         String symbolId       = symbol.getSymbolId();
 
         // Phase 1 — 문서 직접 언급 신호 (HIGH 즉시 확정)
+        // P0-1: EXAMPLE_CODE_REFERENCE는 HIGH 승격 신호에서 제거. 예제 경로 심볼은 shouldExclude()에서 차단.
         if (simpleName != null && factsSignals.readmeMentionedSimpleNames().contains(simpleName)) {
             signals.add("README_MENTION");
         }
         if (hasJavadocEntryPointSignal(symbol)) {
             signals.add("JAVADOC_ENTRY_POINT");
         }
-        if (simpleName != null && factsSignals.exampleReferencedSimpleNames().contains(simpleName)) {
-            signals.add("EXAMPLE_CODE_REFERENCE");
+        // P1-2: @API(STABLE/MAINTAINED) → Phase 1 HIGH 신호 (shouldExclude에서 INTERNAL/DEPRECATED 이미 차단됨)
+        String apiGuardianStatus = detectApiGuardianStatus(symbol);
+        if ("STABLE".equals(apiGuardianStatus) || "MAINTAINED".equals(apiGuardianStatus)) {
+            signals.add("API_GUARDIAN_STABLE");
         }
 
         if (!signals.isEmpty()) {
@@ -336,6 +362,12 @@ public class EntryPointDetectService {
         int score = phase2Score(symbolId, childMaps, signals)
                 + phase3Score(symbol, childMaps, signals)
                 + phase4Score(symbolId, returnedByPublicApi, signals);
+
+        // P1-2: @API(EXPERIMENTAL) → MED_MIN_SCORE 이상 보장 (애너테이션/인터페이스 타입 포함)
+        if ("EXPERIMENTAL".equals(apiGuardianStatus)) {
+            signals.add("API_GUARDIAN_EXPERIMENTAL");
+            score = Math.max(score, MED_MIN_SCORE);
+        }
 
         if (score == 0) return new PhaseResult("NONE", null, signals, 0);
 
@@ -386,7 +418,7 @@ public class EntryPointDetectService {
 
     /**
      * Phase 3: 네이밍 컨벤션 + facade 구조(public 메서드 수)
-     * HIGH 이름 접미사 +2, MED +1, facade(public 메서드 ≥ 5) +1.
+     * HIGH 이름 접미사 +2, MED +1, facade(public 메서드 ≥ 5) +1, 정적 facade(public static ≥ 5) +2.
      */
     private int phase3Score(SymbolEntity symbol, ChildMaps childMaps, List<String> signals) {
         int score  = 0;
@@ -402,13 +434,24 @@ public class EntryPointDetectService {
             }
         }
 
-        long publicMethodCount = childMaps.methodsByOwner()
-                .getOrDefault(symbol.getSymbolId(), List.of()).stream()
+        List<SymbolEntity> ownedMethods = childMaps.methodsByOwner()
+                .getOrDefault(symbol.getSymbolId(), List.of());
+
+        long publicMethodCount = ownedMethods.stream()
                 .filter(m -> m.getAccess() == AccessLevel.PUBLIC)
                 .count();
         if (publicMethodCount >= MIN_FACADE_METHODS) {
             signals.add("FACADE_STRUCTURE");
             score += 1;
+        }
+
+        // P0-5: 정적 facade 신호 — public static 메서드가 다수인 타입(Mockito.mock/spy 등)
+        long publicStaticCount = ownedMethods.stream()
+                .filter(m -> m.getAccess() == AccessLevel.PUBLIC && isStaticMethod(m))
+                .count();
+        if (publicStaticCount >= MIN_FACADE_METHODS) {
+            signals.add("PUBLIC_STATIC_API");
+            score += 2;
         }
 
         return score;
@@ -450,6 +493,30 @@ public class EntryPointDetectService {
     }
 
     // ─── 유틸 ────────────────────────────────────────────────────────────────
+
+    // P0-1: 소스 경로 기반 예제 배제 (ExtensionPointDetectService와 동형)
+    private boolean hasExcludedSourcePath(SymbolEntity symbol) {
+        if (symbol.getSourceFile() == null) return false;
+        String path = symbol.getSourceFile().getPath();
+        if (path == null) return false;
+        String normalized = path.replace('\\', '/').toLowerCase(Locale.ROOT);
+        return EXCLUDED_PATH_MARKERS.stream().anyMatch(normalized::contains);
+    }
+
+    // P0-1: com.example.* / example.* 패키지는 예제 코드이므로 Public API 후보에서 제외
+    private boolean hasExamplePackage(String qualifiedName) {
+        if (qualifiedName == null) return false;
+        String lower = qualifiedName.toLowerCase(Locale.ROOT);
+        return EXAMPLE_PKG_PREFIXES.stream().anyMatch(lower::startsWith);
+    }
+
+    // P0-5: public static 메서드가 다수인 정적 facade(Mockito 등) — 생성자/factory 없어도 entry 후보로 허용
+    private boolean isStaticFacadeType(List<SymbolEntity> methods) {
+        long publicStaticCount = methods.stream()
+                .filter(m -> m.getAccess() == AccessLevel.PUBLIC && isStaticMethod(m))
+                .count();
+        return publicStaticCount >= MIN_FACADE_METHODS;
+    }
 
     private boolean hasExcludedPackageSegment(String qualifiedName) {
         if (qualifiedName == null) return false;
@@ -566,6 +633,38 @@ public class EntryPointDetectService {
         // strip symbol prefix e.g. "type:", "method:"
         int colon = name.indexOf(':');
         return colon >= 0 ? name.substring(colon + 1) : name;
+    }
+
+    // P1-2: apiguardian @API status 감지 — NONE / STABLE / MAINTAINED / EXPERIMENTAL / INTERNAL / DEPRECATED
+    private String detectApiGuardianStatus(SymbolEntity symbol) {
+        JsonNode sig = symbol.getSignature();
+        if (sig == null || sig.isNull()) return "NONE";
+        JsonNode annotations = sig.path("annotations");
+        if (!annotations.isArray()) return "NONE";
+        for (JsonNode ann : annotations) {
+            if (ann.isTextual()) {
+                if (ann.asText("").toLowerCase(Locale.ROOT).contains(API_GUARDIAN_ANNOTATION_FRAGMENT)) {
+                    return "STABLE";
+                }
+            } else if (ann.isObject()) {
+                String annName = resolveAnnotationName(ann).toLowerCase(Locale.ROOT);
+                if (annName.contains(API_GUARDIAN_ANNOTATION_FRAGMENT) || "api".equals(annName)) {
+                    String status = ann.path("status").asText("");
+                    if (status.isBlank()) status = ann.path("attributes").path("status").asText("");
+                    if (status.isBlank()) status = ann.path("params").path("status").asText("");
+                    return status.isBlank() ? "STABLE" : status.toUpperCase(Locale.ROOT);
+                }
+            }
+        }
+        return "NONE";
+    }
+
+    private String resolveAnnotationName(JsonNode ann) {
+        for (String key : List.of("name", "type", "fqn", "qualifiedName")) {
+            String val = ann.path(key).asText("");
+            if (!val.isBlank()) return val;
+        }
+        return "";
     }
 
     /** 강도 비교용 등급. HIGH > MED > LOW. 알 수 없는 값은 0. 대소문자·공백 무시. */

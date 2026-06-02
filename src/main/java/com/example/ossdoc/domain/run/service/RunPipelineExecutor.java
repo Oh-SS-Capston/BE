@@ -13,6 +13,7 @@ import com.example.ossdoc.domain.cluster.service.ClusterBuildService;
 import com.example.ossdoc.domain.cluster.service.ClusterParameterRecommendService;
 import com.example.ossdoc.domain.cluster.service.SuperClusterBuildService;
 import com.example.ossdoc.domain.extraction.dto.request.FactsExtractRequest;
+import com.example.ossdoc.domain.publicapi.service.ApiFlowTraceService;
 import com.example.ossdoc.domain.publicapi.service.ApiMapBuildService;
 import com.example.ossdoc.domain.publicapi.service.EntryPointBuildService;
 import com.example.ossdoc.domain.extraction.facade.FactsExtractionFacade;
@@ -73,6 +74,7 @@ public class RunPipelineExecutor {
     private final SuperClusterBuildService superClusterBuildService;
     private final ClusterSignalProperties clusterSignalProperties;
     private final ApiMapBuildService apiMapBuildService;
+    private final ApiFlowTraceService apiFlowTraceService;
     private final ClassMapBuildService classMapBuildService;
 
     private final RuleCandidateMiningService ruleCandidateMiningService;
@@ -207,6 +209,15 @@ public class RunPipelineExecutor {
                     "API map 생성에 실패했습니다.",
                     optionalFailures,
                     () -> apiMapBuildService.build(runId)
+            );
+
+            executeOptional(
+                    jobId,
+                    RunStage.API_FLOW_TRACE,
+                    "API 호출 경로를 추적 중입니다.",
+                    "API 호출 경로 추적에 실패했습니다.",
+                    optionalFailures,
+                    () -> apiFlowTraceService.trace(runId)
             );
 
             executeOptional(

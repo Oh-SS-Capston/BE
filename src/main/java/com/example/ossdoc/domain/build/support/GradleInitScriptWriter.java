@@ -43,8 +43,17 @@ public class GradleInitScriptWriter {
                         result.resourceRoots = main.resources.srcDirs.collect { it.absolutePath }
                         result.classesDirs = main.output.classesDirs.files.collect { it.absolutePath }
 
-                        try { result.compileClasspath = main.compileClasspath.files.collect { it.absolutePath } } catch (ignored) { result.compileClasspath = [] }
-                        try { result.runtimeClasspath = main.runtimeClasspath.files.collect { it.absolutePath } } catch (ignored) { result.runtimeClasspath = [] }
+                        // 어댑터·멀티플랫폼 모듈의 transitive dependency 해소를 위해
+                        // compileClasspath 실패 시 runtimeClasspath로 폴백한다.
+                        def cpFiles = []
+                        try { cpFiles = main.compileClasspath.files.collect { it.absolutePath } } catch (ignored) {}
+                        if (!cpFiles) {
+                          try { cpFiles = main.runtimeClasspath.files.collect { it.absolutePath } } catch (ignored) {}
+                        }
+                        result.compileClasspath = cpFiles
+                        def rtFiles = []
+                        try { rtFiles = main.runtimeClasspath.files.collect { it.absolutePath } } catch (ignored) {}
+                        result.runtimeClasspath = rtFiles
                       } else {
                         result.sourceRoots = []; result.testRoots=[]; result.resourceRoots=[]
                         result.classesDirs = []; result.compileClasspath=[]; result.runtimeClasspath=[]

@@ -216,8 +216,10 @@ public class LlmInputAssemblerBuildSupport {
      */
     /**
      * 프로젝트 개요 seed를 생성한다.
+     * repoName: RepoRun.repoName — apiMap overview에 project명이 없을 때 폴백으로 사용한다.
      */
-    public JsonNode buildOverviewSeed(String runId, JsonNode apiMap, JsonNode rankings, JsonNode subsystems) {
+    public JsonNode buildOverviewSeed(String runId, JsonNode apiMap, JsonNode rankings, JsonNode subsystems,
+            String repoName) {
         ObjectNode out = objectMapper.createObjectNode();
         out.put("runId", runId);
         putIfText(out, "project", firstText(apiMap.path("overview"), "project", "name"));
@@ -232,8 +234,10 @@ public class LlmInputAssemblerBuildSupport {
         out.put("subsystemCount", subsystemCount);
         out.put("apiMapPresent", !apiMap.isMissingNode() && !apiMap.isNull() && !apiMap.isEmpty());
 
+        // P2-4: repoName 폴백 — apiMap에 project명이 없으면 repo 이름을 그대로 사용
         if (!out.hasNonNull("project")) {
-            out.put("project", "오픈소스 프로젝트");
+            String fallback = (repoName != null && !repoName.isBlank()) ? repoName : "오픈소스 프로젝트";
+            out.put("project", fallback);
         }
         if (!out.hasNonNull("purpose")) {
             out.put("purpose", "핵심 API와 사용 순서를 빠르게 이해하도록 돕는다.");

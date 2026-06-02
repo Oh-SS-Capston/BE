@@ -3,6 +3,8 @@ package com.example.ossdoc.global.llm.service;
 import com.example.ossdoc.domain.artifact.entity.Artifact;
 import com.example.ossdoc.domain.artifact.enums.ArtifactKind;
 import com.example.ossdoc.domain.artifact.repository.ArtifactRepository;
+import com.example.ossdoc.domain.run.entity.RepoRun;
+import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.example.ossdoc.global.llm.config.LlmInputProperties;
 import com.example.ossdoc.global.llm.dto.request.LlmRequest;
 import com.example.ossdoc.global.llm.exception.LlmException;
@@ -38,6 +40,7 @@ public class LlmInputAssemblerService {
     private static final int MAX_AUTO_EVIDENCE = 28;
 
     private final ArtifactRepository artifactRepository;
+    private final RepoRunRepository repoRunRepository;
     private final ObjectMapper objectMapper;
     private final LlmInputAssemblerBuildSupport llmInputAssemblerBuildSupport;
     private final LlmInputProperties llmInputProperties;
@@ -86,6 +89,10 @@ public class LlmInputAssemblerService {
      * 자동 조합: 아티팩트를 읽고 구조 시드를 생성한다.
      */
     private ObjectNode buildAutoStructure(String runId, boolean forceKorean) {
+        String repoName = repoRunRepository.findById(runId)
+                .map(RepoRun::getRepoName)
+                .orElse(null);
+
         JsonNode apiMap = loadOptionalArtifactMeta(runId, ArtifactKind.API_MAP_JSON);
         JsonNode apiSurface = loadOptionalArtifactMeta(runId, ArtifactKind.API_SURFACE_JSON);
         JsonNode symbolSourceIndex = loadOptionalArtifactMeta(runId, ArtifactKind.SYMBOL_SOURCE_INDEX_JSON);
@@ -124,7 +131,7 @@ public class LlmInputAssemblerService {
         root.put("generatedAt", OffsetDateTime.now().toString());
         root.put("language", forceKorean ? "ko-KR" : "en-US");
 
-        root.set("overviewSeed", llmInputAssemblerBuildSupport.buildOverviewSeed(runId, apiMap, rankings, subsystems));
+        root.set("overviewSeed", llmInputAssemblerBuildSupport.buildOverviewSeed(runId, apiMap, rankings, subsystems, repoName));
         root.set("cautionSeed", llmInputAssemblerBuildSupport.buildCautionSeed(ruleCandidates, coreTypes, coreMethods));
         root.set("coreClassSeed", llmInputAssemblerBuildSupport.buildCoreClassSeed(coreTypes));
         root.set("coreMethodSeed", llmInputAssemblerBuildSupport.buildCoreMethodSeed(coreMethods));

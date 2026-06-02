@@ -8,6 +8,7 @@ import com.example.ossdoc.domain.build.dto.json.BuildManifest;
 import com.example.ossdoc.domain.cluster.support.supercluster.ModuleResolver;
 import com.example.ossdoc.domain.graphstore.entity.Edge;
 import com.example.ossdoc.domain.graphstore.entity.SymbolEntity;
+import com.example.ossdoc.domain.graphstore.enums.AccessLevel;
 import com.example.ossdoc.domain.graphstore.enums.EdgeType;
 import com.example.ossdoc.domain.graphstore.enums.SymbolKind;
 import com.example.ossdoc.domain.graphstore.repository.EdgeRepository;
@@ -24,6 +25,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.OffsetDateTime;
 import java.util.*;
+import java.util.stream.Collectors;
 
 /**
  * API 진입점별 BFS 호출 경로 추적 서비스.
@@ -47,6 +49,8 @@ public class ApiFlowTraceService {
     private static final double FLOW_SET_OVERLOAD_RATIO = 0.80;
     private static final int DEFAULT_MAX_BFS_DEPTH = 4;
     private static final int MAX_ENTRY_POINTS = 50;
+    // P0-2: TYPE 진입점을 member METHOD 시드로 확장할 때 타입당 상한
+    private static final int MAX_TYPE_SEED_METHODS = 10;
     private static final String ARTIFACT_SCHEMA_VERSION = "1.0";
     private static final String ARTIFACT_PATH = "publicapi/api_flow_trace.json";
 
@@ -82,6 +86,9 @@ public class ApiFlowTraceService {
         for (SymbolEntity s : types) symbolIndex.put(s.getSymbolId(), s);
         for (SymbolEntity s : methods) symbolIndex.put(s.getSymbolId(), s);
 
+        // P0-2: TYPE 진입점 → member METHOD 시드 확장을 위한 소유 관계 인덱스
+        Map<String, List<SymbolEntity>> typeToMethods = buildTypeToMethodsIndex(methods);
+
         // CALLS 엣지 로드 + 인접 리스트 구성
         List<Edge> callEdges = edgeRepository.findAllByRun_RunIdAndEdgeTypeIn(
                 runId, List.of(EdgeType.CALLS));
@@ -105,7 +112,7 @@ public class ApiFlowTraceService {
             ApiFlowTraceJson.EntryPointTrace trace = bfsTrace(
                     entrySymbolId, entrySym, entry.role(),
                     adj, symbolIndex, callEdges, totalSymbols,
-                    moduleResolver, typeSourceRootIndex
+                    moduleResolver, typeSourceRootIndex, typeToMethods
             );
             traces.add(trace);
         }
@@ -187,7 +194,8 @@ public class ApiFlowTraceService {
             List<Edge> callEdges,
             int totalSymbols,
             ModuleResolver moduleResolver,
-            Map<String, String> typeSourceRootIndex
+            Map<String, String> typeSourceRootIndex,
+            Map<String, List<SymbolEntity>> typeToMethods
     ) {
         Map<String, Integer> depthMap = new LinkedHashMap<>();
         depthMap.put(entrySymbolId, 0);
@@ -195,11 +203,20 @@ public class ApiFlowTraceService {
         Deque<String> queue = new ArrayDeque<>();
         int maxActualDepth = 0;
 
-        // API_MAP_JSON entry_points는 TYPE 레벨(symbol_id="type:org.foo.Bar")이다.
-        // 진입 TYPE 심볼을 시작점으로 CALLS 엣지를 BFS 탐색한다.
-        // ⚠️ 결과 trace의 entryQualifiedName도 TYPE FQN(예: "org.foo.Bar")이므로
-        //    METHOD 단위(apiEntries/coreMethods.fqn)와 직접 매칭되지 않는다.
-        //    LLM enrich 단계에서 메서드 fqn→소유 TYPE fqn 변환으로 연결해야 한다.
+        // P0-2: TYPE 진입점을 member METHOD 시드로 확장해 CALLS BFS를 실질화한다.
+        // API_MAP_JSON entry_points는 TYPE 레벨(symbol_id="type:org.foo.Bar")이지만
+        // CALLS 인접 리스트는 METHOD→METHOD이므로 TYPE 자체에서는 BFS가 시작되지 않는다.
+        if (entrySym != null && entrySym.getSymbolKind() == SymbolKind.TYPE) {
+            List<SymbolEntity> memberMethods = typeToMethods.getOrDefault(entrySymbolId, List.of());
+            List<String> seeds = prioritizeTypeMembers(memberMethods, adj);
+            for (String seedId : seeds) {
+                if (!depthMap.containsKey(seedId)) {
+                    depthMap.put(seedId, 0);
+                    queue.add(seedId);
+                }
+            }
+        }
+
         queue.add(entrySymbolId);
         while (!queue.isEmpty()) {
             String cur = queue.poll();
@@ -333,6 +350,50 @@ public class ApiFlowTraceService {
         if (fqn == null) return "";
         int hashIdx = fqn.indexOf('#');
         return hashIdx >= 0 ? fqn.substring(0, hashIdx) : fqn;
+    }
+
+    // P0-2: TYPE → 소유 METHOD 인덱스 구성
+    private Map<String, List<SymbolEntity>> buildTypeToMethodsIndex(List<SymbolEntity> methods) {
+        Map<String, List<SymbolEntity>> index = new HashMap<>();
+        for (SymbolEntity method : methods) {
+            if (method.getOwner() != null) {
+                index.computeIfAbsent(method.getOwner().getSymbolId(), k -> new ArrayList<>())
+                        .add(method);
+            }
+        }
+        return index;
+    }
+
+    /**
+     * P0-2: TYPE member 메서드를 BFS 시드 우선순위로 정렬해 상위 MAX_TYPE_SEED_METHODS개를 반환한다.
+     *
+     * 우선순위: ① static(facade/factory 포함) → ② public 인스턴스 → CALLS 엣지 보유 우선
+     * 이미 adj에 있는 메서드(실제 호출 관계 존재)를 앞으로 당긴다.
+     */
+    private List<String> prioritizeTypeMembers(
+            List<SymbolEntity> members,
+            Map<String, List<AdjacentEdge>> adj) {
+
+        return members.stream()
+                .filter(m -> m.getAccess() == AccessLevel.PUBLIC)
+                .sorted(Comparator
+                        .comparingInt(this::memberSeedPriority)
+                        .thenComparingInt(m -> adj.containsKey(m.getSymbolId()) ? 0 : 1))
+                .limit(MAX_TYPE_SEED_METHODS)
+                .map(SymbolEntity::getSymbolId)
+                .collect(Collectors.toList());
+    }
+
+    /** 낮을수록 우선: static → constructor → 일반 public */
+    private int memberSeedPriority(SymbolEntity method) {
+        JsonNode mods = method.getModifiers();
+        if (mods != null && mods.isArray()) {
+            for (JsonNode mod : mods) {
+                if ("static".equalsIgnoreCase(mod.asText())) return 0;
+            }
+        }
+        if (method.getSymbolKind() == SymbolKind.CONSTRUCTOR) return 1;
+        return 2;
     }
 
     private Map<String, List<AdjacentEdge>> buildAdjacency(List<Edge> callEdges) {

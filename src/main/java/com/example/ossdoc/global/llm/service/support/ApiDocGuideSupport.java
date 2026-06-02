@@ -62,7 +62,7 @@ public final class ApiDocGuideSupport {
 
         GuideSlots slots = new GuideSlots(beforeCall, doCall, successCheck, failureSymptom, nextAction);
         String narrative = composeNarrative(slots);
-        GuideQuality quality = evaluateQuality(slots, anchor, narrative);
+        GuideQuality quality = evaluateQuality(slots, anchor, narrative, methodName, methodFqn, classFqn, filePath);
 
         return new GuideView(
                 normalizedSummary,
@@ -158,7 +158,24 @@ public final class ApiDocGuideSupport {
         };
     }
 
-    private static GuideQuality evaluateQuality(GuideSlots slots, String anchor, String narrative) {
+    // P1-3: 합성 메서드·예제·내부 클래스 여부를 검사해 0.0(부적합) 또는 1.0(적합)을 반환한다.
+    private static double computeTargetSuitabilityScore(String methodName, String methodFqn,
+            String classFqn, String filePath) {
+        String fqnToCheck = safeText(methodFqn).isBlank() ? safeText(methodName) : safeText(methodFqn);
+        if (fqnToCheck.contains("lambda$") || fqnToCheck.contains("$anonymous")) return 0.0;
+        String simpleName = fqnToCheck;
+        int hashIdx = fqnToCheck.lastIndexOf('#');
+        if (hashIdx >= 0) simpleName = fqnToCheck.substring(hashIdx + 1);
+        if (simpleName.matches(".*\\$\\d+.*")) return 0.0;
+        String cls = safeText(classFqn);
+        if (cls.contains("$$") || cls.matches(".*\\$\\d+$") || cls.matches(".*\\$\\d+[^.]*$")) return 0.0;
+        String pathNorm = safeText(filePath).replace('\\', '/').toLowerCase(Locale.ROOT);
+        if (pathNorm.contains("/test/") || pathNorm.contains("/example/") || pathNorm.contains("/sample/")) return 0.0;
+        return 1.0;
+    }
+
+    private static GuideQuality evaluateQuality(GuideSlots slots, String anchor, String narrative,
+            String methodName, String methodFqn, String classFqn, String filePath) {
         List<String> texts = List.of(
                 slots.beforeCall(),
                 slots.doCall(),
@@ -206,7 +223,10 @@ public final class ApiDocGuideSupport {
                 + 0.15d * (1.0d - repetitionRate);
 
         int actionabilityScore = Math.max(0, Math.min(100, (int) Math.round(weighted * 100.0d)));
-        return new GuideQuality(actionabilityScore, slotCoverage, evidenceCoverage, forbiddenRate, repetitionRate);
+        // P1-3: targetSuitabilityScore + slotEvidenceConfidence
+        double targetSuitability = computeTargetSuitabilityScore(methodName, methodFqn, classFqn, filePath);
+        return new GuideQuality(actionabilityScore, slotCoverage, evidenceCoverage, forbiddenRate, repetitionRate,
+                targetSuitability, "method_level");
     }
 
     private static String sanitizeSlot(String text) {
@@ -310,7 +330,9 @@ public final class ApiDocGuideSupport {
             double slotCoverage,
             double evidenceCoverage,
             double forbiddenPhraseRate,
-            double repetitionRate
+            double repetitionRate,
+            double targetSuitabilityScore,
+            String slotEvidenceConfidence
     ) {
     }
 

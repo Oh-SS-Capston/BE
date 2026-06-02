@@ -22,10 +22,12 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /**
  * README 코드 블록에서 대문자 시작 식별자를 추출해 public 타입 목록과 대조한다.
@@ -37,11 +39,22 @@ import java.util.regex.Pattern;
 public class ReadmeObservationScanner {
 
     private static final List<String> README_CANDIDATES = List.of(
-            "README.md", "QUICKSTART.md", "docs/usage.md", "docs/getting-started.md"
+            "README.md", "QUICKSTART.md", "QUICK_START.md",
+            "docs/usage.md", "docs/getting-started.md",
+            "docs/Usage.md", "docs/Getting-Started.md"
     );
 
+    // 코드 펜스 블록 (``` 또는 ~~~)
     private static final Pattern CODE_FENCE =
-            Pattern.compile("```[\\w]*\\n([\\s\\S]*?)```", Pattern.MULTILINE);
+            Pattern.compile("(?:```|~~~)[\\w]*\\n([\\s\\S]*?)(?:```|~~~)", Pattern.MULTILINE);
+
+    // 인라인 코드 (`…`)
+    private static final Pattern INLINE_CODE =
+            Pattern.compile("`([^`\n]{2,80})`");
+
+    // import/usage 문에서 FQCN 추출 — 마지막 대문자 세그먼트를 식별자로 사용
+    private static final Pattern FQCN_IN_TEXT =
+            Pattern.compile("[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]+)+\\.([A-Z][A-Za-z0-9]+)");
 
     private static final Pattern IDENTIFIER =
             Pattern.compile("[A-Z][A-Za-z0-9]{1,}");
@@ -134,17 +147,39 @@ public class ReadmeObservationScanner {
     private Set<String> extractIdentifiers(String content) {
         String targetContent = scopeToTargetSections(content);
         Set<String> identifiers = new HashSet<>();
+
+        // 1) 코드 펜스 블록 내 대문자 식별자
         Matcher fence = CODE_FENCE.matcher(targetContent);
         while (fence.find()) {
-            Matcher id = IDENTIFIER.matcher(fence.group(1));
-            while (id.find()) {
-                String token = id.group();
-                if (!EXCLUDED.contains(token)) {
-                    identifiers.add(token);
-                }
+            extractUppercaseTokens(fence.group(1), identifiers);
+        }
+
+        // 2) 인라인 코드(`…`) 내 대문자 식별자
+        Matcher inline = INLINE_CODE.matcher(targetContent);
+        while (inline.find()) {
+            extractUppercaseTokens(inline.group(1), identifiers);
+        }
+
+        // 3) FQCN 패턴에서 마지막 대문자 세그먼트(예: import org.junit.Test → "Test")
+        Matcher fqcn = FQCN_IN_TEXT.matcher(targetContent);
+        while (fqcn.find()) {
+            String token = fqcn.group(1);
+            if (!EXCLUDED.contains(token)) {
+                identifiers.add(token);
             }
         }
+
         return identifiers;
+    }
+
+    private void extractUppercaseTokens(String text, Set<String> identifiers) {
+        Matcher id = IDENTIFIER.matcher(text);
+        while (id.find()) {
+            String token = id.group();
+            if (!EXCLUDED.contains(token)) {
+                identifiers.add(token);
+            }
+        }
     }
 
     private String scopeToTargetSections(String content) {
@@ -176,7 +211,20 @@ public class ReadmeObservationScanner {
             Path p = repoRoot.resolve(candidate);
             if (Files.isRegularFile(p)) return p;
         }
-        return null;
+        // 루트 디렉토리에서 대소문자 무관하게 README 파일 탐색
+        try (Stream<Path> files = Files.list(repoRoot)) {
+            return files
+                    .filter(Files::isRegularFile)
+                    .filter(p -> {
+                        String name = p.getFileName().toString().toLowerCase(Locale.ROOT);
+                        return name.matches("readme(\\.(md|rst|txt|adoc))?");
+                    })
+                    .findFirst()
+                    .orElse(null);
+        } catch (IOException e) {
+            log.warn("[README-SCAN] 루트 디렉토리 탐색 실패: {}", repoRoot, e);
+            return null;
+        }
     }
 
     private static String simpleName(String fqcn) {

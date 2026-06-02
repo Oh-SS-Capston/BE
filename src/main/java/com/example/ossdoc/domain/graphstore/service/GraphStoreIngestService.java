@@ -740,8 +740,11 @@ public class GraphStoreIngestService {
         int edgesSaved = 0;
         int skippedRelations = 0;
         int resolvedByRawRef = 0;
+        int resolvedBySimpleName = 0;
 
         Map<String, SymbolEntity> typeLookupIndex = buildTypeLookupIndex(symbolMap);
+        // P1-1: IMPLEMENTS/EXTENDS 단순명 폴백 — 크로스모듈 동일 repo 타입 해소용
+        Map<String, SymbolEntity> simpleNameInheritanceLookup = buildSimpleNameInheritanceLookup(symbolMap);
         Map<String, Evidence> symbolAstEvidenceMap = loadSymbolAstEvidenceMap(run.getRunId());
         Map<String, String> symbolToOwnerMap = buildSymbolToOwnerMap(facts.symbols());
 
@@ -767,12 +770,17 @@ public class GraphStoreIngestService {
                 continue;
             }
 
-            SymbolEntity to = resolveDestinationSymbol(dto, symbolMap, typeLookupIndex);
+            SymbolEntity to = resolveDestinationSymbol(dto, symbolMap, typeLookupIndex, simpleNameInheritanceLookup);
             if (to != null
                     && (dto.dstSymbol() == null || dto.dstSymbol().isBlank())
                     && dto.dstRawRef() != null
                     && !dto.dstRawRef().isBlank()) {
                 resolvedByRawRef++;
+            }
+            // P1-1: 단순명 폴백으로 해소된 EXTENDS/IMPLEMENTS 카운트
+            if (to != null && isInheritanceEdge(dto.kind())
+                    && !typeLookupIndex.containsKey(normalizeTypeRefForLookup(dto.dstSymbol()))) {
+                resolvedBySimpleName++;
             }
 
             Edge candidate = factsEdgeConverter.toEntity(run, dto, from, to);
@@ -831,10 +839,11 @@ public class GraphStoreIngestService {
         int edgeEvidenceSaved = linksToSave.size();
 
         log.info(
-                "[GRAPHSTORE] relation linking summary. runId={}, totalRelations={}, resolvedByRawRef={}, skippedRelations={}",
+                "[GRAPHSTORE] relation linking summary. runId={}, totalRelations={}, resolvedByRawRef={}, resolvedBySimpleName={}, skippedRelations={}",
                 run.getRunId(),
                 facts.relations().size(),
                 resolvedByRawRef,
+                resolvedBySimpleName,
                 skippedRelations
         );
 
@@ -931,11 +940,13 @@ public class GraphStoreIngestService {
 
     /**
      * 목적지 심볼을 우선 dstSymbol로 찾고, 없으면 dstRawRef를 기반으로 보조 해석한다.
+     * P1-1: EXTENDS/IMPLEMENTS에 한해 단순명 폴백 인덱스를 최후 수단으로 사용한다.
      */
     private SymbolEntity resolveDestinationSymbol(
             NormalizedRelationFact relation,
             Map<String, SymbolEntity> symbolMap,
-            Map<String, SymbolEntity> typeLookupIndex
+            Map<String, SymbolEntity> typeLookupIndex,
+            Map<String, SymbolEntity> simpleNameInheritanceLookup
     ) {
         if (relation.dstSymbol() != null && !relation.dstSymbol().isBlank()) {
             SymbolEntity direct = symbolMap.get(relation.dstSymbol());
@@ -948,16 +959,30 @@ public class GraphStoreIngestService {
             }
         }
 
-        if (relation.dstRawRef() == null || relation.dstRawRef().isBlank()) {
-            return null;
-        }
-
-        for (String candidate : buildTypeLookupCandidates(relation.dstRawRef())) {
-            SymbolEntity resolved = typeLookupIndex.get(candidate);
-            if (resolved != null) {
-                return resolved;
+        if (relation.dstRawRef() != null && !relation.dstRawRef().isBlank()) {
+            for (String candidate : buildTypeLookupCandidates(relation.dstRawRef())) {
+                SymbolEntity resolved = typeLookupIndex.get(candidate);
+                if (resolved != null) {
+                    return resolved;
+                }
             }
         }
+
+        // P1-1: EXTENDS/IMPLEMENTS 한정 단순명 폴백 — 크로스모듈 동일 repo 타입 해소
+        if (!simpleNameInheritanceLookup.isEmpty() && isInheritanceEdge(relation.kind())) {
+            String rawRef = relation.dstSymbol() != null && !relation.dstSymbol().isBlank()
+                    ? relation.dstSymbol() : relation.dstRawRef();
+            if (rawRef != null && !rawRef.isBlank()) {
+                String simpleName = extractSimpleNameFromTypeRef(rawRef);
+                if (simpleName != null) {
+                    SymbolEntity resolved = simpleNameInheritanceLookup.get(simpleName);
+                    if (resolved != null) {
+                        return resolved;
+                    }
+                }
+            }
+        }
+
         return null;
     }
 
@@ -975,6 +1000,45 @@ public class GraphStoreIngestService {
         }
 
         return index;
+    }
+
+    /**
+     * P1-1: IMPLEMENTS/EXTENDS 단순명 폴백 인덱스.
+     * 동일 단순명을 가진 TYPE이 하나뿐인 경우만 등록(모호성 방지).
+     * JDK/외부 라이브러리 타입은 symbolMap에 없으므로 자동으로 제외된다.
+     */
+    private Map<String, SymbolEntity> buildSimpleNameInheritanceLookup(Map<String, SymbolEntity> symbolMap) {
+        Map<String, List<SymbolEntity>> candidates = new HashMap<>();
+        for (SymbolEntity symbol : symbolMap.values()) {
+            if (symbol.getSymbolKind() != SymbolKind.TYPE) continue;
+            String simpleName = symbol.getSimpleName();
+            if (simpleName != null && !simpleName.isBlank()) {
+                candidates.computeIfAbsent(simpleName, k -> new ArrayList<>()).add(symbol);
+            }
+        }
+        Map<String, SymbolEntity> index = new HashMap<>();
+        for (Map.Entry<String, List<SymbolEntity>> entry : candidates.entrySet()) {
+            if (entry.getValue().size() == 1) {
+                index.put(entry.getKey(), entry.getValue().get(0));
+            }
+        }
+        log.debug("[GRAPHSTORE-P1-1] simpleNameInheritanceLookup: unambiguous={}, total candidates={}",
+                index.size(), candidates.size());
+        return index;
+    }
+
+    private boolean isInheritanceEdge(String kind) {
+        if (kind == null) return false;
+        String upper = kind.trim().toUpperCase(Locale.ROOT);
+        return "EXTENDS".equals(upper) || "IMPLEMENTS".equals(upper);
+    }
+
+    private String extractSimpleNameFromTypeRef(String typeRef) {
+        String normalized = normalizeTypeRefForLookup(typeRef);
+        if (normalized == null) return null;
+        int dot = normalized.lastIndexOf('.');
+        String simpleName = dot >= 0 ? normalized.substring(dot + 1) : normalized;
+        return simpleName.isBlank() ? null : simpleName;
     }
 
     private List<String> buildTypeLookupCandidates(String raw) {

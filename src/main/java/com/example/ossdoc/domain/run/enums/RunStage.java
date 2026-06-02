@@ -60,6 +60,12 @@ public enum RunStage {
             "공개 API 진입점·확장 포인트를 분석 중입니다."
     ),
 
+    API_FLOW_TRACE(
+            89,
+            false,
+            "API 호출 경로를 추적 중입니다."
+    ),
+
     CLASSMAP(
             90,
             false,

@@ -190,7 +190,7 @@ public class ClusterBuildService {
                                     : projectedGraph.getSignalMeta(),
                             "metrics", metricsMap
                     ))
-                    .subsystems(subsystems)
+                    .subsystems(rankingResult.enrichedSubsystems())
                     .build();
 
             RankingsJson rankingsJson = RankingsJson.builder()
