@@ -34,11 +34,11 @@ public class LlmClaudeClientSupport {
      * 실행 시 사용할 1순위 모델을 결정하는 역할.
      */
     public String resolvePrimaryModel() {
-        String haikuModel = llmConfig.getHaikuModel();
-        if (haikuModel == null || haikuModel.isBlank()) {
-            return llmConfig.getModel();
+        String model = llmConfig.getModel();
+        if (model == null || model.isBlank()) {
+            return llmConfig.getHaikuModel();
         }
-        return haikuModel.trim();
+        return model.trim();
     }
 
     /**
@@ -51,7 +51,7 @@ public class LlmClaudeClientSupport {
             int maxTokens
     ) {
         String primaryModel = resolvePrimaryModel();
-        String fallbackModel = llmConfig.getModel();
+        String fallbackModel = resolveFallbackModel();
         int effectiveMaxTokens = Math.max(1, Math.min(maxTokens, llmConfig.getMaxTokens()));
         // 실제 적용된 토큰 상한을 남겨 설정 불일치를 빠르게 확인한다.
         log.info(
@@ -65,7 +65,7 @@ public class LlmClaudeClientSupport {
         try {
             return callClaudeWithModel(systemPrompt, userMessage, maxTokens, primaryModel);
         } catch (LlmException firstFailure) {
-            if (!canFallbackToSonnet(firstFailure, primaryModel, fallbackModel)) {
+            if (!canFallbackToHaiku(firstFailure, primaryModel, fallbackModel)) {
                 throw firstFailure;
             }
             log.warn(
@@ -78,7 +78,15 @@ public class LlmClaudeClientSupport {
         }
     }
 
-    private boolean canFallbackToSonnet(LlmException e, String primaryModel, String fallbackModel) {
+    private String resolveFallbackModel() {
+        String haikuModel = llmConfig.getHaikuModel();
+        if (haikuModel == null || haikuModel.isBlank()) {
+            return "";
+        }
+        return haikuModel.trim();
+    }
+
+    private boolean canFallbackToHaiku(LlmException e, String primaryModel, String fallbackModel) {
         if (e == null) {
             return false;
         }
