@@ -36,15 +36,15 @@ import static com.example.ossdoc.global.llm.service.support.LlmInputAssemblerSup
 public class LlmInputAssemblerBuildSupport {
 
     // 자동 조합 시 사용하는 출력 제한값
-    private static final int MAX_AUTO_EVIDENCE = 28;
-    private static final int MAX_CAUTIONS = 12;
-    private static final int MAX_CORE_CLASSES = 12;
-    private static final int MAX_CORE_METHODS = 24;
-    private static final int MAX_METHODS_PER_CLASS = 6;
-    private static final int MAX_METHOD_FLOW = 8;
-    private static final int MAX_EXTENSION_POINTS = 10;
-    private static final int MAX_DIRECTORIES = 12;
-    private static final int MAX_EVIDENCE_PER_CAUTION = 2;
+    private static final int MAX_AUTO_EVIDENCE = 60;
+    private static final int MAX_CAUTIONS = 20;
+    private static final int MAX_CORE_CLASSES = 24;
+    private static final int MAX_CORE_METHODS = 48;
+    private static final int MAX_METHODS_PER_CLASS = 10;
+    private static final int MAX_METHOD_FLOW = 16;
+    private static final int MAX_EXTENSION_POINTS = 20;
+    private static final int MAX_DIRECTORIES = 24;
+    private static final int MAX_EVIDENCE_PER_CAUTION = 5;
 
     private final ObjectMapper objectMapper;
     /**

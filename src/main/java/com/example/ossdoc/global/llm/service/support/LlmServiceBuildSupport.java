@@ -34,16 +34,54 @@ import java.util.function.Supplier;
 public class LlmServiceBuildSupport {
 
     // 시나리오/문서 조합 시 사용하는 출력 제한값
-    private static final int MAX_CAUTIONS = 12;
-    private static final int MAX_SCENARIOS = 2;
-    private static final int MAX_STEPS_PER_SCENARIO = 4;
-    private static final int MAX_CORE_CLASSES = 10;
-    private static final int MAX_CORE_METHODS = 18;
-    private static final int MAX_METHOD_FLOW = 8;
-    private static final int MAX_EVIDENCE_LINKS = 3;
-    private static final int MAX_API_ENTRY_OUTPUT = 14;
-    private static final int MAX_METHOD_DESCRIPTION_PREVIEW = 140;
+    private static final int MAX_CAUTIONS = 20;
+    private static final int MAX_SCENARIOS = 4;
+    private static final int MAX_STEPS_PER_SCENARIO = 8;
+    private static final int MAX_CORE_CLASSES = 20;
+    private static final int MAX_CORE_METHODS = 40;
+    private static final int MAX_METHOD_FLOW = 16;
+    private static final int MAX_EVIDENCE_LINKS = 8;
+    private static final int MAX_API_ENTRY_OUTPUT = 32;
+    private static final int MAX_METHOD_DESCRIPTION_PREVIEW = 400;
     private static final int ACTIONABILITY_THRESHOLD = 70;
+    private static final List<String> OVERVIEW_RICH_TEXT_FIELDS = List.of(
+            "architectureSummary",
+            "dataFlow",
+            "confidenceNote"
+    );
+    private static final List<String> CAUTION_RICH_TEXT_FIELDS = List.of(
+            "impact",
+            "rationale",
+            "normalFlow",
+            "successSignal",
+            "failureSignal",
+            "userAction",
+            "evidenceInterpretation",
+            "confidenceReason"
+    );
+    private static final List<String> SCENARIO_RICH_TEXT_FIELDS = List.of(
+            "whyThisMatters",
+            "entryPoint",
+            "expectedOutcome",
+            "confidenceReason"
+    );
+    private static final List<String> STEP_RICH_TEXT_FIELDS = List.of(
+            "precondition",
+            "action",
+            "successSignal",
+            "failureSignal",
+            "userAction",
+            "dataHandled",
+            "evidenceInterpretation",
+            "confidenceReason"
+    );
+    private static final List<String> METHOD_FLOW_RICH_TEXT_FIELDS = List.of(
+            "precondition",
+            "result",
+            "risk",
+            "evidenceInterpretation",
+            "confidenceReason"
+    );
     private static final List<String> GUIDE_FORBIDDEN_PHRASES = List.of(
             "핵심 동작 수행",
             "입력 조건 기반 로직"
@@ -228,6 +266,10 @@ public class LlmServiceBuildSupport {
             item.put("cautionId", String.format("CAU-%03d", cautions.size()));
             item.put("title", title);
             item.put("message", message);
+            copyTextFields(rawItem, item, CAUTION_RICH_TEXT_FIELDS);
+            if (rawItem.path("summary").isObject()) {
+                item.set("summary", rawItem.path("summary").deepCopy());
+            }
             item.put("when", shortenText(rawItem.path("when").asText("호출 전 입력값과 호출 순서를 점검할 때"), 100));
             putIfText(item, "relatedClass", rawItem.path("relatedClass").asText(""));
             putIfText(item, "relatedMethod", rawItem.path("relatedMethod").asText(""));
@@ -236,7 +278,7 @@ public class LlmServiceBuildSupport {
             String rawCautionId = rawItem.path("cautionId").asText("");
             if (!rawCautionId.isBlank()) {
                 ObjectNode seedSm = seedSmByCautionId.get(rawCautionId);
-                if (seedSm != null) {
+                if (seedSm != null && !item.has("summary")) {
                     item.set("summary", seedSm);
                 }
             }
@@ -281,6 +323,8 @@ public class LlmServiceBuildSupport {
             scenario.put("title", shortenText(rawScenario.path("title").asText("대표 사용 시나리오"), 90));
             scenario.put("intent", shortenText(rawScenario.path("intent").asText("핵심 API를 순서대로 호출해 기능을 완성한다."), 160));
 
+            copyTextFields(rawScenario, scenario, SCENARIO_RICH_TEXT_FIELDS);
+
             ArrayNode steps = scenario.putArray("steps");
             JsonNode rawSteps = rawScenario.path("steps");
             if (rawSteps.isArray()) {
@@ -293,6 +337,7 @@ public class LlmServiceBuildSupport {
                     ObjectNode step = steps.addObject();
                     step.put("stepNo", rawStep.path("stepNo").asInt(s + 1));
                     step.put("description", shortenText(rawStep.path("description").asText("핵심 메서드를 호출한다."), 160));
+                    copyTextFields(rawStep, step, STEP_RICH_TEXT_FIELDS);
                     String methodFqn = firstNonBlank(
                             rawStep.path("methodFqn").asText(""),
                             flowStep.path("methodFqn").asText("")
@@ -313,6 +358,7 @@ public class LlmServiceBuildSupport {
                         evidenceLinks = evidenceLinksFromSeed(methodSeedByFqn.getOrDefault(methodFqn, NullNode.getInstance()));
                     }
                     step.set("evidenceLinks", evidenceLinks);
+                    attachStepGuideBundle(step);
                 }
             }
 
@@ -325,6 +371,7 @@ public class LlmServiceBuildSupport {
                 putIfText(step, "methodFqn", methodFqn);
                 putIfText(step, "classFqn", firstFlow.path("classFqn").asText(""));
                 step.set("evidenceLinks", evidenceLinksFromSeed(firstFlow));
+                attachStepGuideBundle(step);
             }
         }
 
@@ -406,6 +453,7 @@ public class LlmServiceBuildSupport {
             putIfText(step, "classFqn", flowStep.path("classFqn").asText(""));
             putIfText(step, "methodFqn", flowStep.path("methodFqn").asText(""));
             step.set("evidenceLinks", evidenceLinksFromSeed(flowStep));
+            attachStepGuideBundle(step);
         }
 
         if (steps.isEmpty()) {
@@ -413,6 +461,7 @@ public class LlmServiceBuildSupport {
             step.put("stepNo", 1);
             step.put("description", "핵심 API를 선택하고 입력값을 구성한다.");
             step.putArray("evidenceLinks");
+            attachStepGuideBundle(step);
         }
         out.put("fallbackApplied", true);
         return out;
@@ -433,6 +482,10 @@ public class LlmServiceBuildSupport {
             rule.put("name", caution.path("title").asText("주의사항"));
             rule.put("classification", "defensive");
             rule.put("description", caution.path("message").asText(""));
+            copyTextFields(caution, rule, CAUTION_RICH_TEXT_FIELDS);
+            if (caution.path("summary").isObject()) {
+                rule.set("summary", caution.path("summary").deepCopy());
+            }
             JsonNode mergedFrom = caution.path("mergedFromGroups");
             rule.set("mergedFromGroups", mergedFrom.isArray() ? mergedFrom.deepCopy() : objectMapper.createArrayNode());
             rule.set("evidenceIds", limitEvidenceIdArray(caution.path("evidenceIds"), MAX_EVIDENCE_LINKS));
@@ -454,6 +507,11 @@ public class LlmServiceBuildSupport {
         String relatedMethod = caution.path("relatedMethod").asText("");
         String action = caution.path("summary").path("action").asText("");
         String evidenceAnchor = evidenceAnchorFromIds(caution.path("evidenceIds"));
+        String normalFlow = caution.path("normalFlow").asText("");
+        String successSignal = caution.path("successSignal").asText("");
+        String failureSignal = caution.path("failureSignal").asText("");
+        String userAction = caution.path("userAction").asText("");
+        String evidenceInterpretation = caution.path("evidenceInterpretation").asText("");
 
         String beforeCall = when;
         String doCall = message;
@@ -462,6 +520,12 @@ public class LlmServiceBuildSupport {
                 : relatedMethod + " 호출 결과가 기대값과 일치하는지 확인한다.";
         String failureSymptom = message;
         String nextAction = firstNonBlank(action, "입력값을 보완하고 선행 검증을 추가한 뒤 재시도한다.");
+
+        beforeCall = firstNonBlank(normalFlow, beforeCall);
+        doCall = firstNonBlank(userAction, doCall);
+        successCheck = firstNonBlank(successSignal, evidenceInterpretation, successCheck);
+        failureSymptom = firstNonBlank(failureSignal, failureSymptom);
+        nextAction = firstNonBlank(action, userAction, evidenceInterpretation, nextAction);
 
         attachGuideBundle(caution, beforeCall, doCall, successCheck, failureSymptom, nextAction, evidenceAnchor);
     }
@@ -499,6 +563,19 @@ public class LlmServiceBuildSupport {
     /**
      * 가이드 슬롯/품질 필드를 공통 형식으로 채운다.
      */
+    private void attachStepGuideBundle(ObjectNode step) {
+        if (step == null) {
+            return;
+        }
+        String description = step.path("description").asText("");
+        String beforeCall = firstNonBlank(step.path("precondition").asText(""), description);
+        String doCall = firstNonBlank(step.path("action").asText(""), description);
+        String successCheck = firstNonBlank(step.path("successSignal").asText(""), step.path("evidenceInterpretation").asText(""));
+        String failureSymptom = firstNonBlank(step.path("failureSignal").asText(""), step.path("confidenceReason").asText(""));
+        String nextAction = firstNonBlank(step.path("userAction").asText(""), step.path("evidenceInterpretation").asText(""));
+        attachGuideBundle(step, beforeCall, doCall, successCheck, failureSymptom, nextAction, evidenceAnchorFromLinks(step.path("evidenceLinks")));
+    }
+
     private void attachGuideBundle(
             ObjectNode target,
             String beforeCall,
@@ -622,6 +699,29 @@ public class LlmServiceBuildSupport {
         return ids.isEmpty() ? "" : "evidenceIds: " + String.join(", ", ids);
     }
 
+    private String evidenceAnchorFromLinks(JsonNode evidenceLinks) {
+        if (evidenceLinks == null || !evidenceLinks.isArray()) {
+            return "";
+        }
+        List<String> anchors = new ArrayList<>();
+        for (int i = 0; i < evidenceLinks.size() && anchors.size() < 3; i++) {
+            JsonNode link = evidenceLinks.get(i);
+            String evidenceId = link.path("evidenceId").isMissingNode()
+                    ? ""
+                    : link.path("evidenceId").asText("");
+            String filePath = link.path("filePath").asText("");
+            String lines = link.path("lines").asText("");
+            String anchor = firstNonBlank(
+                    evidenceId.isBlank() ? "" : "evidenceId: " + evidenceId,
+                    filePath.isBlank() ? "" : filePath + (lines.isBlank() ? "" : ":" + lines)
+            );
+            if (!anchor.isBlank()) {
+                anchors.add(anchor);
+            }
+        }
+        return anchors.isEmpty() ? "" : String.join(", ", anchors);
+    }
+
     private ObjectNode normalizeOverview(JsonNode rawOverview, JsonNode structure) {
         JsonNode seed = structure.path("overviewSeed");
         ObjectNode overview = objectMapper.createObjectNode();
@@ -644,6 +744,7 @@ public class LlmServiceBuildSupport {
                 rawOverview.path("startGuide").asText(""),
                 "대표 시나리오의 1단계부터 순서대로 실행하고, 각 단계의 메서드/근거 위치를 함께 확인한다."
         ));
+        copyTextFields(rawOverview, overview, OVERVIEW_RICH_TEXT_FIELDS);
         return overview;
     }
 
@@ -662,6 +763,7 @@ public class LlmServiceBuildSupport {
             node.put("order", raw.path("order").asInt(i + 1));
             node.put("title", shortenText(raw.path("title").asText("단계"), 50));
             node.put("description", shortenText(raw.path("description").asText("핵심 메서드를 호출한다."), 120));
+            copyTextFields(raw, node, METHOD_FLOW_RICH_TEXT_FIELDS);
             String methodFqn = firstNonBlank(raw.path("methodFqn").asText(""), raw.path("fqn").asText(""));
             String classFqn = firstNonBlank(raw.path("classFqn").asText(""), ownerFromMethodFqn(methodFqn));
             putIfText(node, "classFqn", classFqn);
@@ -891,9 +993,10 @@ public class LlmServiceBuildSupport {
     /**
      * 메서드 seed와 흐름/주의사항을 결합해 메서드 카드 문서를 생성한다.
      */
-    public ArrayNode buildCoreMethodCards(JsonNode methodSeed, JsonNode flowSeed, JsonNode cautions) {
+    public ArrayNode buildCoreMethodCards(JsonNode methodSeed, JsonNode flowSeed, JsonNode cautions, JsonNode scenarios) {
         Map<String, List<String>> cautionByMethod = indexCautionsByMethod(cautions);
         Map<String, Integer> orderByMethod = indexMethodOrder(flowSeed);
+        Map<String, JsonNode> scenarioStepByMethod = indexScenarioStepByMethod(scenarios);
 
         ArrayNode out = objectMapper.createArrayNode();
         if (!methodSeed.isArray()) {
@@ -909,6 +1012,7 @@ public class LlmServiceBuildSupport {
             String classFqn = seed.path("classFqn").asText("");
             String whenToUse = inferWhenToUse(methodName);
             List<String> methodCautions = cautionByMethod.getOrDefault(fqn, List.of());
+            JsonNode scenarioStep = scenarioStepByMethod.getOrDefault(fqn, NullNode.getInstance());
             ApiDocSummarySupport.SummaryView summary = ApiDocSummarySupport.fromMethodSeed(
                     seed,
                     classFqn,
@@ -931,39 +1035,18 @@ public class LlmServiceBuildSupport {
             card.put("classFqn", classFqn);
             card.put("fqn", fqn);
             card.put("summaryRaw", guide.summaryRaw());
-            card.put("summaryNarrative", guide.narrative());
-            card.put("summaryPreview", guide.narrative());
+            attachMethodGuideBundle(card, guide, scenarioStep);
+            String guideNarrative = card.path("guideNarrative").asText(guide.narrative());
+            card.put("summaryNarrative", guideNarrative);
+            card.put("summaryPreview", guideNarrative);
             card.put("summaryTruncated", false);
-            card.put("whatItDoes", guide.narrative());
-            card.put("whatItDoesPreview", guide.narrative());
-            card.put("whatItDoesFull", guide.narrative());
+            card.put("whatItDoes", guideNarrative);
+            card.put("whatItDoesPreview", guideNarrative);
+            card.put("whatItDoesFull", guideNarrative);
             card.put("whatItDoesTruncated", false);
-            card.put("guideNarrative", guide.narrative());
             card.put("whenToUse", whenToUse);
 
-            ObjectNode guideSlots = card.putObject("guideSlots");
-            guideSlots.put("beforeCall", guide.slots().beforeCall());
-            guideSlots.put("doCall", guide.slots().doCall());
-            guideSlots.put("successCheck", guide.slots().successCheck());
-            guideSlots.put("failureSymptom", guide.slots().failureSymptom());
-            guideSlots.put("nextAction", guide.slots().nextAction());
-
-            ObjectNode guideQuality = card.putObject("guideQuality");
-            guideQuality.put("actionabilityScore", guide.quality().actionabilityScore());
-            guideQuality.put("slotCoverage", guide.quality().slotCoverage());
-            guideQuality.put("evidenceCoverage", guide.quality().evidenceCoverage());
-            guideQuality.put("forbiddenPhraseRate", guide.quality().forbiddenPhraseRate());
-            guideQuality.put("repetitionRate", guide.quality().repetitionRate());
-            guideQuality.put("threshold", ACTIONABILITY_THRESHOLD);
-            guideQuality.put("meetsThreshold", guide.quality().actionabilityScore() >= ACTIONABILITY_THRESHOLD);
-            card.put("actionabilityScore", guide.quality().actionabilityScore());
-
-            ObjectNode slotEvidence = card.putObject("slotEvidence");
-            putIfText(slotEvidence, "beforeCall", guide.evidenceAnchor());
-            putIfText(slotEvidence, "doCall", guide.evidenceAnchor());
-            putIfText(slotEvidence, "successCheck", guide.evidenceAnchor());
-            putIfText(slotEvidence, "failureSymptom", guide.evidenceAnchor());
-            putIfText(slotEvidence, "nextAction", guide.evidenceAnchor());
+            attachUsageScenario(card, scenarioStep);
             card.put("inputs", extractInputs(seed.path("signatureHint").asText("")));
             card.put("returns", extractReturns(seed.path("signatureHint").asText("")));
             card.put("changesState", inferStateChange(methodName));
@@ -979,6 +1062,86 @@ public class LlmServiceBuildSupport {
             }
             if (seed.path("endLine").canConvertToInt()) {
                 evidence.put("endLine", seed.path("endLine").asInt());
+            }
+        }
+        return out;
+    }
+
+    private void attachMethodGuideBundle(
+            ObjectNode card,
+            ApiDocGuideSupport.GuideView guide,
+            JsonNode scenarioStep
+    ) {
+        String beforeCall = firstNonBlank(scenarioStep.path("precondition").asText(""), guide.slots().beforeCall());
+        String doCall = firstNonBlank(
+                scenarioStep.path("action").asText(""),
+                scenarioStep.path("description").asText(""),
+                guide.slots().doCall()
+        );
+        String successCheck = firstNonBlank(scenarioStep.path("successSignal").asText(""), guide.slots().successCheck());
+        String failureSymptom = firstNonBlank(scenarioStep.path("failureSignal").asText(""), guide.slots().failureSymptom());
+        String nextAction = firstNonBlank(
+                scenarioStep.path("userAction").asText(""),
+                scenarioStep.path("evidenceInterpretation").asText(""),
+                guide.slots().nextAction()
+        );
+        String evidenceAnchor = firstNonBlank(evidenceAnchorFromLinks(scenarioStep.path("evidenceLinks")), guide.evidenceAnchor());
+        attachGuideBundle(card, beforeCall, doCall, successCheck, failureSymptom, nextAction, evidenceAnchor);
+    }
+
+    private void attachUsageScenario(ObjectNode card, JsonNode scenarioStep) {
+        if (card == null) {
+            return;
+        }
+        if (scenarioStep == null || scenarioStep.isMissingNode() || scenarioStep.isNull()) {
+            card.put("llmEnhanced", false);
+            return;
+        }
+        ObjectNode usageScenario = card.putObject("usageScenario");
+        copyTextFields(scenarioStep, usageScenario, List.of(
+                "scenarioId",
+                "scenarioTitle",
+                "scenarioIntent",
+                "description",
+                "precondition",
+                "action",
+                "successSignal",
+                "failureSignal",
+                "userAction",
+                "dataHandled",
+                "evidenceInterpretation",
+                "confidenceReason"
+        ));
+        usageScenario.put("stepNo", scenarioStep.path("stepNo").asInt(0));
+        if (scenarioStep.path("confidence").isNumber()) {
+            usageScenario.put("confidence", scenarioStep.path("confidence").asDouble());
+        }
+        if (scenarioStep.path("evidenceLinks").isArray()) {
+            usageScenario.set("evidenceLinks", scenarioStep.path("evidenceLinks").deepCopy());
+        }
+        card.put("llmEnhanced", true);
+    }
+
+    private Map<String, JsonNode> indexScenarioStepByMethod(JsonNode scenarios) {
+        Map<String, JsonNode> out = new LinkedHashMap<>();
+        if (scenarios == null || !scenarios.isArray()) {
+            return out;
+        }
+        for (JsonNode scenario : scenarios) {
+            JsonNode steps = scenario.path("steps");
+            if (!steps.isArray()) {
+                continue;
+            }
+            for (JsonNode step : steps) {
+                String methodFqn = step.path("methodFqn").asText("");
+                if (methodFqn.isBlank() || out.containsKey(methodFqn)) {
+                    continue;
+                }
+                ObjectNode indexed = step.deepCopy();
+                putIfText(indexed, "scenarioId", scenario.path("scenarioId").asText(""));
+                putIfText(indexed, "scenarioTitle", scenario.path("title").asText(""));
+                putIfText(indexed, "scenarioIntent", scenario.path("intent").asText(""));
+                out.put(methodFqn, indexed);
             }
         }
         return out;
@@ -1521,6 +1684,15 @@ public class LlmServiceBuildSupport {
         String trimmed = value.trim();
         if (!trimmed.isBlank()) {
             node.put(key, trimmed);
+        }
+    }
+
+    private void copyTextFields(JsonNode source, ObjectNode target, List<String> fieldNames) {
+        if (source == null || target == null || fieldNames == null) {
+            return;
+        }
+        for (String fieldName : fieldNames) {
+            putIfText(target, fieldName, source.path(fieldName).asText(""));
         }
     }
 

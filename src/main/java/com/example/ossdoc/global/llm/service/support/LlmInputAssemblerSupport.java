@@ -13,7 +13,7 @@ public final class LlmInputAssemblerSupport {
     private LlmInputAssemblerSupport() {
     }
 
-    private static final int MAX_SNIPPET_LENGTH = 180;
+    private static final int MAX_SNIPPET_LENGTH = 480;
     private static final String MAIN_JAVA_MARKER = "/src/main/java/";
     private static final String MAIN_KOTLIN_MARKER = "/src/main/kotlin/";
     private static final String TEST_MARKER = "/src/test/";

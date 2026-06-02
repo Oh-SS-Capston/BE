@@ -32,7 +32,7 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class LlmInputAssemblerService {
 
-    private static final int MAX_AUTO_EVIDENCE = 28;
+    private static final int MAX_AUTO_EVIDENCE = 60;
 
     private final ArtifactRepository artifactRepository;
     private final ObjectMapper objectMapper;

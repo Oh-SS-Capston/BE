@@ -77,9 +77,9 @@ ossdoc:
   analysis-cache:
     # 구조 분석/LLM/출력 계약이 바뀌면 아래 버전값을 올려서 캐시를 분리합니다.
     pipeline-contract-version: ${OSSDOC_CACHE_PIPELINE_CONTRACT_VERSION:pipeline-v1}
-    llm-profile-version: ${OSSDOC_CACHE_LLM_PROFILE_VERSION:llm-profile-v1}
-    prompt-template-version: ${OSSDOC_CACHE_PROMPT_TEMPLATE_VERSION:prompt-v1}
-    output-schema-version: ${OSSDOC_CACHE_OUTPUT_SCHEMA_VERSION:schema-v1}
+    llm-profile-version: ${OSSDOC_CACHE_LLM_PROFILE_VERSION:llm-profile-sonnet-v2}
+    prompt-template-version: ${OSSDOC_CACHE_PROMPT_TEMPLATE_VERSION:prompt-v2}
+    output-schema-version: ${OSSDOC_CACHE_OUTPUT_SCHEMA_VERSION:schema-v2}
     default-run-options-signature: ${OSSDOC_CACHE_DEFAULT_RUN_OPTIONS_SIGNATURE:options-default-v1}
     # true면 실제 Redis 저장소, false면 Noop 저장소를 사용합니다.
     redis-enabled: ${OSSDOC_CACHE_REDIS_ENABLED:false}
@@ -120,8 +120,8 @@ jwt:
 
 claude:
   api-key: ${CLAUDE_API_KEY:}
-  model: ${CLAUDE_MODEL:claude-sonnet-4-5}
-  # Step2~5는 기본적으로 Haiku를 사용하고, 실패 시 서비스에서 Sonnet 폴백을 수행한다.
+  model: ${CLAUDE_MODEL:claude-sonnet-4-6}
+  # 기본 생성은 Sonnet을 사용하고, 실패 시 서비스에서 Haiku fallback을 수행한다.
   haiku-model: ${CLAUDE_HAIKU_MODEL:claude-haiku-4-5}
   # enabled: ${LLM_ENABLED:false}
   max-tokens: ${CLAUDE_MAX_TOKENS:20000}
