@@ -45,7 +45,7 @@ public class SemanticSignalAugmenter {
                                        Map<String, Double> undirectedWeightMap) {
         Map<String, Object> signalsMeta = new LinkedHashMap<>();
 
-        // 5순위 PublicApiFlowSignalProvider BFS 용: augmentation 시작 전 코드 엣지만 스냅샷.
+        // BFS 기반 provider 용: augmentation 시작 전 코드 엣지만 스냅샷한다(현재 활성 provider 중 사용처 없음, 확장 여지로 유지).
         // 이후 provider 들이 undirectedWeightMap 에 synthetic edge 를 추가하므로 미리 캡처한다.
         List<ProjectedEdge> codeEdges = buildCodeEdgeSnapshot(undirectedWeightMap);
 

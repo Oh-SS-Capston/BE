@@ -67,12 +67,16 @@ public class EntryPointDetectService {
     );
     // P1-2: apiguardian @API 어노테이션 감지용 fragment (소문자 비교)
     private static final String API_GUARDIAN_ANNOTATION_FRAGMENT = "apiguardian";
+    private static final Set<String> APIGUARDIAN_STATUSES =
+            Set.of("STABLE", "MAINTAINED", "EXPERIMENTAL", "INTERNAL", "DEPRECATED");
     private static final List<String> JAVADOC_KEYWORDS = List.of(
             "main entry point", "primary api", "use this class",
             "start with", "bootstrap", "configure", "@apiNote"
     );
     private static final int MIN_FACADE_METHODS = 5;
     private static final int MED_MIN_SCORE = 3;
+    // #2: TYPE 진입점당 명시 진입 메서드 상한 (ApiFlowTraceService.MAX_TYPE_SEED_METHODS와 동형)
+    private static final int MAX_ENTRY_METHODS = 10;
 
     private final SymbolRepository symbolRepository;
     private final EdgeRepository edgeRepository;
@@ -90,8 +94,9 @@ public class EntryPointDetectService {
 
         Map<String, Integer> returnedByPublicApi =
                 countReturnedByPublicApi(runId, publicSymbolIds, childMaps.methodOwnerIndex());
+        Map<String, Integer> annotationUsageCounts = countAnnotationUsage(runId);
 
-        FactsSignals factsSignals = loadFactsSignals(runId);
+        FactsSignals factsSignals = loadFactsSignals(runId, allSymbols);
         Set<String> exportedPackages = loadExportedPackages(allSymbols);
         Set<String> implementorSymbolIds = loadSymbolsWithOutboundInheritance(runId);
         ModuleRoleIndex moduleRoleIndex = loadModuleRoleIndex(runId);
@@ -108,7 +113,8 @@ public class EntryPointDetectService {
             if (shouldExclude(symbol, exportedPackages, childMaps)) continue;
 
             PhaseResult result = evaluatePhases(
-                    symbol, childMaps, returnedByPublicApi, factsSignals, implementorSymbolIds, moduleRoleIndex);
+                    symbol, childMaps, returnedByPublicApi, annotationUsageCounts,
+                    factsSignals, implementorSymbolIds, moduleRoleIndex);
             if ("NONE".equals(result.confidence())) continue;
 
             candidates.add(EntryPointCandidate.builder()
@@ -124,6 +130,8 @@ public class EntryPointDetectService {
                     .confidence(result.confidence())
                     .signals(List.copyOf(result.signals()))
                     .score(result.score())
+                    .entryMethods(resolveEntryMethods(symbol.getSymbolId(), childMaps))
+                    .evidenceCompleteness(result.evidenceCompleteness())
                     .build());
         }
 
@@ -170,6 +178,21 @@ public class EntryPointDetectService {
     }
 
     /**
+     * #5: ANNOTATED_WITH 엣지의 인바운드 카운트 — 어노테이션 타입별 사용 빈도.
+     * RETURNS 빈도 집계(countReturnedByPublicApi)와 동형 구조.
+     */
+    private Map<String, Integer> countAnnotationUsage(String runId) {
+        List<Edge> edges = edgeRepository
+                .findAllByRun_RunIdAndEdgeTypeAndToSymbolIsNotNull(runId, EdgeType.ANNOTATED_WITH);
+        Map<String, Integer> counts = new HashMap<>();
+        for (Edge edge : edges) {
+            String annotationId = edge.getToSymbol().getSymbolId();
+            counts.merge(annotationId, 1, Integer::sum);
+        }
+        return counts;
+    }
+
+    /**
      * RETURNS 엣지에서 public API 메서드가 반환하는 타입별 빈도를 계산한다.
      * → 빈도가 높은 타입은 Secondary entry point 후보.
      */
@@ -196,27 +219,41 @@ public class EntryPointDetectService {
     /**
      * FACTS_JSON 아티팩트에서 README 언급 / 예제 코드 참조 신호를 추출한다.
      *
-     * observations.readme_mentions 버킷에서 target_symbol(simpleName)을 README 신호로 인식한다.
-     * evidence 배열에서 파일 경로가 example/sample/demo 계열이면 예제 코드 신호로 인식한다.
+     * README 매칭 전략(#3): FQN 우선 — target_symbol에 패키지가 포함된 경우 FQN 버킷에 보관하고
+     * 후보 qualifiedName(prefix 정규화 후)과 정확 일치 시에만 README_MENTION HIGH 승격.
+     * FQN 매칭 실패 시 simpleName fallback은 프로젝트 내 해당 simpleName 타입이 유일할 때만 허용.
      */
-    private FactsSignals loadFactsSignals(String runId) {
+    private FactsSignals loadFactsSignals(String runId, List<SymbolEntity> allSymbols) {
         Optional<Artifact> opt = artifactRepository
                 .findTopByRun_RunIdAndKindOrderByCreatedAtDesc(runId, ArtifactKind.FACTS_JSON);
+
+        // 프로젝트 TYPE 심볼의 simpleName 분포 — simpleName fallback 모호성 판정에 사용
+        Map<String, Long> projectSimpleNameCount = allSymbols.stream()
+                .filter(s -> s.getSymbolKind() == SymbolKind.TYPE
+                        && s.getSimpleName() != null && !s.getSimpleName().isEmpty())
+                .collect(Collectors.groupingBy(SymbolEntity::getSimpleName, Collectors.counting()));
+
         if (opt.isEmpty()) {
-            return new FactsSignals(Set.of(), Set.of());
+            return new FactsSignals(Set.of(), Set.of(), Map.copyOf(projectSimpleNameCount), Set.of());
         }
 
         JsonNode meta = opt.get().getMeta();
-        Set<String> readmeMentioned   = new HashSet<>();
-        Set<String> exampleReferenced = new HashSet<>();
+        Set<String> readmeMentionedFqns        = new HashSet<>();
+        Set<String> readmeMentionedSimpleNames  = new HashSet<>();
+        Set<String> exampleReferenced          = new HashSet<>();
 
         // observations.readme_mentions 버킷: target_symbol = simpleName 또는 FQCN
         JsonNode readmeMentions = meta.path("observations").path("readme_mentions");
         if (readmeMentions.isArray()) {
             for (JsonNode obs : readmeMentions) {
                 String symbol = obs.path("target_symbol").asText("");
+                int colonIdx = symbol.indexOf(':');
+                String fqn = colonIdx >= 0 ? symbol.substring(colonIdx + 1) : symbol;
+                if (fqn.contains(".")) {
+                    readmeMentionedFqns.add(fqn);
+                }
                 String simpleName = extractSimpleName(symbol);
-                if (!simpleName.isEmpty()) readmeMentioned.add(simpleName);
+                if (!simpleName.isEmpty()) readmeMentionedSimpleNames.add(simpleName);
             }
         }
 
@@ -235,7 +272,9 @@ public class EntryPointDetectService {
         }
 
         return new FactsSignals(
-                Set.copyOf(readmeMentioned),
+                Set.copyOf(readmeMentionedFqns),
+                Set.copyOf(readmeMentionedSimpleNames),
+                Map.copyOf(projectSimpleNameCount),
                 Set.copyOf(exampleReferenced));
     }
 
@@ -293,9 +332,10 @@ public class EntryPointDetectService {
             boolean exampleModule = containsAny(roleText,
                     "example", "examples", "sample", "samples", "demo", "demos", "documentation", "docs", "test", "tests");
             boolean publishedLibrary = !exampleModule && !groupId.isBlank() && !artifactId.isBlank();
-            ModuleRole role = new ModuleRole(exampleModule, publishedLibrary);
+            String buildModeStr = module.path("buildMode").asText("UNKNOWN");
+            ModuleRole role = new ModuleRole(exampleModule, publishedLibrary, buildModeStr);
             registerModuleRoots(bySourceRoot, module.path("sourceRoots"), role);
-            registerModuleRoots(bySourceRoot, module.path("testRoots"), new ModuleRole(true, false));
+            registerModuleRoots(bySourceRoot, module.path("testRoots"), new ModuleRole(true, false, buildModeStr));
         }
         return new ModuleRoleIndex(Map.copyOf(bySourceRoot));
     }
@@ -366,17 +406,29 @@ public class EntryPointDetectService {
     private PhaseResult evaluatePhases(SymbolEntity symbol,
                                         ChildMaps childMaps,
                                         Map<String, Integer> returnedByPublicApi,
+                                        Map<String, Integer> annotationUsageCounts,
                                         FactsSignals factsSignals,
                                         Set<String> implementorSymbolIds,
                                         ModuleRoleIndex moduleRoleIndex) {
+        // #6: 심볼의 근거 추출 완전성을 먼저 계산 (모든 반환 경로에서 사용)
+        EntryPointCandidate.EvidenceCompleteness ec = buildEvidenceCompleteness(symbol, moduleRoleIndex);
+
         List<String> signals  = new ArrayList<>();
         String simpleName     = symbol.getSimpleName();
         String symbolId       = symbol.getSymbolId();
 
         // Phase 1 — 문서 직접 언급 신호 (HIGH 즉시 확정)
         // P0-1: EXAMPLE_CODE_REFERENCE는 HIGH 승격 신호에서 제거. 예제 경로 심볼은 shouldExclude()에서 차단.
-        if (simpleName != null && factsSignals.readmeMentionedSimpleNames().contains(simpleName)) {
-            signals.add("README_MENTION");
+        // #3: FQN 우선 매칭. simpleName fallback은 프로젝트 내 해당 simpleName 타입이 유일할 때만 허용.
+        String qualifiedName = symbol.getQualifiedName();
+        if (qualifiedName != null) {
+            int cIdx = qualifiedName.indexOf(':');
+            String fqn = cIdx >= 0 ? qualifiedName.substring(cIdx + 1) : qualifiedName;
+            boolean readmeMatch = factsSignals.readmeMentionedFqns().contains(fqn)
+                    || (simpleName != null
+                        && factsSignals.readmeMentionedSimpleNames().contains(simpleName)
+                        && factsSignals.projectSimpleNameCount().getOrDefault(simpleName, 0L) == 1L);
+            if (readmeMatch) signals.add("README_MENTION");
         }
         if (hasJavadocEntryPointSignal(symbol)) {
             signals.add("JAVADOC_ENTRY_POINT");
@@ -395,13 +447,24 @@ public class EntryPointDetectService {
                 bonus += 1;
             }
             String role = determineRole(symbolId, signals, returnedByPublicApi);
-            return new PhaseResult("HIGH", role, signals, 10 + bonus);
+            // #5: 어노테이션 타입은 Phase 1 HIGH 경로에서도 PRIMARY 강제
+            if ("annotation".equals(resolveTypeKind(symbol))) role = "PRIMARY";
+            // #6: javadoc·annotation 모두 미추출 → HIGH 승격 보류, MED 캡 + EVIDENCE_DEGRADED 신호
+            if (!ec.isJavadocAvailable() && !ec.isAnnotationsAvailable()) {
+                signals.add("EVIDENCE_DEGRADED");
+                ec = ec.toBuilder().degraded(true).build();
+                return new PhaseResult("MED", role, signals, 10 + bonus, ec);
+            }
+            return new PhaseResult("HIGH", role, signals, 10 + bonus, ec);
         }
 
         // Phase 2 ~ 4 — 점수 누적
         int score = phase2Score(symbolId, childMaps, signals)
                 + phase3Score(symbol, childMaps, signals)
                 + phase4Score(symbolId, returnedByPublicApi, signals);
+
+        // #5: 어노테이션 타입 전용 신호 (constructor/factory 신호 부재 보완)
+        score += phaseAnnotationScore(symbol, annotationUsageCounts, signals);
 
         // P1-2: @API(EXPERIMENTAL) → MED_MIN_SCORE 이상 보장 (애너테이션/인터페이스 타입 포함)
         if ("EXPERIMENTAL".equals(apiGuardianStatus)) {
@@ -413,7 +476,28 @@ public class EntryPointDetectService {
             score += 1;
         }
 
-        if (score == 0) return new PhaseResult("NONE", null, signals, 0);
+        // #4: DI 스테레오타입 빈 오탐 억제
+        BeanKind beanKind = detectBeanKind(symbol);
+        if (beanKind == BeanKind.STEREOTYPE) {
+            signals.add("STEREOTYPE_BEAN");
+            // PUBLIC_CONSTRUCTOR 무력화: DI 컨테이너가 생성 → 사용자 직접 생성의 증거 아님
+            if (signals.contains("PUBLIC_CONSTRUCTOR")) {
+                score -= 2;
+            }
+            // 라이브러리 진입 신호(STATIC_FACTORY·NAMING_HIGH·PUBLISHED_LIBRARY_MODULE)가 없으면 NONE
+            boolean hasSurvivorSignal = signals.contains("STATIC_FACTORY")
+                    || signals.contains("NAMING_HIGH")
+                    || signals.contains("PUBLISHED_LIBRARY_MODULE");
+            if (!hasSurvivorSignal) {
+                return new PhaseResult("NONE", null, signals, 0, ec);
+            }
+        } else if (beanKind == BeanKind.CONFIGURATION) {
+            // @AutoConfiguration 없는 내부 설정성 @Configuration → 감점 (강등 금지 신호는 Phase 1 HIGH에서 이미 처리)
+            signals.add("INTERNAL_CONFIG");
+            score = Math.max(0, score - 1);
+        }
+
+        if (score == 0) return new PhaseResult("NONE", null, signals, 0, ec);
 
         String confidence = score >= MED_MIN_SCORE ? "MED" : "LOW";
 
@@ -423,11 +507,13 @@ public class EntryPointDetectService {
         if ("LOW".equals(confidence)
                 && signals.size() == 1 && signals.contains("PUBLIC_CONSTRUCTOR")
                 && implementorSymbolIds.contains(symbolId)) {
-            return new PhaseResult("NONE", null, signals, 0);
+            return new PhaseResult("NONE", null, signals, 0, ec);
         }
 
         String role = determineRole(symbolId, signals, returnedByPublicApi);
-        return new PhaseResult(confidence, role, signals, score);
+        // #5: 어노테이션 타입은 직접 사용 진입면 → PRIMARY 강제
+        if ("annotation".equals(resolveTypeKind(symbol))) role = "PRIMARY";
+        return new PhaseResult(confidence, role, signals, score, ec);
     }
 
     /**
@@ -579,7 +665,9 @@ public class EntryPointDetectService {
     // P0-1: com.example.* / example.* 패키지는 예제 코드이므로 Public API 후보에서 제외
     private boolean hasExamplePackage(String qualifiedName) {
         if (qualifiedName == null) return false;
-        String lower = qualifiedName.toLowerCase(Locale.ROOT);
+        int colonIdx = qualifiedName.indexOf(':');
+        String fqn = colonIdx >= 0 ? qualifiedName.substring(colonIdx + 1) : qualifiedName;
+        String lower = fqn.toLowerCase(Locale.ROOT);
         return EXAMPLE_PKG_PREFIXES.stream().anyMatch(lower::startsWith);
     }
 
@@ -603,8 +691,11 @@ public class EntryPointDetectService {
 
     private String extractPackageName(String qualifiedName) {
         if (qualifiedName == null) return null;
-        int idx = qualifiedName.lastIndexOf('.');
-        return idx > 0 ? qualifiedName.substring(0, idx) : null;
+        // kind prefix ("type:", "method:", …) 제거 후 패키지 추출
+        int colonIdx = qualifiedName.indexOf(':');
+        String fqn = colonIdx >= 0 ? qualifiedName.substring(colonIdx + 1) : qualifiedName;
+        int idx = fqn.lastIndexOf('.');
+        return idx > 0 ? fqn.substring(0, idx) : null;
     }
 
     private boolean isDeprecated(SymbolEntity symbol) {
@@ -708,7 +799,15 @@ public class EntryPointDetectService {
         return colon >= 0 ? name.substring(colon + 1) : name;
     }
 
-    // P1-2: apiguardian @API status 감지 — NONE / STABLE / MAINTAINED / EXPERIMENTAL / INTERNAL / DEPRECATED
+    /**
+     * apiguardian @API status 감지 — NONE / STABLE / MAINTAINED / EXPERIMENTAL / INTERNAL / DEPRECATED
+     *
+     * 계층 매칭 정책(#7):
+     * 1. 텍스트 형태 어노테이션에 "apiguardian" 포함 → STABLE 기본 (텍스트엔 status 속성 없음)
+     * 2. 객체 형태 + FQN에 "apiguardian" 포함 → 진짜 apiguardian; status 없으면 STABLE 기본
+     * 3. 객체 형태 + simpleName "api"/"Api" → status가 존재하고 유효 apiguardian status일 때만 인정
+     * 4. status 없는 simpleName-only 매칭 → NONE (Swagger @Api 오탐 방지)
+     */
     private String detectApiGuardianStatus(SymbolEntity symbol) {
         JsonNode sig = symbol.getSignature();
         if (sig == null || sig.isNull()) return "NONE";
@@ -719,25 +818,71 @@ public class EntryPointDetectService {
                 if (ann.asText("").toLowerCase(Locale.ROOT).contains(API_GUARDIAN_ANNOTATION_FRAGMENT)) {
                     return "STABLE";
                 }
+                // simpleName "api"만인 텍스트는 status 속성 없으므로 인정 불가
             } else if (ann.isObject()) {
-                String annName = resolveAnnotationName(ann).toLowerCase(Locale.ROOT);
-                if (annName.contains(API_GUARDIAN_ANNOTATION_FRAGMENT) || "api".equals(annName)) {
-                    String status = ann.path("status").asText("");
-                    if (status.isBlank()) status = ann.path("attributes").path("status").asText("");
-                    if (status.isBlank()) status = ann.path("params").path("status").asText("");
+                String annName = resolveAnnotationName(ann);
+                String annNameLower = annName.toLowerCase(Locale.ROOT);
+                if (annNameLower.contains(API_GUARDIAN_ANNOTATION_FRAGMENT)) {
+                    // FQN에 "apiguardian" 패키지 포함 → 진짜 apiguardian
+                    String status = resolveAnnotationStatus(ann);
                     return status.isBlank() ? "STABLE" : status.toUpperCase(Locale.ROOT);
+                }
+                if ("api".equals(annNameLower)) {
+                    // simpleName "api"/"Api" → status 있고 유효 apiguardian status여야만 인정
+                    String status = resolveAnnotationStatus(ann).toUpperCase(Locale.ROOT);
+                    return APIGUARDIAN_STATUSES.contains(status) ? status : "NONE";
                 }
             }
         }
         return "NONE";
     }
 
+    private String resolveAnnotationStatus(JsonNode ann) {
+        String status = ann.path("status").asText("");
+        if (!status.isBlank()) return status;
+        status = ann.path("attributes").path("status").asText("");
+        if (!status.isBlank()) return status;
+        return ann.path("params").path("status").asText("");
+    }
+
     private String resolveAnnotationName(JsonNode ann) {
-        for (String key : List.of("name", "type", "fqn", "qualifiedName")) {
+        // FQN 키를 우선 시도해 Swagger @Api 등 simpleName 동명 어노테이션과 구분한다
+        for (String key : List.of("fqn", "qualifiedName", "name", "type")) {
             String val = ann.path(key).asText("");
             if (!val.isBlank()) return val;
         }
         return "";
+    }
+
+    private String extractAnnotationNameRaw(JsonNode ann) {
+        return ann.isTextual() ? ann.asText("") : resolveAnnotationName(ann);
+    }
+
+    /**
+     * #4: Spring DI 빈 종류 감지.
+     * - STEREOTYPE: @Service / @Component / @Repository → PUBLIC_CONSTRUCTOR 무력화 + 진입 신호 없으면 NONE
+     * - CONFIGURATION: @Configuration(단독) → 감점. @AutoConfiguration 포함 시 NONE(강등 금지)
+     */
+    private BeanKind detectBeanKind(SymbolEntity symbol) {
+        JsonNode sig = symbol.getSignature();
+        if (sig == null || sig.isNull()) return BeanKind.NONE;
+        JsonNode annotations = sig.path("annotations");
+        if (!annotations.isArray()) return BeanKind.NONE;
+        boolean hasConfiguration = false;
+        for (JsonNode ann : annotations) {
+            String lower = extractAnnotationNameRaw(ann).toLowerCase(Locale.ROOT);
+            String simple = extractSimpleName(lower);
+            if ("service".equals(simple) || "component".equals(simple) || "repository".equals(simple)) {
+                return BeanKind.STEREOTYPE;
+            }
+            if (lower.contains("autoconfiguration")) {
+                return BeanKind.NONE; // @AutoConfiguration → 공개 자동설정 진입점, 강등 금지
+            }
+            if ("configuration".equals(simple)) {
+                hasConfiguration = true;
+            }
+        }
+        return hasConfiguration ? BeanKind.CONFIGURATION : BeanKind.NONE;
     }
 
     private void registerModuleRoots(Map<String, ModuleRole> bySourceRoot, JsonNode roots, ModuleRole role) {
@@ -771,6 +916,146 @@ public class EntryPointDetectService {
         return false;
     }
 
+    /**
+     * #5: 어노테이션 타입 전용 점수.
+     *
+     * PUBLIC_ANNOTATION_TYPE (+2): 공개 @interface는 라이브러리 API 표면 자체.
+     * META_ANNOTATION_RUNTIME (+2): @Retention(RUNTIME) + @Target 보유 — 런타임 처리 대상의 강한 증거.
+     * ANNOTATION_USAGE_FREQ (+1): ANNOTATED_WITH 인바운드 ≥ 1 (실제 사용 빈도 신호).
+     *
+     * 비-어노테이션 typeKind이면 0점 반환.
+     */
+    private int phaseAnnotationScore(SymbolEntity symbol,
+                                      Map<String, Integer> annotationUsageCounts,
+                                      List<String> signals) {
+        if (!"annotation".equals(resolveTypeKind(symbol))) return 0;
+
+        int score = 0;
+        signals.add("PUBLIC_ANNOTATION_TYPE");
+        score += 2;
+
+        if (hasRetentionRuntime(symbol) && hasTargetAnnotation(symbol)) {
+            signals.add("META_ANNOTATION_RUNTIME");
+            score += 2;
+        }
+
+        if (annotationUsageCounts.getOrDefault(symbol.getSymbolId(), 0) >= 1) {
+            signals.add("ANNOTATION_USAGE_FREQ");
+            score += 1;
+        }
+
+        return score;
+    }
+
+    /**
+     * @interface 자신의 어노테이션 중 @Retention(RUNTIME) 존재 여부.
+     * "value" / "attributes.value" / "params.value" 세 위치 모두 탐색.
+     */
+    private boolean hasRetentionRuntime(SymbolEntity symbol) {
+        JsonNode sig = symbol.getSignature();
+        if (sig == null || sig.isNull()) return false;
+        JsonNode annotations = sig.path("annotations");
+        if (!annotations.isArray()) return false;
+        for (JsonNode ann : annotations) {
+            String rawName = extractAnnotationNameRaw(ann).toLowerCase(Locale.ROOT);
+            if (!extractSimpleName(rawName).equals("retention")) continue;
+            String val = resolveRetentionValue(ann).toUpperCase(Locale.ROOT);
+            if ("RUNTIME".equals(val)) return true;
+        }
+        return false;
+    }
+
+    /** 어노테이션의 value 파라미터를 탐색한다 (RUNTIME/CLASS/SOURCE 판정용). */
+    private String resolveRetentionValue(JsonNode ann) {
+        if (ann.isTextual()) return "";
+        for (String path : List.of("value", "attributes/value", "params/value")) {
+            String[] parts = path.split("/");
+            JsonNode node = ann;
+            for (String part : parts) node = node.path(part);
+            String text = node.isArray() && node.size() > 0
+                    ? node.get(0).asText("") : node.asText("");
+            if (!text.isBlank()) return text;
+        }
+        return "";
+    }
+
+    /** @interface 자신의 어노테이션 중 @Target 존재 여부. */
+    private boolean hasTargetAnnotation(SymbolEntity symbol) {
+        JsonNode sig = symbol.getSignature();
+        if (sig == null || sig.isNull()) return false;
+        JsonNode annotations = sig.path("annotations");
+        if (!annotations.isArray()) return false;
+        for (JsonNode ann : annotations) {
+            String rawName = extractAnnotationNameRaw(ann).toLowerCase(Locale.ROOT);
+            if (extractSimpleName(rawName).equals("target")) return true;
+        }
+        return false;
+    }
+
+    /**
+     * #6: 심볼의 근거 추출 완전성 메타를 계산한다.
+     * sourceAvailable / javadocAvailable / annotationsAvailable / buildMode 필드를 채운다.
+     * degraded 여부는 evaluatePhases()에서 결정해 toBuilder()로 갱신한다.
+     */
+    private EntryPointCandidate.EvidenceCompleteness buildEvidenceCompleteness(
+            SymbolEntity symbol, ModuleRoleIndex moduleRoleIndex) {
+        boolean sourceAvailable = symbol.getSourceFile() != null
+                && symbol.getSourceFile().getPath() != null
+                && !symbol.getSourceFile().getPath().isBlank();
+        return EntryPointCandidate.EvidenceCompleteness.builder()
+                .sourceAvailable(sourceAvailable)
+                .javadocAvailable(isJavadocAvailable(symbol))
+                .annotationsAvailable(isAnnotationsAvailable(symbol))
+                .buildMode(moduleRoleIndex.resolveBuildMode(symbol))
+                .degraded(false)
+                .build();
+    }
+
+    private boolean isJavadocAvailable(SymbolEntity symbol) {
+        JsonNode sig = symbol.getSignature();
+        if (sig == null || sig.isNull()) return false;
+        return !sig.path("javadoc").asText("").isBlank();
+    }
+
+    private boolean isAnnotationsAvailable(SymbolEntity symbol) {
+        JsonNode sig = symbol.getSignature();
+        if (sig == null || sig.isNull()) return false;
+        JsonNode anns = sig.path("annotations");
+        return anns.isArray() && !anns.isEmpty();
+    }
+
+    /**
+     * #2: TYPE 진입점의 진입 메서드 목록을 결정한다.
+     * static factory → public static → public instance 우선순위로 최대 MAX_ENTRY_METHODS개 반환.
+     */
+    private List<EntryPointCandidate.EntryMethodInfo> resolveEntryMethods(
+            String symbolId, ChildMaps childMaps) {
+        return childMaps.methodsByOwner()
+                .getOrDefault(symbolId, List.of())
+                .stream()
+                .filter(m -> m.getAccess() == AccessLevel.PUBLIC)
+                .sorted(Comparator.comparingInt(this::entryMethodSeedPriority))
+                .limit(MAX_ENTRY_METHODS)
+                .map(m -> EntryPointCandidate.EntryMethodInfo.builder()
+                        .symbolId(m.getSymbolId())
+                        .simpleName(m.getSimpleName())
+                        .reason(classifyEntryMethodReason(m))
+                        .build())
+                .toList();
+    }
+
+    private String classifyEntryMethodReason(SymbolEntity method) {
+        if (isStaticMethod(method) && isFactoryMethodName(method.getSimpleName())) return "STATIC_FACTORY";
+        if (isStaticMethod(method)) return "PUBLIC_STATIC";
+        return "PUBLIC_INSTANCE";
+    }
+
+    private int entryMethodSeedPriority(SymbolEntity method) {
+        if (isStaticMethod(method) && isFactoryMethodName(method.getSimpleName())) return 0;
+        if (isStaticMethod(method)) return 1;
+        return 2;
+    }
+
     /** 강도 비교용 등급. HIGH > MED > LOW. 알 수 없는 값은 0. 대소문자·공백 무시. */
     public static int confidenceRank(String confidence) {
         if (confidence == null) return 0;
@@ -799,7 +1084,9 @@ public class EntryPointDetectService {
     ) {}
 
     private record FactsSignals(
+            Set<String> readmeMentionedFqns,
             Set<String> readmeMentionedSimpleNames,
+            Map<String, Long> projectSimpleNameCount,
             Set<String> exampleReferencedSimpleNames
     ) {}
 
@@ -807,10 +1094,11 @@ public class EntryPointDetectService {
             String confidence,
             String role,
             List<String> signals,
-            int score
+            int score,
+            EntryPointCandidate.EvidenceCompleteness evidenceCompleteness
     ) {}
 
-    private record ModuleRole(boolean exampleModule, boolean publishedLibrary) {}
+    private record ModuleRole(boolean exampleModule, boolean publishedLibrary, String buildMode) {}
 
     private record ModuleRoleIndex(Map<String, ModuleRole> bySourceRoot) {
         private static ModuleRoleIndex empty() {
@@ -825,6 +1113,11 @@ public class EntryPointDetectService {
         private boolean isPublishedLibrary(SymbolEntity symbol) {
             ModuleRole role = resolve(symbol);
             return role != null && role.publishedLibrary();
+        }
+
+        private String resolveBuildMode(SymbolEntity symbol) {
+            ModuleRole role = resolve(symbol);
+            return role != null && role.buildMode() != null ? role.buildMode() : "UNKNOWN";
         }
 
         private ModuleRole resolve(SymbolEntity symbol) {
@@ -845,4 +1138,6 @@ public class EntryPointDetectService {
             return normalized;
         }
     }
+
+    private enum BeanKind { NONE, STEREOTYPE, CONFIGURATION }
 }
