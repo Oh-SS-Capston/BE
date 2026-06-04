@@ -37,6 +37,7 @@ import java.util.stream.Collectors;
  * Phase 4 (점수 누적): 다른 public API 반환 타입 등장 빈도
  *
  * confidence: Phase 1 신호 ≥ 1 → HIGH / score ≥ 3 → MED / score ≥ 1 → LOW
+ *   #9: MED 후보 중 PUBLIC_STATIC_API + 공개 의도 근거(FACADE/NAMING/README/apiguardian) 결합 시 HIGH 조건부 승격
  * role: SECONDARY (returned by public API, 직접 생성 경로 없음) / PRIMARY (그 외)
  */
 @Service
@@ -510,10 +511,51 @@ public class EntryPointDetectService {
             return new PhaseResult("NONE", null, signals, 0, ec);
         }
 
+        // #9: 정적 facade(PUBLIC_STATIC_API) 조건부 HIGH 승격 (단독 승격 금지)
+        confidence = maybePromoteStaticFacade(confidence, signals, ec);
+
         String role = determineRole(symbolId, signals, returnedByPublicApi);
         // #5: 어노테이션 타입은 직접 사용 진입면 → PRIMARY 강제
         if ("annotation".equals(resolveTypeKind(symbol))) role = "PRIMARY";
         return new PhaseResult(confidence, role, signals, score, ec);
+    }
+
+    /**
+     * #9: 정적 facade(PUBLIC_STATIC_API)의 조건부 HIGH 승격.
+     *
+     * PUBLIC_STATIC_API는 주(主) 근거가 아니라 보조 신호다 — 단독으로 HIGH를 만들지 않는다
+     * (정적 메서드만 많은 단순 유틸 클래스를 HIGH로 오탐할 위험). 이미 MED 이상의 근거를 가진
+     * 후보 중 공개 의도 추가 근거가 결합될 때만 HIGH로 보정한다.
+     *
+     * 승격 조건(AND):
+     *   ① 현재 MED 이상 (score ≥ MED_MIN_SCORE → confidence == "MED")
+     *   ② 공개 의도 추가 근거 1개 이상:
+     *        README_MENTION | API_GUARDIAN_STABLE | FACADE_STRUCTURE | NAMING_HIGH | NAMING_MED
+     *      (README_MENTION·API_GUARDIAN_STABLE는 발생 시 Phase 1 HIGH로 선분기되므로
+     *       점수 경로의 실효 근거는 FACADE_STRUCTURE·NAMING이다. 정책 일관성을 위해 함께 명시.)
+     *   ③ internal/impl/util/helper/test 패키지 배제 — shouldExclude()에서 이미 보장.
+     *   ④ RETURNED_BY_PUBLIC_API 단독 근거가 아님 — ②의 화이트리스트에 미포함이라 자동 보장.
+     *   ⑤ evidence_degraded 아님 — javadoc·annotation 둘 다 부재면 승격 보류(#6 MED 캡 유지).
+     *
+     * 승격 시 PUBLIC_STATIC_API_PROMOTED 신호를 부여해 산출물에서 승격 사유를 추적 가능하게 한다.
+     */
+    private String maybePromoteStaticFacade(String confidence,
+                                            List<String> signals,
+                                            EntryPointCandidate.EvidenceCompleteness ec) {
+        if (!"MED".equals(confidence)) return confidence;                 // ①
+        if (!signals.contains("PUBLIC_STATIC_API")) return confidence;
+        if (!ec.isJavadocAvailable() && !ec.isAnnotationsAvailable()) {   // ⑤
+            return confidence;
+        }
+        boolean hasPublicIntent = signals.contains("README_MENTION")
+                || signals.contains("API_GUARDIAN_STABLE")
+                || signals.contains("FACADE_STRUCTURE")
+                || signals.contains("NAMING_HIGH")
+                || signals.contains("NAMING_MED");                        // ②④
+        if (!hasPublicIntent) return confidence;
+
+        signals.add("PUBLIC_STATIC_API_PROMOTED");
+        return "HIGH";
     }
 
     /**
@@ -699,14 +741,13 @@ public class EntryPointDetectService {
     }
 
     private boolean isDeprecated(SymbolEntity symbol) {
-        JsonNode sig = symbol.getSignature();
-        if (sig != null && !sig.isNull()) {
-            JsonNode annotations = sig.path("annotations");
-            if (annotations.isArray()) {
-                for (JsonNode ann : annotations) {
-                    String name = ann.asText("").toLowerCase(Locale.ROOT);
-                    if (name.contains("deprecated")) return true;
-                }
+        // annotations는 signature가 아니라 SymbolEntity 전용 컬럼에 저장된다.
+        // 노드는 객체 형태이므로 이름은 raw 키 기반으로 추출한다(extractAnnotationNameRaw).
+        JsonNode annotations = symbol.getAnnotations();
+        if (annotations != null && annotations.isArray()) {
+            for (JsonNode ann : annotations) {
+                String name = extractAnnotationNameRaw(ann).toLowerCase(Locale.ROOT);
+                if (name.contains("deprecated")) return true;
             }
         }
         JsonNode modifiers = symbol.getModifiers();
@@ -727,11 +768,9 @@ public class EntryPointDetectService {
     }
 
     private String resolveTypeKind(SymbolEntity symbol) {
-        JsonNode sig = symbol.getSignature();
-        if (sig != null && !sig.isNull()) {
-            String typeKind = sig.path("typeKind").asText("");
-            if (!typeKind.isBlank()) return typeKind.toLowerCase(Locale.ROOT);
-        }
+        // typeKind는 signature가 아니라 SymbolEntity 전용 컬럼에 저장된다(FactsSymbolConverter).
+        String typeKind = symbol.getTypeKind();
+        if (typeKind != null && !typeKind.isBlank()) return typeKind.toLowerCase(Locale.ROOT);
         return "class";
     }
 
@@ -809,10 +848,8 @@ public class EntryPointDetectService {
      * 4. status 없는 simpleName-only 매칭 → NONE (Swagger @Api 오탐 방지)
      */
     private String detectApiGuardianStatus(SymbolEntity symbol) {
-        JsonNode sig = symbol.getSignature();
-        if (sig == null || sig.isNull()) return "NONE";
-        JsonNode annotations = sig.path("annotations");
-        if (!annotations.isArray()) return "NONE";
+        JsonNode annotations = symbol.getAnnotations();
+        if (annotations == null || !annotations.isArray()) return "NONE";
         for (JsonNode ann : annotations) {
             if (ann.isTextual()) {
                 if (ann.asText("").toLowerCase(Locale.ROOT).contains(API_GUARDIAN_ANNOTATION_FRAGMENT)) {
@@ -846,8 +883,9 @@ public class EntryPointDetectService {
     }
 
     private String resolveAnnotationName(JsonNode ann) {
-        // FQN 키를 우선 시도해 Swagger @Api 등 simpleName 동명 어노테이션과 구분한다
-        for (String key : List.of("fqn", "qualifiedName", "name", "type")) {
+        // FQN 키를 우선 시도해 Swagger @Api 등 simpleName 동명 어노테이션과 구분한다.
+        // facts 어노테이션 노드는 FQN을 "raw" 키에 담는다(JavaParser 추출 스키마).
+        for (String key : List.of("fqn", "qualifiedName", "raw", "name", "type")) {
             String val = ann.path(key).asText("");
             if (!val.isBlank()) return val;
         }
@@ -864,10 +902,8 @@ public class EntryPointDetectService {
      * - CONFIGURATION: @Configuration(단독) → 감점. @AutoConfiguration 포함 시 NONE(강등 금지)
      */
     private BeanKind detectBeanKind(SymbolEntity symbol) {
-        JsonNode sig = symbol.getSignature();
-        if (sig == null || sig.isNull()) return BeanKind.NONE;
-        JsonNode annotations = sig.path("annotations");
-        if (!annotations.isArray()) return BeanKind.NONE;
+        JsonNode annotations = symbol.getAnnotations();
+        if (annotations == null || !annotations.isArray()) return BeanKind.NONE;
         boolean hasConfiguration = false;
         for (JsonNode ann : annotations) {
             String lower = extractAnnotationNameRaw(ann).toLowerCase(Locale.ROOT);
@@ -952,10 +988,8 @@ public class EntryPointDetectService {
      * "value" / "attributes.value" / "params.value" 세 위치 모두 탐색.
      */
     private boolean hasRetentionRuntime(SymbolEntity symbol) {
-        JsonNode sig = symbol.getSignature();
-        if (sig == null || sig.isNull()) return false;
-        JsonNode annotations = sig.path("annotations");
-        if (!annotations.isArray()) return false;
+        JsonNode annotations = symbol.getAnnotations();
+        if (annotations == null || !annotations.isArray()) return false;
         for (JsonNode ann : annotations) {
             String rawName = extractAnnotationNameRaw(ann).toLowerCase(Locale.ROOT);
             if (!extractSimpleName(rawName).equals("retention")) continue;
@@ -981,10 +1015,8 @@ public class EntryPointDetectService {
 
     /** @interface 자신의 어노테이션 중 @Target 존재 여부. */
     private boolean hasTargetAnnotation(SymbolEntity symbol) {
-        JsonNode sig = symbol.getSignature();
-        if (sig == null || sig.isNull()) return false;
-        JsonNode annotations = sig.path("annotations");
-        if (!annotations.isArray()) return false;
+        JsonNode annotations = symbol.getAnnotations();
+        if (annotations == null || !annotations.isArray()) return false;
         for (JsonNode ann : annotations) {
             String rawName = extractAnnotationNameRaw(ann).toLowerCase(Locale.ROOT);
             if (extractSimpleName(rawName).equals("target")) return true;
@@ -1018,10 +1050,8 @@ public class EntryPointDetectService {
     }
 
     private boolean isAnnotationsAvailable(SymbolEntity symbol) {
-        JsonNode sig = symbol.getSignature();
-        if (sig == null || sig.isNull()) return false;
-        JsonNode anns = sig.path("annotations");
-        return anns.isArray() && !anns.isEmpty();
+        JsonNode anns = symbol.getAnnotations();
+        return anns != null && anns.isArray() && !anns.isEmpty();
     }
 
     /**

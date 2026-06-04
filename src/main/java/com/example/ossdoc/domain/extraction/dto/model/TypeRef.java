@@ -6,6 +6,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Builder;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * 타입 참조 표준 구조
@@ -49,6 +50,14 @@ public record TypeRef(
         String sourceText,
 
         @JsonProperty("wildcard")
-        Wildcard wildcard
+        Wildcard wildcard,
+
+        /**
+         * 어노테이션 element 값 (name -> 단순화된 값). 어노테이션 TypeRef에만 채워진다.
+         * 예: @API(status=STABLE) -> {"status":"STABLE"}, @Retention(RUNTIME) -> {"value":"RUNTIME"}
+         * EntryPointDetectService가 attributes.status / attributes.value를 읽어 apiguardian·@Retention 판정에 사용.
+         */
+        @JsonProperty("attributes")
+        Map<String, String> attributes
 ) {
 }
