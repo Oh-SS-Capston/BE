@@ -110,8 +110,12 @@ public class MavenBuildSupport {
         List<String> resourceRoots = new ArrayList<>();
         List<String> classesDirs = new ArrayList<>();
 
-        addIfExists(sourceRoots, moduleRoot.resolve("src/main/java"));
-        addIfExists(testRoots, moduleRoot.resolve("src/test/java"));
+        // pom의 <build><sourceDirectory>/<testSourceDirectory>를 우선 반영하고,
+        // 없으면 표준 레이아웃(src/main/java, src/test/java)으로 폴백한다.
+        // (guava처럼 <sourceDirectory>src</sourceDirectory>를 쓰는 비표준 레이아웃 대응)
+        PomBuildPaths buildPaths = readPomBuildPaths(repoRoot, moduleRoot);
+        addSourceRoot(sourceRoots, moduleRoot, buildPaths.sourceDirectory(), "src/main/java");
+        addSourceRoot(testRoots, moduleRoot, buildPaths.testSourceDirectory(), "src/test/java");
         addIfExists(resourceRoots, moduleRoot.resolve("src/main/resources"));
         addIfExists(classesDirs, moduleRoot.resolve("target/classes"));
 
@@ -237,6 +241,83 @@ public class MavenBuildSupport {
         }
     }
 
+    /**
+     * 역할:
+     * pom에 명시된 커스텀 소스 디렉터리를 우선 적용하고, 없으면 표준 경로로 폴백한다.
+     *
+     * 책임:
+     * 1) pom 값이 있으면 moduleRoot 기준으로 resolve 후 실제 디렉터리 존재를 검증해 추가
+     * 2) 값이 없거나 ${...} property 치환이 필요하거나 디렉터리가 없으면 표준 상대경로로 폴백
+     */
+    private void addSourceRoot(List<String> target, Path moduleRoot, String pomValue, String standardFallback) {
+        if (pomValue != null && !pomValue.isBlank() && !pomValue.contains("${")) {
+            Path candidate = resolveAgainstModule(moduleRoot, pomValue);
+            if (Files.exists(candidate) && Files.isDirectory(candidate)) {
+                target.add(buildPathNormalizer.normalize(candidate));
+                return;
+            }
+        }
+        addIfExists(target, moduleRoot.resolve(standardFallback));
+    }
+
+    /**
+     * pom의 sourceDirectory 값은 상속되더라도 각 모듈 basedir 기준으로 해석된다.
+     * 따라서 상대경로는 repoRoot가 아니라 moduleRoot 기준으로 resolve한다.
+     */
+    private Path resolveAgainstModule(Path moduleRoot, String value) {
+        Path path = Path.of(value);
+        return path.isAbsolute() ? path.normalize() : moduleRoot.resolve(path).normalize();
+    }
+
+    /**
+     * 역할:
+     * 모듈 pom의 <build><sourceDirectory>/<testSourceDirectory>를 읽는다.
+     *
+     * 책임:
+     * 1) 모듈 pom에 값이 없으면 부모(repoRoot) pom의 상속 값을 폴백으로 사용(값만 가져옴)
+     * 2) 실제 resolve는 호출 측에서 각 moduleRoot 기준으로 수행
+     */
+    private PomBuildPaths readPomBuildPaths(Path repoRoot, Path moduleRoot) {
+        PomBuildPaths modulePaths = readBuildPathsFromPom(moduleRoot.resolve("pom.xml"));
+        String sourceDir = modulePaths.sourceDirectory();
+        String testDir = modulePaths.testSourceDirectory();
+
+        // 자식 pom에 명시가 없으면 부모 pom에서 상속된 값을 참고한다.
+        if ((sourceDir == null || testDir == null) && !moduleRoot.equals(repoRoot)) {
+            PomBuildPaths parentPaths = readBuildPathsFromPom(repoRoot.resolve("pom.xml"));
+            if (sourceDir == null) {
+                sourceDir = parentPaths.sourceDirectory();
+            }
+            if (testDir == null) {
+                testDir = parentPaths.testSourceDirectory();
+            }
+        }
+        return new PomBuildPaths(sourceDir, testDir);
+    }
+
+    private PomBuildPaths readBuildPathsFromPom(Path pom) {
+        if (!Files.exists(pom)) {
+            return new PomBuildPaths(null, null);
+        }
+        try {
+            Document doc = DocumentBuilderFactory.newInstance()
+                    .newDocumentBuilder()
+                    .parse(pom.toFile());
+            Element root = doc.getDocumentElement();
+            Element build = directChildElement(root, "build");
+            if (build == null) {
+                return new PomBuildPaths(null, null);
+            }
+            return new PomBuildPaths(
+                    directChildText(build, "sourceDirectory"),
+                    directChildText(build, "testSourceDirectory")
+            );
+        } catch (Exception e) {
+            log.warn("[BUILD] Failed to read pom build paths. pom={}", pom, e);
+            return new PomBuildPaths(null, null);
+        }
+    }
+
     private String toModuleId(Path repoRoot, Path moduleRoot) {
         if (repoRoot.equals(moduleRoot)) {
             return ".";
@@ -294,6 +375,17 @@ public class MavenBuildSupport {
         }
     }
 
+    private Element directChildElement(Element parent, String tag) {
+        NodeList children = parent.getChildNodes();
+        for (int i = 0; i < children.getLength(); i++) {
+            Node n = children.item(i);
+            if (n.getNodeType() == Node.ELEMENT_NODE && tag.equals(n.getNodeName())) {
+                return (Element) n;
+            }
+        }
+        return null;
+    }
+
     private String directChildText(Element parent, String tag) {
         NodeList children = parent.getChildNodes();
         for (int i = 0; i < children.getLength(); i++) {
@@ -315,4 +407,6 @@ public class MavenBuildSupport {
     }
 
     private record PomCoordinates(String groupId, String artifactId, String version) {}
+
+    private record PomBuildPaths(String sourceDirectory, String testSourceDirectory) {}
 }
