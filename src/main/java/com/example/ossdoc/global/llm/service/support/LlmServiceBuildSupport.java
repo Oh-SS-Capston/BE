@@ -154,9 +154,15 @@ public class LlmServiceBuildSupport {
                     endLine
             );
 
+            // 오버로딩을 화면에서 구분할 수 있도록 시그니처(파라미터 포함)를 함께 노출한다.
+            String signatureHint = seed.path("signatureHint").asText("");
+            String displaySignature = signatureHint.isBlank() ? methodName + "()" : extractInputs(signatureHint);
+
             ObjectNode item = out.addObject();
             item.put("fqn", methodFqn);
             item.put("methodName", methodName);
+            putIfText(item, "signatureHint", signatureHint);
+            item.put("displaySignature", displaySignature);
             item.put("classFqn", classFqn);
             item.put("filePath", filePath);
             if (startLine != null) {
@@ -1074,8 +1080,11 @@ public class LlmServiceBuildSupport {
             writeSlotEvidence(slotEvidence, guide.slotEvidence());
 
             attachUsageScenario(card, scenarioStep);
-            card.put("inputs", extractInputs(seed.path("signatureHint").asText("")));
-            card.put("returns", extractReturns(seed.path("signatureHint").asText("")));
+            String signatureHint = seed.path("signatureHint").asText("");
+            // 오버로딩 구분용 표시 시그니처(메서드명 + 파라미터). fqn은 단순명을 유지한다.
+            card.put("displaySignature", signatureHint.isBlank() ? methodName + "()" : extractInputs(signatureHint));
+            card.put("inputs", extractInputs(signatureHint));
+            card.put("returns", extractReturns(signatureHint));
             card.put("changesState", inferStateChange(methodName));
             card.set("pairedWith", inferPairedMethods(methodName, methodSeed));
             card.put("callOrderNotes", formatCallOrderNote(orderByMethod.get(fqn)));

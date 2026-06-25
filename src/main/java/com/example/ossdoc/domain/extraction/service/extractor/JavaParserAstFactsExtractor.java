@@ -66,9 +66,12 @@ import com.github.javaparser.ast.expr.AssignExpr;
 import com.github.javaparser.ast.expr.ClassExpr;
 import com.github.javaparser.ast.expr.Expression;
 import com.github.javaparser.ast.expr.FieldAccessExpr;
+import com.github.javaparser.ast.expr.MemberValuePair;
 import com.github.javaparser.ast.expr.MethodCallExpr;
 import com.github.javaparser.ast.expr.NameExpr;
+import com.github.javaparser.ast.expr.NormalAnnotationExpr;
 import com.github.javaparser.ast.expr.ObjectCreationExpr;
+import com.github.javaparser.ast.expr.SingleMemberAnnotationExpr;
 import com.github.javaparser.ast.body.VariableDeclarator;
 import com.github.javaparser.ast.stmt.IfStmt;
 import com.github.javaparser.ast.stmt.SwitchStmt;
@@ -1125,12 +1128,51 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
 
     private TypeRef toAnnotationTypeRef(AnnotationExpr annotationExpr, ExtractionSink sink) {
         sink.recordTotalTypeRef();
+        Map<String, String> attributes = annotationAttributes(annotationExpr);
         try {
-            return TypeRefFactory.simple(annotationExpr.resolve().getQualifiedName());
+            return TypeRefFactory.annotation(annotationExpr.resolve().getQualifiedName(), attributes);
         } catch (Exception e) {
             sink.recordUnresolvedTypeRef();
-            return TypeRefFactory.unresolved(annotationExpr.getNameAsString(), annotationExpr.getNameAsString());
+            return TypeRefFactory.annotationUnresolved(
+                    annotationExpr.getNameAsString(), annotationExpr.getNameAsString(), attributes);
         }
+    }
+
+    /**
+     * 어노테이션 element 값을 name -> 단순화 값 맵으로 추출한다.
+     * - Marker(@Override): 빈 맵 → attributes 미출력
+     * - SingleMember(@Retention(RUNTIME)): {"value":"RUNTIME"}
+     * - Normal(@API(status=STABLE, since="5.0")): {"status":"STABLE","since":"5.0"}
+     * EntryPointDetectService의 apiguardian status / @Retention value 판정이 attributes.status·attributes.value를 읽는다.
+     */
+    private Map<String, String> annotationAttributes(AnnotationExpr annotationExpr) {
+        if (annotationExpr instanceof SingleMemberAnnotationExpr single) {
+            return Map.of("value", simplifyAnnotationValue(single.getMemberValue()));
+        }
+        if (annotationExpr instanceof NormalAnnotationExpr normal) {
+            Map<String, String> attributes = new LinkedHashMap<>();
+            for (MemberValuePair pair : normal.getPairs()) {
+                attributes.put(pair.getNameAsString(), simplifyAnnotationValue(pair.getValue()));
+            }
+            return attributes;
+        }
+        return Map.of();
+    }
+
+    /**
+     * 어노테이션 인자 표현을 비교용 단순 문자열로 환원한다.
+     * enum 상수/필드접근(RetentionPolicy.RUNTIME, Status.STABLE)은 마지막 식별자만 취해
+     * 탐지기의 대문자 비교("RUNTIME"/"STABLE")와 정합되게 한다. 복합 표현은 원문으로 보존.
+     */
+    private String simplifyAnnotationValue(Expression value) {
+        if (value == null) return "";
+        if (value.isStringLiteralExpr()) return value.asStringLiteralExpr().asString();
+        if (value.isFieldAccessExpr()) return value.asFieldAccessExpr().getNameAsString();
+        if (value.isNameExpr()) return value.asNameExpr().getNameAsString();
+        if (value.isBooleanLiteralExpr()) return String.valueOf(value.asBooleanLiteralExpr().getValue());
+        if (value.isIntegerLiteralExpr()) return value.asIntegerLiteralExpr().getValue();
+        if (value.isClassExpr()) return value.asClassExpr().getType().asString();
+        return value.toString();
     }
 
     private TypeRef toTypeRef(Type type, ExtractionSink sink) {

@@ -20,6 +20,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -31,8 +32,8 @@ import java.util.stream.Collectors;
  * API 진입점별 BFS 호출 경로 추적 서비스.
  *
  * <p>refactplan.md §273-301 (M4) 결정 구체화 + Second_Clustering_Plan.md Phase 4-B.
- * {@link com.example.ossdoc.domain.cluster.support.signal.PublicApiFlowSignalProvider}의
- * BFS 핵심 로직을 LLM 입력 목적으로 이전한 서비스다.
+ * cluster 의 BFS 신호 provider 핵심 로직을 LLM 입력 목적으로 이전한 서비스다.
+ * (원본 {@code PublicApiFlowSignalProvider} 는 Phase 4-B 에서 제거됨)
  *
  * <ul>
  *   <li>cluster 가상 엣지가 아닌 LLM 시나리오/API 문서의 호출 흐름 근거를 생성한다.</li>
@@ -48,9 +49,12 @@ public class ApiFlowTraceService {
     /** flow set이 전체 노드 수의 이 비율을 초과하면 해당 진입점을 잘린 것(truncated)으로 표시한다. */
     private static final double FLOW_SET_OVERLOAD_RATIO = 0.80;
     private static final int DEFAULT_MAX_BFS_DEPTH = 4;
-    private static final int MAX_ENTRY_POINTS = 50;
     // P0-2: TYPE 진입점을 member METHOD 시드로 확장할 때 타입당 상한
     private static final int MAX_TYPE_SEED_METHODS = 10;
+
+    /** 트레이스 대상 진입점 상한. 환경변수/properties로 프로젝트 규모별 조정 가능(#8). */
+    @Value("${ossdoc.api-flow.max-entry-points:50}")
+    private int maxEntryPoints;
     private static final String ARTIFACT_SCHEMA_VERSION = "1.0";
     private static final String ARTIFACT_PATH = "publicapi/api_flow_trace.json";
 
@@ -61,7 +65,17 @@ public class ApiFlowTraceService {
     private final ArtifactRepository artifactRepository;
     private final ObjectMapper objectMapper;
 
-    private record ApiMapEntry(String symbolId, String role) {}
+    private record ApiMapEntry(String symbolId, String role, String confidence, List<String> entryMethodIds) {}
+
+    private static int confidenceRank(String confidence) {
+        if (confidence == null) return 0;
+        return switch (confidence.trim().toUpperCase(Locale.ROOT)) {
+            case "HIGH" -> 3;
+            case "MED"  -> 2;
+            case "LOW"  -> 1;
+            default     -> 0;
+        };
+    }
 
     /**
      * runId 의 진입점 목록을 기반으로 BFS 호출 경로 추적을 실행하고 artifact 로 저장한다.
@@ -94,11 +108,15 @@ public class ApiFlowTraceService {
                 runId, List.of(EdgeType.CALLS));
         Map<String, List<AdjacentEdge>> adj = buildAdjacency(callEdges);
 
-        // 진입점 목록 (심볼 인덱스에 존재하는 것만, 최대 MAX_ENTRY_POINTS)
-        List<ApiMapEntry> filteredEntries = apiMapEntries.stream()
+        // 진입점 목록: confidence(HIGH→MED→LOW) → role(PRIMARY 우선) 정렬 후 cap 적용 (#8)
+        List<ApiMapEntry> eligible = apiMapEntries.stream()
                 .filter(e -> symbolIndex.containsKey(e.symbolId()))
-                .limit(MAX_ENTRY_POINTS)
+                .sorted(Comparator
+                        .comparingInt((ApiMapEntry e) -> confidenceRank(e.confidence())).reversed()
+                        .thenComparingInt(e -> "PRIMARY".equals(e.role()) ? 0 : 1))
                 .toList();
+        int truncatedCount = Math.max(0, eligible.size() - maxEntryPoints);
+        List<ApiMapEntry> filteredEntries = eligible.stream().limit(maxEntryPoints).toList();
 
         ModuleResolver moduleResolver = loadModuleResolver(runId);
         Map<String, String> typeSourceRootIndex = buildTypeSourceRootIndex(symbolIndex);
@@ -110,7 +128,7 @@ public class ApiFlowTraceService {
             String entrySymbolId = entry.symbolId();
             SymbolEntity entrySym = symbolIndex.get(entrySymbolId);
             ApiFlowTraceJson.EntryPointTrace trace = bfsTrace(
-                    entrySymbolId, entrySym, entry.role(),
+                    entrySymbolId, entrySym, entry.role(), entry.entryMethodIds(),
                     adj, symbolIndex, callEdges, totalSymbols,
                     moduleResolver, typeSourceRootIndex, typeToMethods
             );
@@ -126,6 +144,7 @@ public class ApiFlowTraceService {
                         .tracedCount(traces.size())
                         .maxBfsDepth(DEFAULT_MAX_BFS_DEPTH)
                         .flowSetOverloadRatio(FLOW_SET_OVERLOAD_RATIO)
+                        .truncatedCount(truncatedCount)
                         .build())
                 .traces(traces)
                 .build();
@@ -155,9 +174,17 @@ public class ApiFlowTraceService {
                         for (JsonNode ep : entryPoints) {
                             String symbolId = ep.path("symbol_id").asText("");
                             String role = ep.path("role").asText("PRIMARY");
-                            if (!symbolId.isBlank()) {
-                                entries.add(new ApiMapEntry(symbolId, role));
+                            String confidence = ep.path("confidence").asText("MED");
+                            if (symbolId.isBlank()) continue;
+                            List<String> methodIds = new ArrayList<>();
+                            JsonNode emArray = ep.path("entry_methods");
+                            if (emArray.isArray()) {
+                                for (JsonNode em : emArray) {
+                                    String emId = em.path("symbol_id").asText("");
+                                    if (!emId.isBlank()) methodIds.add(emId);
+                                }
                             }
+                            entries.add(new ApiMapEntry(symbolId, role, confidence, List.copyOf(methodIds)));
                         }
                         return entries;
                     } catch (Exception e) {
@@ -189,6 +216,7 @@ public class ApiFlowTraceService {
             String entrySymbolId,
             SymbolEntity entrySym,
             String role,
+            List<String> explicitEntryMethodIds,
             Map<String, List<AdjacentEdge>> adj,
             Map<String, SymbolEntity> symbolIndex,
             List<Edge> callEdges,
@@ -203,12 +231,16 @@ public class ApiFlowTraceService {
         Deque<String> queue = new ArrayDeque<>();
         int maxActualDepth = 0;
 
-        // P0-2: TYPE 진입점을 member METHOD 시드로 확장해 CALLS BFS를 실질화한다.
-        // API_MAP_JSON entry_points는 TYPE 레벨(symbol_id="type:org.foo.Bar")이지만
-        // CALLS 인접 리스트는 METHOD→METHOD이므로 TYPE 자체에서는 BFS가 시작되지 않는다.
+        // P0-2 / #2: TYPE 진입점을 member METHOD 시드로 확장해 CALLS BFS를 실질화한다.
+        // #2: API_MAP_JSON에 entry_methods가 명시된 경우 우선 사용 — 탐지 시점의 근거 기반 시드.
+        // 없으면 휴리스틱(prioritizeTypeMembers) fallback.
         if (entrySym != null && entrySym.getSymbolKind() == SymbolKind.TYPE) {
-            List<SymbolEntity> memberMethods = typeToMethods.getOrDefault(entrySymbolId, List.of());
-            List<String> seeds = prioritizeTypeMembers(memberMethods, adj);
+            List<String> validExplicit = explicitEntryMethodIds.stream()
+                    .filter(symbolIndex::containsKey)
+                    .toList();
+            List<String> seeds = validExplicit.isEmpty()
+                    ? prioritizeTypeMembers(typeToMethods.getOrDefault(entrySymbolId, List.of()), adj)
+                    : validExplicit;
             for (String seedId : seeds) {
                 if (!depthMap.containsKey(seedId)) {
                     depthMap.put(seedId, 0);

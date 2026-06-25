@@ -55,7 +55,8 @@ public class LlmService {
     private static final int MAX_SCENARIOS = 4;
     private static final int MAX_STEPS_PER_SCENARIO = 8;
 
-    private static final int TOKENS_CAUTIONS = 12000;
+    // caution 20개 × 다필드 장문이 12000을 초과해 잘리던 문제로 상향(글로벌 cap 20000 이내).
+    private static final int TOKENS_CAUTIONS = 18000;
     private static final int TOKENS_SCENARIOS = 20000;
     private static final int CONTEXT_LIMIT_CAUTIONS_COMPACT = 32000;
     private static final int CONTEXT_LIMIT_SCENARIOS_COMPACT = 48000;

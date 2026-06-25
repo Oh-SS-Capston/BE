@@ -8,6 +8,27 @@ import java.util.List;
 @Getter
 @Builder(toBuilder = true)
 public class EntryPointCandidate {
+
+    @Getter
+    @Builder(toBuilder = true)
+    public static class EvidenceCompleteness {
+        private boolean sourceAvailable;
+        private boolean javadocAvailable;
+        private boolean annotationsAvailable;
+        /** BUILD_MANIFEST에서 읽은 모듈 빌드 모드. FULL / COMPILE_ONLY / SOURCE_ONLY / FAILED / UNKNOWN */
+        private String buildMode;
+        /** true면 confidence가 HIGH → MED로 캡됐음 (javadoc·annotation 모두 미추출). */
+        private boolean degraded;
+    }
+
+    @Getter
+    @Builder
+    public static class EntryMethodInfo {
+        private String symbolId;
+        private String simpleName;
+        /** STATIC_FACTORY | PUBLIC_STATIC | PUBLIC_INSTANCE */
+        private String reason;
+    }
     private String symbolId;
     private String qualifiedName;
     /**
@@ -32,4 +53,8 @@ public class EntryPointCandidate {
     private String confidence;         // "HIGH" | "MED" | "LOW"
     private List<String> signals;      // fired signal names
     private int score;
+    /** #2: TYPE 진입점의 실제 진입 메서드 목록. BFS 트레이스 시드로 사용. */
+    private List<EntryMethodInfo> entryMethods;
+    /** #6: 근거(javadoc·annotation·source) 추출 완전성 메타. confidence 강등 여부 포함. */
+    private EvidenceCompleteness evidenceCompleteness;
 }

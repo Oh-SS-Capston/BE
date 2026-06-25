@@ -3,6 +3,7 @@ package com.example.ossdoc.domain.extraction.service.support.util;
 import com.example.ossdoc.domain.extraction.dto.model.TypeRef;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
@@ -39,6 +40,41 @@ public final class TypeRefFactory {
                 .unresolved(true)
                 .sourceText(sourceText)
                 .build();
+    }
+
+    /**
+     * 어노테이션 TypeRef. element 값(attributes)을 함께 담는다.
+     * 어노테이션은 배열·primitive·제네릭 인자가 없으므로 해당 필드는 기본값으로 둔다.
+     */
+    public static TypeRef annotation(String raw, Map<String, String> attributes) {
+        String normalized = requireRaw(raw);
+        return TypeRef.builder()
+                .raw(normalized)
+                .args(List.of())
+                .arrayDim(0)
+                .primitive(false)
+                .unresolved(false)
+                .attributes(normalizeAttributes(attributes))
+                .build();
+    }
+
+    /** 미해결 어노테이션 TypeRef. 이름만 알 수 있을 때 사용하되 attributes는 보존한다. */
+    public static TypeRef annotationUnresolved(String raw, String sourceText, Map<String, String> attributes) {
+        String normalized = requireRaw(raw);
+        return TypeRef.builder()
+                .raw(normalized)
+                .args(List.of())
+                .arrayDim(0)
+                .primitive(false)
+                .unresolved(true)
+                .sourceText(sourceText)
+                .attributes(normalizeAttributes(attributes))
+                .build();
+    }
+
+    private static Map<String, String> normalizeAttributes(Map<String, String> attributes) {
+        // 빈 맵은 null로 환원 → @JsonInclude(NON_NULL)로 marker 어노테이션엔 attributes 키가 붙지 않는다.
+        return (attributes == null || attributes.isEmpty()) ? null : Map.copyOf(attributes);
     }
 
     public static TypeRef parameterized(String raw, List<TypeRef> args, String sourceText) {
