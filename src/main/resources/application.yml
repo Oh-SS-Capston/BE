@@ -141,8 +141,9 @@ jwt:
 claude:
   api-key: ${CLAUDE_API_KEY:}
   model: ${CLAUDE_MODEL:claude-sonnet-4-6}
-  # 기본 생성은 Sonnet을 사용하고, 실패 시 서비스에서 Haiku fallback을 수행한다.
+  # 기본 생성은 Sonnet을 사용하고, Haiku fallback은 명시적으로 켠 경우에만 수행한다.
   haiku-model: ${CLAUDE_HAIKU_MODEL:claude-haiku-4-5}
+  haiku-fallback-enabled: ${CLAUDE_HAIKU_FALLBACK_ENABLED:false}
   # enabled: ${LLM_ENABLED:false}
   max-tokens: ${CLAUDE_MAX_TOKENS:20000}
 
