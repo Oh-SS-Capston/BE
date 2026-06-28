@@ -47,6 +47,26 @@ public class EntryPointJsonCodec {
             if (c.getEndLine()      != null) node.put("end_line",       c.getEndLine());
             ArrayNode sigs = node.putArray("signals");
             if (c.getSignals() != null) c.getSignals().forEach(sigs::add);
+            List<EntryPointCandidate.EntryMethodInfo> ems = c.getEntryMethods();
+            if (ems != null && !ems.isEmpty()) {
+                ArrayNode emArray = node.putArray("entry_methods");
+                for (EntryPointCandidate.EntryMethodInfo em : ems) {
+                    ObjectNode emNode = objectMapper.createObjectNode();
+                    emNode.put("symbol_id", em.getSymbolId() != null ? em.getSymbolId() : "");
+                    emNode.put("simple_name", em.getSimpleName() != null ? em.getSimpleName() : "");
+                    emNode.put("reason", em.getReason() != null ? em.getReason() : "");
+                    emArray.add(emNode);
+                }
+            }
+            EntryPointCandidate.EvidenceCompleteness ec = c.getEvidenceCompleteness();
+            if (ec != null) {
+                ObjectNode ecNode = node.putObject("evidence_completeness");
+                ecNode.put("source_available",      ec.isSourceAvailable());
+                ecNode.put("javadoc_available",     ec.isJavadocAvailable());
+                ecNode.put("annotations_available", ec.isAnnotationsAvailable());
+                ecNode.put("build_mode",            ec.getBuildMode() != null ? ec.getBuildMode() : "UNKNOWN");
+                ecNode.put("degraded",              ec.isDegraded());
+            }
             arr.add(node);
         }
         return root;
@@ -64,19 +84,43 @@ public class EntryPointJsonCodec {
             if (sigArr.isArray()) {
                 for (JsonNode s : sigArr) signals.add(s.asText());
             }
+            List<EntryPointCandidate.EntryMethodInfo> entryMethods = new ArrayList<>();
+            JsonNode emArr = node.path("entry_methods");
+            if (emArr.isArray()) {
+                for (JsonNode em : emArr) {
+                    entryMethods.add(EntryPointCandidate.EntryMethodInfo.builder()
+                            .symbolId(em.path("symbol_id").asText(""))
+                            .simpleName(em.path("simple_name").asText(""))
+                            .reason(em.path("reason").asText(""))
+                            .build());
+                }
+            }
+            EntryPointCandidate.EvidenceCompleteness ec = null;
+            JsonNode ecNode = node.path("evidence_completeness");
+            if (!ecNode.isMissingNode() && !ecNode.isNull()) {
+                ec = EntryPointCandidate.EvidenceCompleteness.builder()
+                        .sourceAvailable(     ecNode.path("source_available").asBoolean(false))
+                        .javadocAvailable(    ecNode.path("javadoc_available").asBoolean(false))
+                        .annotationsAvailable(ecNode.path("annotations_available").asBoolean(false))
+                        .buildMode(           ecNode.path("build_mode").asText("UNKNOWN"))
+                        .degraded(            ecNode.path("degraded").asBoolean(false))
+                        .build();
+            }
             result.add(EntryPointCandidate.builder()
-                    .symbolId(      nullableText(node, "symbol_id"))
-                    .qualifiedName( nullableText(node, "qualified_name"))
-                    .simpleName(    nullableText(node, "simple_name"))
-                    .typeKind(      nullableText(node, "type_kind"))
-                    .confidence(    nullableText(node, "confidence"))
-                    .role(          nullableText(node, "role"))
-                    .score(         node.path("score").asInt(0))
-                    .ownerTypeFqn(  nullableText(node, "owner_type_fqn"))
-                    .sourceFile(    nullableText(node, "source_file"))
-                    .startLine(     node.has("start_line") ? node.path("start_line").asInt() : null)
-                    .endLine(       node.has("end_line")   ? node.path("end_line").asInt()   : null)
-                    .signals(       List.copyOf(signals))
+                    .symbolId(           nullableText(node, "symbol_id"))
+                    .qualifiedName(      nullableText(node, "qualified_name"))
+                    .simpleName(         nullableText(node, "simple_name"))
+                    .typeKind(           nullableText(node, "type_kind"))
+                    .confidence(         nullableText(node, "confidence"))
+                    .role(               nullableText(node, "role"))
+                    .score(              node.path("score").asInt(0))
+                    .ownerTypeFqn(       nullableText(node, "owner_type_fqn"))
+                    .sourceFile(         nullableText(node, "source_file"))
+                    .startLine(          node.has("start_line") ? node.path("start_line").asInt() : null)
+                    .endLine(            node.has("end_line")   ? node.path("end_line").asInt()   : null)
+                    .signals(            List.copyOf(signals))
+                    .entryMethods(       List.copyOf(entryMethods))
+                    .evidenceCompleteness(ec)
                     .build());
         }
         return List.copyOf(result);

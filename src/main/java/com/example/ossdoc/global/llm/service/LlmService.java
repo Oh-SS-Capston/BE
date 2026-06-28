@@ -55,7 +55,9 @@ public class LlmService {
     private static final int MAX_SCENARIOS = 4;
     private static final int MAX_STEPS_PER_SCENARIO = 8;
 
+
     private static final int TOKENS_CAUTIONS = 16000;
+
     private static final int TOKENS_SCENARIOS = 20000;
     private static final int CONTEXT_LIMIT_CAUTIONS_COMPACT = 32000;
     private static final int CONTEXT_LIMIT_SCENARIOS_COMPACT = 48000;

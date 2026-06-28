@@ -134,6 +134,26 @@ public class ApiMapBuildService {
             node.put("score",          ep.getScore());
             ArrayNode sigs = node.putArray("signals");
             ep.getSignals().forEach(sigs::add);
+            List<EntryPointCandidate.EntryMethodInfo> ems = ep.getEntryMethods();
+            if (ems != null && !ems.isEmpty()) {
+                ArrayNode emArray = node.putArray("entry_methods");
+                for (EntryPointCandidate.EntryMethodInfo em : ems) {
+                    ObjectNode emNode = objectMapper.createObjectNode();
+                    emNode.put("symbol_id", em.getSymbolId());
+                    putNullable(emNode, "simple_name", em.getSimpleName());
+                    emNode.put("reason", em.getReason());
+                    emArray.add(emNode);
+                }
+            }
+            EntryPointCandidate.EvidenceCompleteness ec2 = ep.getEvidenceCompleteness();
+            if (ec2 != null) {
+                ObjectNode ecNode = node.putObject("evidence_completeness");
+                ecNode.put("source_available",      ec2.isSourceAvailable());
+                ecNode.put("javadoc_available",     ec2.isJavadocAvailable());
+                ecNode.put("annotations_available", ec2.isAnnotationsAvailable());
+                ecNode.put("build_mode",            ec2.getBuildMode() != null ? ec2.getBuildMode() : "UNKNOWN");
+                ecNode.put("degraded",              ec2.isDegraded());
+            }
             putNullable(node, "subsystem_id",    ep.getSubsystemId());
             putNullable(node, "subsystem_label", ep.getSubsystemLabel());
             epArray.add(node);
@@ -199,6 +219,26 @@ public class ApiMapBuildService {
             node.put("confidence", ep.getConfidence());
             ArrayNode sigs = node.putArray("signals");
             ep.getSignals().forEach(sigs::add);
+            List<EntryPointCandidate.EntryMethodInfo> ems = ep.getEntryMethods();
+            if (ems != null && !ems.isEmpty()) {
+                ArrayNode emArray = node.putArray("entry_methods");
+                for (EntryPointCandidate.EntryMethodInfo em : ems) {
+                    ObjectNode emNode = objectMapper.createObjectNode();
+                    emNode.put("symbol_id", em.getSymbolId());
+                    putNullable(emNode, "simple_name", em.getSimpleName());
+                    emNode.put("reason", em.getReason());
+                    emArray.add(emNode);
+                }
+            }
+            EntryPointCandidate.EvidenceCompleteness ec = ep.getEvidenceCompleteness();
+            if (ec != null) {
+                ObjectNode ecNode = node.putObject("evidence_completeness");
+                ecNode.put("source_available",      ec.isSourceAvailable());
+                ecNode.put("javadoc_available",     ec.isJavadocAvailable());
+                ecNode.put("annotations_available", ec.isAnnotationsAvailable());
+                ecNode.put("build_mode",            ec.getBuildMode() != null ? ec.getBuildMode() : "UNKNOWN");
+                ecNode.put("degraded",              ec.isDegraded());
+            }
             epArray.add(node);
         }
 

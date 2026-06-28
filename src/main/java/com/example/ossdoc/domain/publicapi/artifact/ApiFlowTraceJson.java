@@ -30,6 +30,8 @@ public class ApiFlowTraceJson {
         private int tracedCount;
         private int maxBfsDepth;
         private double flowSetOverloadRatio;
+        /** cap(max-entry-points) 적용으로 잘린 진입점 수. 0이면 전체 포함. */
+        private int truncatedCount;
     }
 
     /** 진입점 1개의 BFS 도달 가능 서브그래프. */

@@ -25,7 +25,7 @@ spring:
 
   jpa:
     hibernate:
-      ddl-auto: update
+      ddl-auto: create
     properties:
       hibernate:
         dialect: org.hibernate.dialect.PostgreSQLDialect
@@ -103,8 +103,6 @@ ossdoc:
         enabled: ${CLUSTER_SIGNAL_NAME_ENABLED:false}
       doc:
         enabled: ${CLUSTER_SIGNAL_DOC_ENABLED:false}
-      api-flow:
-        enabled: ${CLUSTER_SIGNAL_API_FLOW_ENABLED:false}
     super-cluster:
       enabled: ${CLUSTER_SUPER_CLUSTER_ENABLED:false}
   llm:
@@ -113,6 +111,9 @@ ossdoc:
         enabled: ${LLM_INPUT_SUPER_CLUSTER_ENABLED:false}
       api-flow:
         enabled: ${LLM_INPUT_API_FLOW_ENABLED:false}
+  api-flow:
+    # BFS 트레이스 대상 진입점 상한. confidence 높은 순으로 정렬 후 자른다.
+    max-entry-points: ${OSSDOC_API_FLOW_MAX_ENTRY_POINTS:50}
 
 app:
   cors:

@@ -126,20 +126,14 @@ public class ClusterSignalProperties {
     }
 
     /**
-     * 5순위 PublicApiFlowSignalProvider 설정.
-     * 공개 API 진입점에서 BFS로 도달 가능한 노드 집합 기반 신호.
-     * 한 쌍당 최대 가중치 보존(다중 진입점 누적 방지), flow set 과도 팽창 시 자동 차단.
+     * 공개 API 진입점 confidence 필터 설정.
+     * {@code ClusterBuildService} 가 ENTRY_POINTS_JSON 에서 정제된 진입점을 읽을 때
+     * 최소 confidence 등급을 결정한다. (BFS 가상 엣지 provider 는 Phase 4-B 에서 제거됨)
      */
     @Getter
     @Setter
     public static class ApiFlowSignal {
-        /** 통계적 신호라 기본 OFF. 검증 통과 후 PR에서 ON 한다. */
-        private boolean enabled = false;
-        /** 가상 엣지 가중치 = baseWeight / (depth_i + depth_j). */
-        private double baseWeight = 0.10;
-        /** BFS 깊이 상한. 이 깊이를 초과하는 노드는 flow set 에서 제외한다. */
-        private int maxBfsDepth = 4;
-        /** 진입점 seed 최소 confidence. 이 등급 미만은 seed에서 제외된다. HIGH|MED|LOW */
+        /** 진입점 seed 최소 confidence. 이 등급 미만은 제외된다. HIGH|MED|LOW */
         private String minConfidence = "MED";
     }
 
