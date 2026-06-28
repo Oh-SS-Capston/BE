@@ -90,8 +90,10 @@ public class LlmClaudeClientSupport {
         if (e == null) {
             return false;
         }
-        boolean retryable = LlmErrorCode.RESPONSE_PARSE_FAILED.equals(e.getCode())
-                || LlmErrorCode.CLAUDE_API_CALL_FAILED.equals(e.getCode())
+        if (!llmConfig.isHaikuFallbackEnabled()) {
+            return false;
+        }
+        boolean retryable = LlmErrorCode.CLAUDE_API_CALL_FAILED.equals(e.getCode())
                 || LlmErrorCode.CLAUDE_API_ERROR.equals(e.getCode());
         if (!retryable || fallbackModel == null || fallbackModel.isBlank()) {
             return false;

@@ -27,11 +27,14 @@ public class LlmConfig {
     private String model = "claude-sonnet-4-5";
 
     /**
-     * Step2~5(시나리오/요약/API/파일트리) 기본 모델.
-     * 비용과 속도를 위해 Haiku를 기본으로 사용하고,
-     * 필요 시 서비스 레이어에서 Sonnet으로 폴백한다.
+     * Optional fallback model used only when Haiku fallback is explicitly enabled.
      */
     private String haikuModel = "claude-haiku-4-5";
+
+    /**
+     * Whether to retry with Haiku after the primary model fails.
+     */
+    private boolean haikuFallbackEnabled = false;
 
     /**
      * 응답 최대 토큰 수
