@@ -11,5 +11,6 @@ public enum EdgeType {
     RETURNS,
     THROWS,
     CALLS,
+    CREATES,
     ANNOTATED_WITH
 }

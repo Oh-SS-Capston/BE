@@ -36,6 +36,7 @@ public class ExtractionSink {
     private final Map<String, SymbolFact> fields = new LinkedHashMap<>();
 
     private final Map<String, RelationFact> calls = new LinkedHashMap<>();
+    private final Map<String, RelationFact> creates = new LinkedHashMap<>();
     private final Map<String, RelationFact> overrides = new LinkedHashMap<>();
     private final Map<String, RelationFact> accessesField = new LinkedHashMap<>();
 
@@ -156,6 +157,7 @@ public class ExtractionSink {
                 || !methods.isEmpty()
                 || !fields.isEmpty()
                 || !calls.isEmpty()
+                || !creates.isEmpty()
                 || !overrides.isEmpty()
                 || !accessesField.isEmpty()
                 || !diInjectionSites.isEmpty()
@@ -206,6 +208,7 @@ public class ExtractionSink {
                         .build(),
                 RelationTable.builder()
                         .calls(List.copyOf(calls.values()))
+                        .creates(List.copyOf(creates.values()))
                         .overrides(List.copyOf(overrides.values()))
                         .accessesField(List.copyOf(accessesField.values()))
                         .build(),
@@ -243,6 +246,7 @@ public class ExtractionSink {
     private List<RelationFact> allRelations() {
         List<RelationFact> items = new ArrayList<>();
         items.addAll(calls.values());
+        items.addAll(creates.values());
         items.addAll(overrides.values());
         items.addAll(accessesField.values());
         return List.copyOf(items);
@@ -279,6 +283,7 @@ public class ExtractionSink {
     private Map<String, RelationFact> relationBucket(RelationKind kind) {
         return switch (kind) {
             case CALLS -> calls;
+            case CREATES -> creates;
             case OVERRIDES -> overrides;
             case ACCESSES_FIELD -> accessesField;
         };

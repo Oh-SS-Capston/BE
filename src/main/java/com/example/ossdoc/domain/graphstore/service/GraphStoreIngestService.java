@@ -804,13 +804,23 @@ public class GraphStoreIngestService {
                 }
             }
 
-            // DERIVED 엣지는 3단계 fallback으로 evidence를 연결한다.
-            if ("derived".equals(dto.origin())
+            if ("derived".equalsIgnoreCase(dto.derivation())
                     && (dto.evidenceIds() == null || dto.evidenceIds().isEmpty())) {
+
                 Evidence derivedEvidence = selectDerivedEdgeEvidence(
-                        dto, from, to, symbolAstEvidenceMap, symbolToOwnerMap, symbolMap);
-                if (derivedEvidence != null && derivedEvidence.getEvidenceId() != null) {
-                    pendingEdgeEvidence.add(new PendingEdgeEvidence(edge, derivedEvidence));
+                        dto,
+                        from,
+                        to,
+                        symbolAstEvidenceMap,
+                        symbolToOwnerMap,
+                        symbolMap
+                );
+
+                if (derivedEvidence != null
+                        && derivedEvidence.getEvidenceId() != null) {
+                    pendingEdgeEvidence.add(
+                            new PendingEdgeEvidence(edge, derivedEvidence)
+                    );
                 }
             }
         }

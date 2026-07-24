@@ -7,6 +7,7 @@ import com.fasterxml.jackson.annotation.JsonValue;
  */
 public enum RelationKind {
     CALLS("calls"),
+    CREATES("creates"),
     OVERRIDES("overrides"),
     ACCESSES_FIELD("accesses_field");
 

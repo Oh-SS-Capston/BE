@@ -124,11 +124,17 @@ final class FactsSectionFactory {
 
     RelationTable composeRelations(RelationTable raw) {
         LinkedHashMap<String, RelationFact> merged = new LinkedHashMap<>();
+
         for (RelationFact relation : flattenRelations(raw)) {
-            merged.merge(FactsDedupSupport.relationKey(relation), relation, FactsDedupSupport::mergeRelation);
+            merged.merge(
+                    FactsDedupSupport.relationKey(relation),
+                    relation,
+                    FactsDedupSupport::mergeRelation
+            );
         }
 
         List<RelationFact> calls = new ArrayList<>();
+        List<RelationFact> creates = new ArrayList<>();
         List<RelationFact> overrides = new ArrayList<>();
         List<RelationFact> accessesField = new ArrayList<>();
 
@@ -136,19 +142,23 @@ final class FactsSectionFactory {
             if (relation == null || relation.kind() == null) {
                 continue;
             }
+
             switch (relation.kind()) {
                 case CALLS -> calls.add(relation);
+                case CREATES -> creates.add(relation);
                 case OVERRIDES -> overrides.add(relation);
                 case ACCESSES_FIELD -> accessesField.add(relation);
             }
         }
 
         calls.sort(RELATION_ORDER);
+        creates.sort(RELATION_ORDER);
         overrides.sort(RELATION_ORDER);
         accessesField.sort(RELATION_ORDER);
 
         return RelationTable.builder()
                 .calls(List.copyOf(calls))
+                .creates(List.copyOf(creates))
                 .overrides(List.copyOf(overrides))
                 .accessesField(List.copyOf(accessesField))
                 .build();
@@ -300,6 +310,7 @@ final class FactsSectionFactory {
         }
         List<RelationFact> all = new ArrayList<>();
         addAll(all, table.calls());
+        addAll(all, table.creates());
         addAll(all, table.overrides());
         addAll(all, table.accessesField());
         return all;

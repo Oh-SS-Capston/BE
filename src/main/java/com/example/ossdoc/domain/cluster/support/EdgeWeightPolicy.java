@@ -16,6 +16,7 @@ public class EdgeWeightPolicy {
             case IMPLEMENTS     -> 2.5; // 계약 이행이지만 표준 인터페이스 노이즈 반영
             case HAS_FIELD      -> 2.5; // 구성 관계 — 상속 없는 계층의 주요 결합 신호
             case ACCESSES_FIELD -> 2.0; // 내부 구현 직접 의존, CALLS보다 강함
+            case CREATES        -> 2.0; // 객체 생성에 따른 구체 타입 의존
             case RETURNS        -> 2.0; // 팩토리/빌더 생성 관계
             case THROWS         -> 1.5; // 사용 계약, 예외는 별도 계층이 되는 경우가 많음
             case PARAM          -> 1.5; // 고빈도 노이즈, 누적 가중치로 의미 생성

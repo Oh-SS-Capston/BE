@@ -459,7 +459,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                 .build();
         sink.addSymbol(fact);
 
-        addCallableBodyRelations(declaration, constructorSymbol, evidence.id(), sink);
+        addCallableBodyRelations(declaration, constructorSymbol, relativePath, sourceLines, evidence.id(), sink);
         addConstructorObservationsIfNeeded(context, declaration, constructorSymbol, evidence.id(), sink);
     }
 
@@ -502,7 +502,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                 .build();
         sink.addSymbol(fact);
 
-        addCallableBodyRelations(declaration, methodSymbol, evidence.id(), sink);
+        addCallableBodyRelations(declaration, methodSymbol, relativePath, sourceLines, evidence.id(), sink);
         addMethodObservationsIfNeeded(context, declaration, methodSymbol, evidence.id(), sink);
         addOverridesRelationIfPresent(declaration, methodSymbol, declaration.getNameAsString(), signature, evidence.id(), sink);
 
@@ -634,11 +634,55 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         sink.addSymbol(fact);
     }
 
-    private void addCallableBodyRelations(CallableDeclaration<?> declaration, String callableSymbol, String evidenceId, ExtractionSink sink) {
-        declaration.findAll(MethodCallExpr.class).forEach(methodCallExpr -> addMethodCallRelation(callableSymbol, methodCallExpr, evidenceId, sink));
-        declaration.findAll(ObjectCreationExpr.class).forEach(objectCreationExpr -> addObjectCreationCallRelation(callableSymbol, objectCreationExpr, evidenceId, sink));
-        declaration.findAll(NameExpr.class).forEach(nameExpr -> addFieldAccessRelation(callableSymbol, nameExpr, evidenceId, sink));
-        declaration.findAll(FieldAccessExpr.class).forEach(fieldAccessExpr -> addFieldAccessRelation(callableSymbol, fieldAccessExpr, evidenceId, sink));
+    private void addCallableBodyRelations(
+            CallableDeclaration<?> declaration,
+            String callableSymbol,
+            String relativePath,
+            List<String> sourceLines,
+            String callableEvidenceId,
+            ExtractionSink sink
+    ) {
+        declaration.findAll(MethodCallExpr.class)
+                .forEach(methodCallExpr ->
+                        addMethodCallRelation(
+                                callableSymbol,
+                                methodCallExpr,
+                                callableEvidenceId,
+                                sink
+                        )
+                );
+
+        declaration.findAll(ObjectCreationExpr.class)
+                .forEach(objectCreationExpr ->
+                        addObjectCreationRelation(
+                                callableSymbol,
+                                objectCreationExpr,
+                                relativePath,
+                                sourceLines,
+                                callableEvidenceId,
+                                sink
+                        )
+                );
+
+        declaration.findAll(NameExpr.class)
+                .forEach(nameExpr ->
+                        addFieldAccessRelation(
+                                callableSymbol,
+                                nameExpr,
+                                callableEvidenceId,
+                                sink
+                        )
+                );
+
+        declaration.findAll(FieldAccessExpr.class)
+                .forEach(fieldAccessExpr ->
+                        addFieldAccessRelation(
+                                callableSymbol,
+                                fieldAccessExpr,
+                                callableEvidenceId,
+                                sink
+                        )
+                );
     }
 
     private void addMethodCallRelation(String callerSymbol, MethodCallExpr methodCallExpr, String evidenceId, ExtractionSink sink) {
@@ -673,41 +717,89 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         }
     }
 
-    private void addObjectCreationCallRelation(String callerSymbol, ObjectCreationExpr objectCreationExpr, String evidenceId, ExtractionSink sink) {
+    private void addObjectCreationRelation(
+            String callerSymbol,
+            ObjectCreationExpr objectCreationExpr,
+            String relativePath,
+            List<String> sourceLines,
+            String callableEvidenceId,
+            ExtractionSink sink
+    ) {
+        Integer callSiteLine = objectCreationExpr.getBegin()
+                .map(position -> position.line)
+                .orElse(null);
+
+        String rawType =
+                objectCreationExpr.getType().getNameWithScope();
+
+        String relationEvidenceId = registerExpressionEvidence(
+                relativePath,
+                sourceLines,
+                objectCreationExpr,
+                callerSymbol,
+                callableEvidenceId,
+                sink
+        );
+
+        Map<String, Object> attrs = new LinkedHashMap<>();
+        attrs.put(
+                "argument_count",
+                objectCreationExpr.getArguments().size()
+        );
+        attrs.put(
+                "expression",
+                objectCreationExpr.toString()
+        );
+
         try {
-            String rawType = objectCreationExpr.getType().getNameWithScope();
-            String dstRaw = "new " + rawType + signatureHint(objectCreationExpr.getArguments().size());
-
-            // best-guess FQCN: resolve 시도, 실패 시 null
-            String dstSymbol = null;
-            try {
-                dstSymbol = objectCreationExpr.getType().resolve().asReferenceType().getQualifiedName();
-            } catch (Exception ignored) {
-                // resolve 실패 → dstSymbol null, dstRawRef만 사용
-            }
-
-            Integer callSiteLine = objectCreationExpr.getBegin()
-                    .map(pos -> pos.line)
-                    .orElse(null);
-
-            ResolutionStatus resStatus = dstSymbol != null
-                    ? ResolutionStatus.PARTIAL : ResolutionStatus.UNRESOLVED;
+            String qualifiedTypeName = objectCreationExpr
+                    .getType()
+                    .resolve()
+                    .asReferenceType()
+                    .getQualifiedName();
 
             sink.addRelation(RelationFact.builder()
-                    .kind(RelationKind.CALLS)
+                    .kind(RelationKind.CREATES)
                     .srcSymbol(callerSymbol)
-                    .dstSymbol(dstSymbol)
-                    .dstRawRef(dstRaw)
-                    .evidenceIds(List.of(evidenceId))
-                    .resolution(dstSymbol != null
-                            ? RelationResolutionFactory.partial("constructor resolution deferred")
-                            : RelationResolutionFactory.unresolved("constructor type unresolved"))
+                    .dstSymbol(
+                            SymbolIdFactory.type(qualifiedTypeName)
+                    )
+                    .evidenceIds(List.of(relationEvidenceId))
+                    .resolution(
+                            RelationResolutionFactory.resolved()
+                    )
                     .origin(FactOriginKind.AST)
                     .callSiteLine(callSiteLine)
-                    .confidenceHint(ConfidenceHints.relation(resStatus, FactOriginKind.AST))
+                    .confidenceHint(
+                            ConfidenceHints.relation(
+                                    ResolutionStatus.RESOLVED,
+                                    FactOriginKind.AST
+                            )
+                    )
+                    .attrs(attrs)
                     .build());
+
         } catch (Exception e) {
-            sink.addWarning("failed to record constructor call relation: " + e.getMessage());
+            sink.addRelation(RelationFact.builder()
+                    .kind(RelationKind.CREATES)
+                    .srcSymbol(callerSymbol)
+                    .dstRawRef(rawType)
+                    .evidenceIds(List.of(relationEvidenceId))
+                    .resolution(
+                            RelationResolutionFactory.unresolved(
+                                    e.getClass().getSimpleName()
+                            )
+                    )
+                    .origin(FactOriginKind.AST)
+                    .callSiteLine(callSiteLine)
+                    .confidenceHint(
+                            ConfidenceHints.relation(
+                                    ResolutionStatus.UNRESOLVED,
+                                    FactOriginKind.AST
+                            )
+                    )
+                    .attrs(attrs)
+                    .build());
         }
     }
 
@@ -1509,6 +1601,31 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             }
         }
         return set;
+    }
+
+    private String registerExpressionEvidence(
+            String relativePath,
+            List<String> sourceLines,
+            Node expression,
+            String callableSymbol,
+            String fallbackEvidenceId,
+            ExtractionSink sink
+    ) {
+        if (expression == null || expression.getRange().isEmpty()) {
+            return fallbackEvidenceId;
+        }
+
+        EvidenceFact expressionEvidence = buildAstEvidence(
+                relativePath,
+                sourceLines,
+                expression,
+                callableSymbol,
+                EvidenceType.AST
+        );
+
+        sink.addEvidence(expressionEvidence);
+
+        return expressionEvidence.id();
     }
 
     private EvidenceFact buildAstEvidence(String relativePath, List<String> sourceLines, Node node, String symbol, EvidenceType kind) {

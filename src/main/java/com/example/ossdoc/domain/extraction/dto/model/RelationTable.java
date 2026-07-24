@@ -15,6 +15,9 @@ public record RelationTable(
         @JsonProperty("calls")
         List<RelationFact> calls,
 
+        @JsonProperty("creates")
+        List<RelationFact> creates,
+
         @JsonProperty("overrides")
         List<RelationFact> overrides,
 

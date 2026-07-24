@@ -27,6 +27,7 @@ final class FactsStatsCalculator {
         StatsMeta base = rawStats == null ? StatsMeta.builder().build() : rawStats;
 
         long relationCount = size(relations.calls())
+                + size(relations.creates())
                 + size(relations.overrides())
                 + size(relations.accessesField());
 

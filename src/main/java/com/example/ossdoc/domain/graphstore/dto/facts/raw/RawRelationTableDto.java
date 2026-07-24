@@ -23,6 +23,7 @@ public class RawRelationTableDto {
 
     private List<RawRelationFactDto> overrides = new ArrayList<>();
     private List<RawRelationFactDto> calls = new ArrayList<>();
+    private List<RawRelationFactDto> creates = new ArrayList<>();
 
     @JsonProperty("accesses_field")
     private List<RawRelationFactDto> accessesField = new ArrayList<>();

@@ -3,23 +3,29 @@ package com.example.ossdoc.domain.extraction;
 import com.example.ossdoc.domain.artifact.entity.Artifact;
 import com.example.ossdoc.domain.artifact.enums.ArtifactKind;
 import com.example.ossdoc.domain.artifact.service.ArtifactService;
+import com.example.ossdoc.domain.build.dto.json.BuildManifest;
+import com.example.ossdoc.domain.build.dto.json.BuildModuleManifest;
+import com.example.ossdoc.domain.build.enums.BuildMode;
+import com.example.ossdoc.domain.build.enums.BuildToolKind;
 import com.example.ossdoc.domain.build.support.RepoRootResolver;
 import com.example.ossdoc.domain.extraction.dto.request.FactsExtractRequest;
 import com.example.ossdoc.domain.extraction.dto.response.FactsExtractResponse;
 import com.example.ossdoc.domain.extraction.enums.ExtractionMode;
+import com.example.ossdoc.domain.extraction.facade.DefaultFactsExtractionFacade;
 import com.example.ossdoc.domain.extraction.service.composer.DefaultFactsComposer;
 import com.example.ossdoc.domain.extraction.service.extractor.AsmBytecodeFactsExtractor;
 import com.example.ossdoc.domain.extraction.service.extractor.ChunkFactsExtractionCoordinator;
 import com.example.ossdoc.domain.extraction.service.extractor.ExtractionContextFactory;
 import com.example.ossdoc.domain.extraction.service.extractor.JavaParserAstFactsExtractor;
-import com.example.ossdoc.domain.extraction.facade.DefaultFactsExtractionFacade;
-import com.example.ossdoc.domain.extraction.service.support.preflight.ExtractionPreflightChecker;
+import com.example.ossdoc.domain.extraction.service.extractor.MetaInfServiceScanner;
+import com.example.ossdoc.domain.extraction.service.extractor.ReadmeObservationScanner;
+import com.example.ossdoc.domain.extraction.service.support.merge.ExtractionMergeSupport;
+import com.example.ossdoc.domain.extraction.service.support.planning.ChunkPlanner;
+import com.example.ossdoc.domain.extraction.service.support.preflight.BuildManifestLoader;
 import com.example.ossdoc.domain.extraction.service.support.preflight.BuildOutputVerifier;
 import com.example.ossdoc.domain.extraction.service.support.preflight.BytecodeAvailabilityChecker;
 import com.example.ossdoc.domain.extraction.service.support.preflight.ExtractionModeResolver;
-import com.example.ossdoc.domain.extraction.service.support.preflight.BuildManifestLoader;
-import com.example.ossdoc.domain.extraction.service.support.merge.ExtractionMergeSupport;
-import com.example.ossdoc.domain.extraction.service.support.planning.ChunkPlanner;
+import com.example.ossdoc.domain.extraction.service.support.preflight.ExtractionPreflightChecker;
 import com.example.ossdoc.domain.extraction.service.support.util.ExtractionClock;
 import com.example.ossdoc.domain.extraction.service.writer.DefaultFactsWriter;
 import com.example.ossdoc.domain.extraction.service.writer.FactsResponseFactory;
@@ -33,72 +39,111 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
+import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
 import org.springframework.test.context.junit.jupiter.SpringExtension;
 
+import javax.tools.JavaCompiler;
+import javax.tools.ToolProvider;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.OffsetDateTime;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.*;
-import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * Extraction 파이프라인 통합 테스트.
  *
- * <p>실제 워크스페이스(C:\data\ossdoc\run_20260323_798b4f45)를 사용하여
- * Phase 1~6(컨텍스트→Preflight→청크→추출→병합→구성)은 실제 로직으로 실행하고,
- * Phase 7(S3 업로드 + DB 저장)만 mock으로 우회한다.
+ * <p>각 테스트마다 임시 Java 프로젝트와 build_manifest.json을 생성한다.</p>
  *
- * <p>DB/Security/S3 auto-configuration 없이 필요한 빈만 로드한다.
+ * <p>컨텍스트 준비, Preflight, 청크 계획, AST/ASM 추출, 병합 및
+ * facts 구성은 실제 구현으로 실행한다. Artifact 저장만 Mock으로
+ * 대체한다.</p>
+ *
+ * <p>특정 PC의 고정 워크스페이스나 과거 분석 결과에 의존하지 않는다.</p>
  */
 @ExtendWith(SpringExtension.class)
 @Import(ExtractionPipelineIntegrationTest.TestConfig.class)
 class ExtractionPipelineIntegrationTest {
 
-    private static final String TEST_RUN_ID = "run_20260323_798b4f45";
+    private static final String TEST_RUN_ID =
+            "run_extraction_pipeline_test";
 
     @Configuration
     @Import({
             // facade
             DefaultFactsExtractionFacade.class,
+
             // preflight & planning
             ExtractionPreflightChecker.class,
             BuildOutputVerifier.class,
             BytecodeAvailabilityChecker.class,
             ExtractionModeResolver.class,
             ChunkPlanner.class,
+
             // extractors
             ChunkFactsExtractionCoordinator.class,
             ExtractionContextFactory.class,
             JavaParserAstFactsExtractor.class,
             AsmBytecodeFactsExtractor.class,
+            MetaInfServiceScanner.class,
+            ReadmeObservationScanner.class,
+
             // merge & compose
             ExtractionMergeSupport.class,
             DefaultFactsComposer.class,
+
             // writer
             DefaultFactsWriter.class,
             FactsResponseFactory.class,
+
             // support
             BuildManifestLoader.class,
             ExtractionClock.class,
             RepoRootResolver.class,
-            WorkspaceManager.class,
+            WorkspaceManager.class
     })
     static class TestConfig {
 
         @Bean
         public ObjectMapper objectMapper() {
-            return new ObjectMapper().findAndRegisterModules();
+            return new ObjectMapper()
+                    .findAndRegisterModules();
         }
 
         @Bean
         public WorkspaceProperties workspaceProperties() {
-            WorkspaceProperties props = new WorkspaceProperties();
-            props.setBaseDir("C:/data/ossdoc");
-            return props;
+            WorkspaceProperties properties =
+                    new WorkspaceProperties();
+
+            properties.setBaseDir(
+                    Path.of(
+                            System.getProperty("java.io.tmpdir"),
+                            "ossdoc-tests"
+                    ).toString()
+            );
+
+            return properties;
         }
 
         @Bean
@@ -121,21 +166,39 @@ class ExtractionPipelineIntegrationTest {
     @Autowired
     private ArtifactService artifactService;
 
+    @Autowired
+    private ObjectMapper objectMapper;
+
+    @TempDir
+    Path tempDir;
+
+    private Path testWorkspaceRoot;
+
     @BeforeEach
-    void setUp() {
+    void setUp() throws IOException {
         reset(repoRunRepository, artifactService);
 
-        RepoRun mockRun = mock(RepoRun.class);
-        when(mockRun.getRunId()).thenReturn(TEST_RUN_ID);
-        when(mockRun.getRepoUrl()).thenReturn("https://github.com/ronmamo/reflections");
-        when(mockRun.getCommitSha()).thenReturn("f5514b125c4f4b58e92beb0979a40ddce48d5be1");
-        when(mockRun.getWorkspaceRoot()).thenReturn("C:/data/ossdoc/" + TEST_RUN_ID);
+        testWorkspaceRoot = createTestWorkspace();
 
-        // facade.prepareFacadeContext + writer.uploadToS3 양쪽에서 사용
+        RepoRun mockRun = mock(RepoRun.class);
+
+        when(mockRun.getRunId())
+                .thenReturn(TEST_RUN_ID);
+
+        when(mockRun.getRepoUrl())
+                .thenReturn(
+                        "https://github.com/example/creates-sample"
+                );
+
+        when(mockRun.getCommitSha())
+                .thenReturn("test-commit-sha");
+
+        when(mockRun.getWorkspaceRoot())
+                .thenReturn(testWorkspaceRoot.toString());
+
         when(repoRunRepository.findById(TEST_RUN_ID))
                 .thenReturn(Optional.of(mockRun));
 
-        // ArtifactService: S3 업로드 우회
         when(artifactService.saveJsonArtifact(
                 any(RepoRun.class),
                 any(ArtifactKind.class),
@@ -146,88 +209,675 @@ class ExtractionPipelineIntegrationTest {
     }
 
     @Test
-    @DisplayName("자동 모드 — 실제 워크스페이스로 전체 파이프라인 성공")
+    @DisplayName("자동 모드 — 임시 워크스페이스로 전체 파이프라인 성공")
     void extractFacts_autoMode_succeeds() {
-        FactsExtractRequest request = FactsExtractRequest.builder()
-                .runId(TEST_RUN_ID)
-                .mode(null)
-                .includeObservations(true)
-                .includeTests(false)
-                .failFast(false)
-                .build();
+        FactsExtractRequest request =
+                FactsExtractRequest.builder()
+                        .runId(TEST_RUN_ID)
+                        .mode(null)
+                        .includeObservations(true)
+                        .includeTests(false)
+                        .failFast(false)
+                        .build();
 
-        FactsExtractResponse response = factsExtractionFacade.extract(request);
+        FactsExtractResponse response =
+                factsExtractionFacade.extract(request);
 
-        assertNotNull(response, "응답이 null이면 안 됨");
-        assertEquals(TEST_RUN_ID, response.runId());
-        assertNotNull(response.mode(), "추출 모드가 자동 결정되어야 함");
+        assertNotNull(
+                response,
+                "응답이 null이면 안 됨"
+        );
+
+        assertEquals(
+                TEST_RUN_ID,
+                response.runId()
+        );
+
+        assertNotNull(
+                response.mode(),
+                "추출 모드가 자동 결정되어야 함"
+        );
+
         assertNotNull(response.schemaVersion());
-        assertNotNull(response.stats(), "stats가 null이면 안 됨");
-        assertTrue(response.stats().filesScanned() > 0, "스캔된 파일이 0보다 커야 함");
-        assertTrue(response.stats().types() > 0, "추출된 타입이 0보다 커야 함");
-        assertTrue(response.stats().relations() > 0, "추출된 관계가 0보다 커야 함");
 
-        printSummary("자동 모드", response);
+        assertNotNull(
+                response.stats(),
+                "stats가 null이면 안 됨"
+        );
+
+        assertTrue(
+                response.stats().filesScanned() > 0,
+                "스캔된 파일이 0보다 커야 함"
+        );
+
+        assertTrue(
+                response.stats().types() > 0,
+                "추출된 타입이 0보다 커야 함"
+        );
+
+        assertTrue(
+                response.stats().relations() > 0,
+                "추출된 관계가 0보다 커야 함"
+        );
+
+        printSummary(
+                "자동 모드",
+                response
+        );
     }
 
     @Test
     @DisplayName("AST_ONLY 모드 — bytecode 없이 소스만 추출")
     void extractFacts_astOnly_succeeds() {
-        FactsExtractRequest request = FactsExtractRequest.builder()
-                .runId(TEST_RUN_ID)
-                .mode(ExtractionMode.AST_ONLY)
-                .includeObservations(false)
-                .includeTests(false)
-                .failFast(false)
-                .build();
+        FactsExtractRequest request =
+                FactsExtractRequest.builder()
+                        .runId(TEST_RUN_ID)
+                        .mode(ExtractionMode.AST_ONLY)
+                        .includeObservations(false)
+                        .includeTests(false)
+                        .failFast(false)
+                        .build();
 
-        FactsExtractResponse response = factsExtractionFacade.extract(request);
+        FactsExtractResponse response =
+                factsExtractionFacade.extract(request);
 
         assertNotNull(response);
-        assertEquals(TEST_RUN_ID, response.runId());
-        assertEquals("ast_only", response.mode());
-        assertTrue(response.stats().filesScanned() > 0, "AST 스캔 파일이 0보다 커야 함");
-        assertTrue(response.stats().types() > 0, "추출된 타입이 0보다 커야 함");
 
-        printSummary("AST_ONLY", response);
+        assertEquals(
+                TEST_RUN_ID,
+                response.runId()
+        );
+
+        assertEquals(
+                "ast_only",
+                response.mode()
+        );
+
+        assertTrue(
+                response.stats().filesScanned() > 0,
+                "AST 스캔 파일이 0보다 커야 함"
+        );
+
+        assertTrue(
+                response.stats().types() > 0,
+                "추출된 타입이 0보다 커야 함"
+        );
+
+        printSummary(
+                "AST_ONLY",
+                response
+        );
     }
 
     @Test
-    @DisplayName("AST_PLUS_BYTECODE 모드 — 소스 + 바이트코드 추출")
-    void extractFacts_withBytecode_succeeds() {
-        FactsExtractRequest request = FactsExtractRequest.builder()
-                .runId(TEST_RUN_ID)
-                .mode(ExtractionMode.AST_PLUS_BYTECODE)
-                .includeObservations(true)
-                .includeTests(false)
-                .failFast(false)
-                .build();
+    @DisplayName("AST_ONLY 모드 — 객체 생성 관계와 표현식 Evidence 보존")
+    void extractFacts_astOnly_preservesCreatesAndExpressionEvidence() {
+        FactsExtractRequest request =
+                FactsExtractRequest.builder()
+                        .runId(TEST_RUN_ID)
+                        .mode(ExtractionMode.AST_ONLY)
+                        .includeObservations(false)
+                        .includeTests(false)
+                        .failFast(false)
+                        .build();
 
-        FactsExtractResponse response = factsExtractionFacade.extract(request);
+        FactsExtractResponse response =
+                factsExtractionFacade.extract(request);
 
         assertNotNull(response);
-        assertEquals(TEST_RUN_ID, response.runId());
-        assertEquals("ast_and_bytecode", response.mode());
-        assertTrue(response.stats().filesScanned() > 0,
-                "바이트코드 모드에서 파일 스캔이 0보다 커야 함");
 
-        printSummary("AST_PLUS_BYTECODE", response);
+        JsonNode factsJson =
+                captureFactsJson();
+
+        JsonNode relations =
+                factsJson.path("relations");
+
+        JsonNode calls =
+                relations.path("calls");
+
+        JsonNode creates =
+                relations.path("creates");
+
+        JsonNode overrides =
+                relations.path("overrides");
+
+        JsonNode accessesField =
+                relations.path("accesses_field");
+
+        assertTrue(
+                creates.isArray(),
+                "relations.creates는 배열이어야 함"
+        );
+
+        assertTrue(
+                creates.size() > 0,
+                "분석 결과에 CREATES 관계가 하나 이상 있어야 함"
+        );
+
+        Set<String> createEvidenceIds =
+                collectEvidenceIds(creates);
+
+        assertFalse(
+                createEvidenceIds.isEmpty(),
+                "CREATES 관계에 Evidence가 연결되어야 함"
+        );
+
+        /*
+         * ObjectCreationExpr가 CALLS와 CREATES로 중복 생성되는지 확인한다.
+         */
+        Set<String> callEvidenceIds =
+                collectEvidenceIds(calls);
+
+        Set<String> duplicatedEvidenceIds =
+                new HashSet<>(createEvidenceIds);
+
+        duplicatedEvidenceIds.retainAll(
+                callEvidenceIds
+        );
+
+        assertTrue(
+                duplicatedEvidenceIds.isEmpty(),
+                "객체 생성 표현식 Evidence가 CALLS와 CREATES에 중복 연결되면 안 됨"
+        );
+
+        JsonNode evidenceSection =
+                factsJson.path("evidence");
+
+        boolean hasObjectCreationExpressionEvidence =
+                false;
+
+        for (String evidenceId : createEvidenceIds) {
+            JsonNode evidence =
+                    findEvidence(
+                            evidenceSection,
+                            evidenceId
+                    );
+
+            if (evidence == null) {
+                continue;
+            }
+
+            String snippet =
+                    evidence.path("snippet")
+                            .asText("");
+
+            if (snippet.contains("new ")) {
+                hasObjectCreationExpressionEvidence = true;
+                break;
+            }
+        }
+
+        assertTrue(
+                hasObjectCreationExpressionEvidence,
+                "CREATES 관계가 new 표현식 범위의 Evidence를 참조해야 함"
+        );
+
+        long expectedRelationCount =
+                arraySize(calls)
+                        + arraySize(creates)
+                        + arraySize(overrides)
+                        + arraySize(accessesField);
+
+        assertEquals(
+                expectedRelationCount,
+                factsJson.path("stats")
+                        .path("relations")
+                        .asLong(),
+                "stats.relations에 CREATES 개수도 포함되어야 함"
+        );
     }
 
-    private void printSummary(String label, FactsExtractResponse response) {
+    @Test
+    @DisplayName("AST_PLUS_BYTECODE 모드 — 소스와 바이트코드 추출")
+    void extractFacts_withBytecode_succeeds() {
+        FactsExtractRequest request =
+                FactsExtractRequest.builder()
+                        .runId(TEST_RUN_ID)
+                        .mode(ExtractionMode.AST_PLUS_BYTECODE)
+                        .includeObservations(true)
+                        .includeTests(false)
+                        .failFast(false)
+                        .build();
+
+        FactsExtractResponse response =
+                factsExtractionFacade.extract(request);
+
+        assertNotNull(response);
+
+        assertEquals(
+                TEST_RUN_ID,
+                response.runId()
+        );
+
+        assertEquals(
+                "ast_and_bytecode",
+                response.mode()
+        );
+
+        assertTrue(
+                response.stats().filesScanned() > 0,
+                "바이트코드 모드에서 파일 스캔이 0보다 커야 함"
+        );
+
+        printSummary(
+                "AST_PLUS_BYTECODE",
+                response
+        );
+    }
+
+    /**
+     * 테스트마다 독립적인 임시 워크스페이스를 생성한다.
+     *
+     * <pre>
+     * workspace
+     * ├─ repo
+     * │  ├─ build.gradle
+     * │  ├─ settings.gradle
+     * │  ├─ README.md
+     * │  ├─ src/main/java/sample/CreatesSample.java
+     * │  └─ build/classes/java/main/sample/*.class
+     * └─ artifacts
+     *    └─ build_manifest.json
+     * </pre>
+     */
+    private Path createTestWorkspace() throws IOException {
+        Path workspaceRoot =
+                tempDir.resolve(TEST_RUN_ID);
+
+        Path repoRoot =
+                workspaceRoot.resolve("repo");
+
+        Path sourceRoot =
+                repoRoot.resolve("src/main/java");
+
+        Path packageDirectory =
+                sourceRoot.resolve("sample");
+
+        Path artifactsRoot =
+                workspaceRoot.resolve("artifacts");
+
+        Path classesRoot =
+                repoRoot.resolve(
+                        "build/classes/java/main"
+                );
+
+        Files.createDirectories(packageDirectory);
+        Files.createDirectories(artifactsRoot);
+        Files.createDirectories(classesRoot);
+
+        writeGradleProjectFiles(repoRoot);
+
+        Path sourceFile =
+                writeTestJavaSource(packageDirectory);
+
+        compileTestSource(
+                sourceFile,
+                classesRoot
+        );
+
+        writeBuildManifest(
+                artifactsRoot
+        );
+
+        return workspaceRoot;
+    }
+
+    private void writeGradleProjectFiles(
+            Path repoRoot
+    ) throws IOException {
+        Files.writeString(
+                repoRoot.resolve("settings.gradle"),
+                """
+                rootProject.name = 'creates-sample'
+                """,
+                StandardCharsets.UTF_8
+        );
+
+        Files.writeString(
+                repoRoot.resolve("build.gradle"),
+                """
+                plugins {
+                    id 'java'
+                }
+                """,
+                StandardCharsets.UTF_8
+        );
+
+        Files.writeString(
+                repoRoot.resolve("README.md"),
+                """
+                # Creates Sample
+
+                ExtractionPipelineIntegrationTest에서 사용하는
+                임시 Java 프로젝트입니다.
+                """,
+                StandardCharsets.UTF_8
+        );
+    }
+
+    private Path writeTestJavaSource(
+            Path packageDirectory
+    ) throws IOException {
+        Path sourceFile =
+                packageDirectory.resolve(
+                        "CreatesSample.java"
+                );
+
+        Files.writeString(
+                sourceFile,
+                """
+                package sample;
+
+                public class CreatesSample {
+
+                    private final Target field =
+                            new Target();
+
+                    public Target create() {
+                        return new Target();
+                    }
+
+                    public String callTarget() {
+                        Target target = new Target();
+                        return target.name();
+                    }
+                }
+
+                class Target {
+
+                    String name() {
+                        return "target";
+                    }
+                }
+                """,
+                StandardCharsets.UTF_8
+        );
+
+        return sourceFile;
+    }
+
+    /**
+     * AST_PLUS_BYTECODE 테스트에서 사용할 class 파일을 생성한다.
+     */
+    private void compileTestSource(
+            Path sourceFile,
+            Path classesRoot
+    ) {
+        JavaCompiler compiler =
+                ToolProvider.getSystemJavaCompiler();
+
+        assertNotNull(
+                compiler,
+                "통합 테스트는 JRE가 아닌 JDK 환경에서 실행되어야 함"
+        );
+
+        int exitCode =
+                compiler.run(
+                        null,
+                        null,
+                        null,
+                        "-encoding",
+                        "UTF-8",
+                        "-d",
+                        classesRoot.toString(),
+                        sourceFile.toString()
+                );
+
+        assertEquals(
+                0,
+                exitCode,
+                "테스트용 Java 소스 컴파일에 실패함"
+        );
+    }
+
+    /**
+     * Preflight 검사를 통과할 수 있는 테스트용 build_manifest.json을 생성한다.
+     */
+    private void writeBuildManifest(
+            Path artifactsRoot
+    ) throws IOException {
+        BuildModuleManifest moduleManifest =
+                BuildModuleManifest.builder()
+                        .moduleId(":")
+                        .name("creates-sample")
+                        .groupId("sample")
+                        .artifactId("creates-sample")
+                        .version("1.0.0")
+                        .sourceRoots(
+                                List.of("src/main/java")
+                        )
+                        .testRoots(List.of())
+                        .resourceRoots(List.of())
+                        .classesDirs(
+                                List.of(
+                                        "build/classes/java/main"
+                                )
+                        )
+                        .compileClasspath(
+                                List.of(
+                                        "build/classes/java/main"
+                                )
+                        )
+                        .runtimeClasspath(
+                                List.of(
+                                        "build/classes/java/main"
+                                )
+                        )
+                        .status("OK")
+                        .failReason(null)
+                        .build();
+
+        BuildManifest buildManifest =
+                BuildManifest.builder()
+                        .runId(TEST_RUN_ID)
+                        .detectedAt(OffsetDateTime.now())
+                        .buildTool(BuildToolKind.GRADLE)
+                        .wrapperUsed(false)
+                        .buildMode(BuildMode.FULL)
+                        .modules(
+                                List.of(moduleManifest)
+                        )
+                        .failures(List.of())
+                        .build();
+
+        Path manifestFile =
+                artifactsRoot.resolve(
+                        "build_manifest.json"
+                );
+
+        objectMapper
+                .writerWithDefaultPrettyPrinter()
+                .writeValue(
+                        manifestFile.toFile(),
+                        buildManifest
+                );
+
+        assertTrue(
+                Files.exists(manifestFile),
+                "테스트용 build_manifest.json이 생성되어야 함"
+        );
+    }
+
+    private JsonNode captureFactsJson() {
+        ArgumentCaptor<JsonNode> jsonCaptor =
+                ArgumentCaptor.forClass(
+                        JsonNode.class
+                );
+
+        verify(artifactService)
+                .saveJsonArtifact(
+                        any(RepoRun.class),
+                        eq(ArtifactKind.FACTS_JSON),
+                        anyString(),
+                        anyString(),
+                        jsonCaptor.capture()
+                );
+
+        JsonNode factsJson =
+                jsonCaptor.getValue();
+
+        assertNotNull(
+                factsJson,
+                "ArtifactService에 전달된 facts JSON이 null이면 안 됨"
+        );
+
+        return factsJson;
+    }
+
+    private Set<String> collectEvidenceIds(
+            JsonNode relationArray
+    ) {
+        Set<String> result =
+                new HashSet<>();
+
+        if (relationArray == null
+                || !relationArray.isArray()) {
+            return result;
+        }
+
+        for (JsonNode relation : relationArray) {
+            JsonNode evidenceIds =
+                    relation.get("evidence_ids");
+
+            if (evidenceIds == null) {
+                evidenceIds =
+                        relation.get("evidenceIds");
+            }
+
+            if (evidenceIds == null
+                    || !evidenceIds.isArray()) {
+                continue;
+            }
+
+            for (JsonNode evidenceId : evidenceIds) {
+                if (evidenceId.isTextual()
+                        && !evidenceId.asText().isBlank()) {
+                    result.add(
+                            evidenceId.asText()
+                    );
+                }
+            }
+        }
+
+        return result;
+    }
+
+    private JsonNode findEvidence(
+            JsonNode evidenceSection,
+            String evidenceId
+    ) {
+        if (evidenceSection == null
+                || evidenceSection.isMissingNode()
+                || evidenceSection.isNull()) {
+            return null;
+        }
+
+        if (evidenceSection.isObject()) {
+            return evidenceSection.get(
+                    evidenceId
+            );
+        }
+
+        if (evidenceSection.isArray()) {
+            for (JsonNode evidence : evidenceSection) {
+                String actualEvidenceId =
+                        firstNonBlankText(
+                                evidence,
+                                "id",
+                                "evidence_id",
+                                "evidenceId"
+                        );
+
+                if (evidenceId.equals(actualEvidenceId)) {
+                    return evidence;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private String firstNonBlankText(
+            JsonNode node,
+            String... fieldNames
+    ) {
+        if (node == null || fieldNames == null) {
+            return null;
+        }
+
+        for (String fieldName : fieldNames) {
+            JsonNode value =
+                    node.get(fieldName);
+
+            if (value != null
+                    && value.isTextual()
+                    && !value.asText().isBlank()) {
+                return value.asText();
+            }
+        }
+
+        return null;
+    }
+
+    private long arraySize(JsonNode node) {
+        return node != null
+                && node.isArray()
+                ? node.size()
+                : 0L;
+    }
+
+    private void printSummary(
+            String label,
+            FactsExtractResponse response
+    ) {
         System.out.println();
-        System.out.println("=== " + label + " 결과 요약 ===");
-        System.out.println("runId:                " + response.runId());
-        System.out.println("mode:                 " + response.mode());
-        System.out.println("schemaVersion:        " + response.schemaVersion());
-        System.out.println("filesScanned:         " + response.stats().filesScanned());
-        System.out.println("types:                " + response.stats().types());
-        System.out.println("methods:              " + response.stats().methods());
-        System.out.println("fields:               " + response.stats().fields());
-        System.out.println("relations:            " + response.stats().relations());
-        System.out.println("evidence:             " + response.stats().evidence());
-        System.out.println("errors:               " + response.stats().errors());
-        System.out.println("warnings:             " + response.warnings());
+        System.out.println(
+                "=== " + label + " 결과 요약 ==="
+        );
+        System.out.println(
+                "runId:                "
+                        + response.runId()
+        );
+        System.out.println(
+                "mode:                 "
+                        + response.mode()
+        );
+        System.out.println(
+                "schemaVersion:        "
+                        + response.schemaVersion()
+        );
+        System.out.println(
+                "filesScanned:         "
+                        + response.stats().filesScanned()
+        );
+        System.out.println(
+                "types:                "
+                        + response.stats().types()
+        );
+        System.out.println(
+                "methods:              "
+                        + response.stats().methods()
+        );
+        System.out.println(
+                "fields:               "
+                        + response.stats().fields()
+        );
+        System.out.println(
+                "relations:            "
+                        + response.stats().relations()
+        );
+        System.out.println(
+                "evidence:             "
+                        + response.stats().evidence()
+        );
+        System.out.println(
+                "errors:               "
+                        + response.stats().errors()
+        );
+        System.out.println(
+                "warnings:             "
+                        + response.warnings()
+        );
         System.out.println();
     }
 }
