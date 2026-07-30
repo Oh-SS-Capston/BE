@@ -55,7 +55,7 @@ public class LicenseDisplayPolicyJson {
 
     /**
      * 사람이 직접 확인해야 한다는 최상단 경고를 보여줄지 여부입니다.
-     * 대표 라이선스가 UNKNOWN이거나 근거 충돌이 있을 때 true가 됩니다.
+     * 대표 라이선스가 UNKNOWN이거나 근거 충돌이 있거나 GPL/AGPL처럼 높은 검토 수준이면 true가 됩니다.
      */
     private Boolean requireManualReview;
 
