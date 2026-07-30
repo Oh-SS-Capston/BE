@@ -315,7 +315,7 @@ public class LicenseCatalog {
                                 List.of("제품 배포 시 사용자가 라이브러리를 교체할 수 있는 조건을 확인해야 합니다.")
                         ),
                         List.of("GNU Lesser General Public License Version 3.0", "Lesser GPL 3.0"),
-                        List.of("GNU Lesser General Public License Version 3.0")
+                        List.of("GNU Lesser General Public License Version 3.0", "GNU Lesser General Public License Version 3")
                 ),
                 entry(
                         profile(
@@ -329,7 +329,7 @@ public class LicenseCatalog {
                                 List.of("프로젝트 결합 방식과 배포 형태를 반드시 검토해야 합니다.")
                         ),
                         List.of("GNU General Public License Version 2.0", "GPL v2"),
-                        List.of("GNU General Public License Version 2.0")
+                        List.of("GNU General Public License Version 2.0", "GNU General Public License Version 2")
                 ),
                 entry(
                         profile(
@@ -343,7 +343,7 @@ public class LicenseCatalog {
                                 List.of("제품 배포, 결합 방식, 특허 관련 조항을 함께 검토해야 합니다.")
                         ),
                         List.of("GNU General Public License Version 3.0", "GPL v3"),
-                        List.of("GNU General Public License Version 3.0")
+                        List.of("GNU General Public License Version 3.0", "GNU General Public License Version 3")
                 ),
                 entry(
                         profile(
@@ -357,7 +357,7 @@ public class LicenseCatalog {
                                 List.of("웹 서비스나 API 서버 형태로 제공할 때도 조항을 반드시 확인해야 합니다.")
                         ),
                         List.of("GNU Affero General Public License Version 3.0", "Affero GPL v3"),
-                        List.of("GNU Affero General Public License Version 3.0", "GNU Affero General Public License")
+                        List.of("GNU Affero General Public License Version 3.0", "GNU Affero General Public License Version 3")
                 ),
                 entry(
                         profile(
