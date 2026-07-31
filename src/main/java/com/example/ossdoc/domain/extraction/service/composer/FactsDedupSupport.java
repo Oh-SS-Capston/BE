@@ -10,8 +10,8 @@ import com.example.ossdoc.domain.extraction.dto.model.SymbolFact;
 import com.example.ossdoc.domain.extraction.dto.model.TypeRef;
 import com.example.ossdoc.domain.extraction.enums.DerivationKind;
 import com.example.ossdoc.domain.extraction.enums.FactOriginKind;
-import com.example.ossdoc.domain.extraction.enums.ObservationKind;
 import com.example.ossdoc.domain.extraction.enums.ResolutionStatus;
+import com.example.ossdoc.domain.extraction.service.support.evidence.EvidenceMergePolicy;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -32,27 +32,11 @@ final class FactsDedupSupport {
     private FactsDedupSupport() {
     }
 
-    static EvidenceFact mergeEvidence(EvidenceFact left, EvidenceFact right) {
-        if (left == null) {
-            return right;
-        }
-        if (right == null) {
-            return left;
-        }
-
-        return EvidenceFact.builder()
-                .id(firstNonBlank(left.id(), right.id()))
-                .type(firstNonNull(left.type(), right.type()))
-                .path(firstNonBlank(left.path(), right.path()))
-                .startLine(firstNonNull(left.startLine(), right.startLine()))
-                .endLine(firstNonNull(left.endLine(), right.endLine()))
-                .startCol(firstNonNull(left.startCol(), right.startCol()))
-                .endCol(firstNonNull(left.endCol(), right.endCol()))
-                .symbol(firstNonBlank(left.symbol(), right.symbol()))
-                .snippet(preferLonger(left.snippet(), right.snippet()))
-                .hash(firstNonBlank(left.hash(), right.hash()))
-                .attrs(mergeMaps(left.attrs(), right.attrs()))
-                .build();
+    static EvidenceFact mergeEvidence(
+            EvidenceFact left,
+            EvidenceFact right
+    ) {
+        return EvidenceMergePolicy.merge(left, right);
     }
 
     static SymbolFact mergeSymbol(SymbolFact left, SymbolFact right) {
@@ -412,44 +396,8 @@ final class FactsDedupSupport {
                         : observation.kind().code()),
                 safe(observation.siteSymbol()),
                 safe(observation.targetSymbol()),
-                semanticTypeRefKey(observation.targetTypeRef()),
-                observationDiscriminator(observation)
+                semanticTypeRefKey(observation.targetTypeRef())
         );
-    }
-
-    private static String observationDiscriminator(
-            ObservationFact observation
-    ) {
-        if (observation == null
-                || observation.kind() != ObservationKind.REFLECTION_SITE
-                || observation.attrs() == null) {
-            return "";
-        }
-
-        return String.join("~",
-                attrValue(observation.attrs(), "reflection_kind"),
-                attrValue(observation.attrs(), "api_method", "method"),
-                attrValue(observation.attrs(), "target_type"),
-                attrValue(observation.attrs(), "member_name"),
-                attrValue(observation.attrs(), "scope"),
-                attrValue(observation.attrs(), "descriptor")
-        );
-    }
-
-    private static String attrValue(
-            Map<String, Object> attrs,
-            String... keys
-    ) {
-        if (attrs == null || keys == null) {
-            return "";
-        }
-        for (String key : keys) {
-            Object value = attrs.get(key);
-            if (value != null) {
-                return String.valueOf(value);
-            }
-        }
-        return "";
     }
 
     /**

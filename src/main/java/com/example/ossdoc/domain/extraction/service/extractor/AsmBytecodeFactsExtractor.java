@@ -21,6 +21,8 @@ import com.example.ossdoc.domain.extraction.enums.ResolutionStatus;
 import com.example.ossdoc.domain.extraction.enums.SymbolKind;
 import com.example.ossdoc.domain.extraction.enums.SymbolOriginKind;
 import com.example.ossdoc.domain.extraction.enums.TypeKind;
+import com.example.ossdoc.domain.extraction.service.support.evidence.BytecodeAnnotationEvidenceFactory;
+import com.example.ossdoc.domain.extraction.service.support.evidence.BytecodeInstructionEvidenceFactory;
 import com.example.ossdoc.domain.extraction.service.support.util.ConfidenceHints;
 import com.example.ossdoc.domain.extraction.service.support.util.EvidenceIdGenerator;
 import com.example.ossdoc.domain.extraction.service.support.util.RelationResolutionFactory;
@@ -31,6 +33,8 @@ import org.objectweb.asm.AnnotationVisitor;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.FieldVisitor;
+import org.objectweb.asm.Handle;
+import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
@@ -63,16 +67,31 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
         private final String descriptor;
         private final String qualifiedName;
         private final boolean runtimeVisible;
-        private final Map<String, Object> values = new LinkedHashMap<>();
+        private final int annotationIndex;
+        private final String ownerSymbol;
+        private final String relativePath;
+        private final String module;
+        private final Map<String, Object> values =
+                new LinkedHashMap<>();
+
+        private String relationEvidenceId;
 
         private AnnotationData(
                 String descriptor,
                 String qualifiedName,
-                boolean runtimeVisible
+                boolean runtimeVisible,
+                int annotationIndex,
+                String ownerSymbol,
+                String relativePath,
+                String module
         ) {
             this.descriptor = descriptor;
             this.qualifiedName = qualifiedName;
             this.runtimeVisible = runtimeVisible;
+            this.annotationIndex = annotationIndex;
+            this.ownerSymbol = ownerSymbol;
+            this.relativePath = relativePath;
+            this.module = module;
         }
     }
 
@@ -139,6 +158,7 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
         private final ExtractionSink sink;
         private final String moduleSymbol;
         private final List<AnnotationData> typeAnnotations = new ArrayList<>();
+        private int nextTypeAnnotationIndex;
 
         private String packageName;
         private String packageSymbol;
@@ -206,22 +226,26 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
                 String descriptor,
                 boolean visible
         ) {
-            addAnnotationRelation(
-                    typeSymbol,
-                    descriptor,
-                    visible,
-                    typeEvidenceId,
-                    sink
-            );
+            AnnotationData annotation =
+                    new AnnotationData(
+                            descriptor,
+                            annotationQualifiedName(descriptor),
+                            visible,
+                            nextTypeAnnotationIndex++,
+                            typeSymbol,
+                            relativePath,
+                            context.module()
+                    );
 
-            AnnotationData annotation = new AnnotationData(
-                    descriptor,
-                    annotationQualifiedName(descriptor),
-                    visible
-            );
             typeAnnotations.add(annotation);
 
-            return annotationVisitor(annotation.values);
+            return annotationVisitor(
+                    annotation.values,
+                    () -> registerAnnotationRelationEvidence(
+                            annotation,
+                            sink
+                    )
+            );
         }
 
         @Override
@@ -253,40 +277,88 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
                     .build());
 
             return new FieldVisitor(ASM_API) {
+
+                private int nextFieldAnnotationIndex;
+
                 @Override
                 public AnnotationVisitor visitAnnotation(
                         String annotationDescriptor,
                         boolean visible
                 ) {
-                    addAnnotationRelation(
-                            fieldSymbol,
-                            annotationDescriptor,
-                            visible,
-                            evidence.id(),
-                            sink
+                    AnnotationData annotation =
+                            new AnnotationData(
+                                    annotationDescriptor,
+                                    annotationQualifiedName(
+                                            annotationDescriptor
+                                    ),
+                                    visible,
+                                    nextFieldAnnotationIndex++,
+                                    fieldSymbol,
+                                    relativePath,
+                                    context.module()
+                            );
+
+                    return annotationVisitor(
+                            annotation.values,
+                            () -> {
+                                registerAnnotationRelationEvidence(
+                                        annotation,
+                                        sink
+                                );
+
+                                if (context.includeObservations()
+                                        && isInjectionAnnotationName(
+                                        annotation.qualifiedName
+                                )) {
+                                    EvidenceFact injectionEvidence =
+                                            registerSemanticAnnotationEvidence(
+                                                    annotation,
+                                                    "injection_annotation",
+                                                    sink
+                                            );
+
+                                    sink.addObservation(
+                                            ObservationFact.builder()
+                                                    .kind(
+                                                            ObservationKind
+                                                                    .DI_INJECTION_SITE
+                                                    )
+                                                    .siteSymbol(fieldSymbol)
+                                                    .targetTypeRef(
+                                                            fieldTypeRef
+                                                    )
+                                                    .evidenceIds(
+                                                            List.of(
+                                                                    injectionEvidence
+                                                                            .id()
+                                                            )
+                                                    )
+                                                    .origin(
+                                                            FactOriginKind
+                                                                    .OBSERVED
+                                                    )
+                                                    .confidenceHint(
+                                                            ConfidenceHints
+                                                                    .observation(
+                                                                            List.of(
+                                                                                    EvidenceType
+                                                                                            .BYTECODE
+                                                                            )
+                                                                    )
+                                                    )
+                                                    .note(
+                                                            "field injection from bytecode annotation"
+                                                    )
+                                                    .attrs(Map.of(
+                                                            "annotation",
+                                                            annotation
+                                                                    .qualifiedName
+                                                    ))
+                                                    .build()
+                                    );
+                                }
+                            }
                     );
-
-                    if (context.includeObservations()
-                            && isInjectionAnnotation(annotationDescriptor)) {
-                        sink.addObservation(ObservationFact.builder()
-                                .kind(ObservationKind.DI_INJECTION_SITE)
-                                .siteSymbol(fieldSymbol)
-                                .targetTypeRef(fieldTypeRef)
-                                .evidenceIds(List.of(evidence.id()))
-                                .origin(FactOriginKind.BYTECODE)
-                                .confidenceHint(ConfidenceHints.observation(
-                                        List.of(EvidenceType.BYTECODE)
-                                ))
-                                .note("field injection from bytecode annotation")
-                                .attrs(Map.of(
-                                        "annotation",
-                                        annotationQualifiedName(annotationDescriptor)
-                                ))
-                                .build());
-                    }
-
-                    return new AnnotationVisitor(ASM_API) {
-                    };
                 }
             };
         }
@@ -324,29 +396,58 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
 
             return new MethodVisitor(ASM_API) {
 
-                private final List<AnnotationData> methodAnnotations = new ArrayList<>();
+                private final List<AnnotationData> methodAnnotations =
+                        new ArrayList<>();
+                private int nextMethodAnnotationIndex;
+
+                /**
+                 * 실제 bytecode offset이 아니라 MethodVisitor에 전달되는
+                 * instruction callback의 0-based 순서다.
+                 */
+                private int nextInstructionIndex;
+
+                /**
+                 * LineNumberTable에서 가장 최근에 확인된 소스 행.
+                 * 디버그 정보가 없는 class 파일에서는 null이다.
+                 */
+                private Integer currentSourceLine;
 
                 @Override
                 public AnnotationVisitor visitAnnotation(
                         String annotationDescriptor,
                         boolean visible
                 ) {
-                    addAnnotationRelation(
-                            symbol,
-                            annotationDescriptor,
-                            visible,
-                            evidence.id(),
-                            sink
-                    );
+                    AnnotationData annotation =
+                            new AnnotationData(
+                                    annotationDescriptor,
+                                    annotationQualifiedName(
+                                            annotationDescriptor
+                                    ),
+                                    visible,
+                                    nextMethodAnnotationIndex++,
+                                    symbol,
+                                    relativePath,
+                                    context.module()
+                            );
 
-                    AnnotationData annotation = new AnnotationData(
-                            annotationDescriptor,
-                            annotationQualifiedName(annotationDescriptor),
-                            visible
-                    );
                     methodAnnotations.add(annotation);
 
-                    return annotationVisitor(annotation.values);
+                    return annotationVisitor(
+                            annotation.values,
+                            () -> registerAnnotationRelationEvidence(
+                                    annotation,
+                                    sink
+                            )
+                    );
+                }
+
+                @Override
+                public void visitLineNumber(
+                        int line,
+                        Label start
+                ) {
+                    currentSourceLine = line;
+                    super.visitLineNumber(line, start);
                 }
 
                 @Override
@@ -357,62 +458,141 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
                         String methodDescriptor,
                         boolean isInterface
                 ) {
-                    Type methodType = Type.getMethodType(methodDescriptor);
-                    SignatureFact calleeSignature = SignatureFact.builder()
-                            .params(Arrays.stream(methodType.getArgumentTypes())
-                                    .map(type -> ParamFact.builder()
-                                            .name(null)
-                                            .typeRef(typeRefFromAsmType(type))
-                                            .build())
-                                    .toList())
-                            .build();
+                    int instructionIndex =
+                            claimInstructionIndex();
 
-                    String dstSymbol = "<init>".equals(methodName)
-                            ? SymbolIdFactory.constructor(
-                            internalNameToQualified(owner),
-                            calleeSignature
-                    )
-                            : SymbolIdFactory.method(
-                            internalNameToQualified(owner),
-                            methodName,
-                            calleeSignature
-                    );
+                    EvidenceFact callEvidence =
+                            buildInstructionEvidence(
+                                    symbol,
+                                    currentSourceLine,
+                                    instructionIndex,
+                                    opcode,
+                                    "method_call",
+                                    owner,
+                                    methodName,
+                                    methodDescriptor,
+                                    isInterface
+                            );
+                    sink.addEvidence(callEvidence);
+
+                    Type methodType =
+                            Type.getMethodType(methodDescriptor);
+
+                    SignatureFact calleeSignature =
+                            SignatureFact.builder()
+                                    .params(
+                                            Arrays.stream(
+                                                            methodType
+                                                                    .getArgumentTypes()
+                                                    )
+                                                    .map(type ->
+                                                            ParamFact.builder()
+                                                                    .name(null)
+                                                                    .typeRef(
+                                                                            typeRefFromAsmType(
+                                                                                    type
+                                                                            )
+                                                                    )
+                                                                    .build()
+                                                    )
+                                                    .toList()
+                                    )
+                                    .build();
+
+                    String dstSymbol =
+                            "<init>".equals(methodName)
+                                    ? SymbolIdFactory.constructor(
+                                            internalNameToQualified(owner),
+                                            calleeSignature
+                                    )
+                                    : SymbolIdFactory.method(
+                                            internalNameToQualified(owner),
+                                            methodName,
+                                            calleeSignature
+                                    );
 
                     sink.addRelation(RelationFact.builder()
                             .kind(RelationKind.CALLS)
                             .srcSymbol(symbol)
                             .dstSymbol(dstSymbol)
-                            .evidenceIds(List.of(evidence.id()))
-                            .resolution(RelationResolutionFactory.resolved())
+                            .evidenceIds(
+                                    List.of(callEvidence.id())
+                            )
+                            .resolution(
+                                    RelationResolutionFactory.resolved()
+                            )
                             .origin(FactOriginKind.BYTECODE)
-                            .confidenceHint(ConfidenceHints.relation(
-                                    ResolutionStatus.RESOLVED,
-                                    FactOriginKind.BYTECODE
-                            ))
+                            .callSiteLine(currentSourceLine)
+                            .confidenceHint(
+                                    ConfidenceHints.relation(
+                                            ResolutionStatus.RESOLVED,
+                                            FactOriginKind.BYTECODE
+                                    )
+                            )
                             .build());
 
                     if (context.includeObservations()
-                            && isReflectionOwner(owner, methodName)) {
-                        sink.addObservation(ObservationFact.builder()
-                                .kind(ObservationKind.REFLECTION_SITE)
-                                .siteSymbol(symbol)
-                                .evidenceIds(List.of(evidence.id()))
-                                .origin(FactOriginKind.BYTECODE)
-                                .confidenceHint(ConfidenceHints.observation(
-                                        List.of(EvidenceType.BYTECODE)
-                                ))
-                                .note("reflection API usage from bytecode")
-                                .attrs(Map.of(
-                                        "owner", internalNameToQualified(owner),
-                                        "api_owner", internalNameToQualified(owner),
-                                        "method", methodName,
-                                        "api_method", methodName,
-                                        "reflection_kind", reflectionKind(owner, methodName),
-                                        "descriptor", methodDescriptor,
-                                        "target_resolution", "unknown"
-                                ))
-                                .build());
+                            && isReflectionOwner(
+                                    owner,
+                                    methodName
+                            )) {
+                        EvidenceFact reflectionEvidence =
+                                buildInstructionEvidence(
+                                        symbol,
+                                        currentSourceLine,
+                                        instructionIndex,
+                                        opcode,
+                                        "reflection_call",
+                                        owner,
+                                        methodName,
+                                        methodDescriptor,
+                                        isInterface
+                                );
+                        sink.addEvidence(reflectionEvidence);
+
+                        sink.addObservation(
+                                ObservationFact.builder()
+                                        .kind(
+                                                ObservationKind.REFLECTION_SITE
+                                        )
+                                        .siteSymbol(symbol)
+                                        .evidenceIds(
+                                                List.of(
+                                                        reflectionEvidence.id()
+                                                )
+                                        )
+                                        .origin(
+                                                FactOriginKind.OBSERVED
+                                        )
+                                        .confidenceHint(
+                                                ConfidenceHints.observation(
+                                                        List.of(
+                                                                EvidenceType.BYTECODE
+                                                        )
+                                                )
+                                        )
+                                        .note(
+                                                "reflection API usage from bytecode"
+                                        )
+                                        .attrs(Map.of(
+                                                "owner",
+                                                internalNameToQualified(owner),
+                                                "method",
+                                                methodName,
+                                                "descriptor",
+                                                methodDescriptor
+                                        ))
+                                        .build()
+                        );
                     }
+
+                    super.visitMethodInsn(
+                            opcode,
+                            owner,
+                            methodName,
+                            methodDescriptor,
+                            isInterface
+                    );
                 }
 
                 @Override
@@ -422,6 +602,23 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
                         String fieldName,
                         String fieldDescriptor
                 ) {
+                    int instructionIndex =
+                            claimInstructionIndex();
+
+                    EvidenceFact fieldEvidence =
+                            buildInstructionEvidence(
+                                    symbol,
+                                    currentSourceLine,
+                                    instructionIndex,
+                                    opcode,
+                                    "field_access",
+                                    owner,
+                                    fieldName,
+                                    fieldDescriptor,
+                                    null
+                            );
+                    sink.addEvidence(fieldEvidence);
+
                     sink.addRelation(RelationFact.builder()
                             .kind(RelationKind.ACCESSES_FIELD)
                             .srcSymbol(symbol)
@@ -429,14 +626,149 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
                                     internalNameToQualified(owner),
                                     fieldName
                             ))
-                            .evidenceIds(List.of(evidence.id()))
-                            .resolution(RelationResolutionFactory.resolved())
+                            .evidenceIds(
+                                    List.of(fieldEvidence.id())
+                            )
+                            .resolution(
+                                    RelationResolutionFactory.resolved()
+                            )
                             .origin(FactOriginKind.BYTECODE)
-                            .confidenceHint(ConfidenceHints.relation(
-                                    ResolutionStatus.RESOLVED,
-                                    FactOriginKind.BYTECODE
-                            ))
+                            .callSiteLine(currentSourceLine)
+                            .confidenceHint(
+                                    ConfidenceHints.relation(
+                                            ResolutionStatus.RESOLVED,
+                                            FactOriginKind.BYTECODE
+                                    )
+                            )
                             .build());
+
+                    super.visitFieldInsn(
+                            opcode,
+                            owner,
+                            fieldName,
+                            fieldDescriptor
+                    );
+                }
+
+                @Override
+                public void visitInsn(int opcode) {
+                    claimInstructionIndex();
+                    super.visitInsn(opcode);
+                }
+
+                @Override
+                public void visitIntInsn(
+                        int opcode,
+                        int operand
+                ) {
+                    claimInstructionIndex();
+                    super.visitIntInsn(opcode, operand);
+                }
+
+                @Override
+                public void visitVarInsn(
+                        int opcode,
+                        int variableIndex
+                ) {
+                    claimInstructionIndex();
+                    super.visitVarInsn(
+                            opcode,
+                            variableIndex
+                    );
+                }
+
+                @Override
+                public void visitTypeInsn(
+                        int opcode,
+                        String type
+                ) {
+                    claimInstructionIndex();
+                    super.visitTypeInsn(opcode, type);
+                }
+
+                @Override
+                public void visitInvokeDynamicInsn(
+                        String invokedName,
+                        String invokedDescriptor,
+                        Handle bootstrapMethodHandle,
+                        Object... bootstrapMethodArguments
+                ) {
+                    claimInstructionIndex();
+                    super.visitInvokeDynamicInsn(
+                            invokedName,
+                            invokedDescriptor,
+                            bootstrapMethodHandle,
+                            bootstrapMethodArguments
+                    );
+                }
+
+                @Override
+                public void visitJumpInsn(
+                        int opcode,
+                        Label label
+                ) {
+                    claimInstructionIndex();
+                    super.visitJumpInsn(opcode, label);
+                }
+
+                @Override
+                public void visitLdcInsn(Object value) {
+                    claimInstructionIndex();
+                    super.visitLdcInsn(value);
+                }
+
+                @Override
+                public void visitIincInsn(
+                        int variableIndex,
+                        int increment
+                ) {
+                    claimInstructionIndex();
+                    super.visitIincInsn(
+                            variableIndex,
+                            increment
+                    );
+                }
+
+                @Override
+                public void visitTableSwitchInsn(
+                        int minimum,
+                        int maximum,
+                        Label defaultLabel,
+                        Label... labels
+                ) {
+                    claimInstructionIndex();
+                    super.visitTableSwitchInsn(
+                            minimum,
+                            maximum,
+                            defaultLabel,
+                            labels
+                    );
+                }
+
+                @Override
+                public void visitLookupSwitchInsn(
+                        Label defaultLabel,
+                        int[] keys,
+                        Label[] labels
+                ) {
+                    claimInstructionIndex();
+                    super.visitLookupSwitchInsn(
+                            defaultLabel,
+                            keys,
+                            labels
+                    );
+                }
+
+                @Override
+                public void visitMultiANewArrayInsn(
+                        String arrayDescriptor,
+                        int dimensions
+                ) {
+                    claimInstructionIndex();
+                    super.visitMultiANewArrayInsn(
+                            arrayDescriptor,
+                            dimensions
+                    );
                 }
 
                 @Override
@@ -449,11 +781,14 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
                                 methodAnnotations,
                                 typeAnnotations,
                                 typeSymbol,
-                                evidence.id(),
                                 sink
                         );
                     }
                     super.visitEnd();
+                }
+
+                private int claimInstructionIndex() {
+                    return nextInstructionIndex++;
                 }
             };
         }
@@ -465,11 +800,96 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
                         typeQualifiedName,
                         typeSymbol,
                         typeAnnotations,
-                        typeEvidenceId,
                         sink
                 );
             }
             super.visitEnd();
+        }
+
+        private void registerAnnotationRelationEvidence(
+                AnnotationData annotation,
+                ExtractionSink sink
+        ) {
+            if (annotation == null) {
+                return;
+            }
+
+            EvidenceFact relationEvidence =
+                    buildAnnotationEvidence(
+                            annotation,
+                            "annotation"
+                    );
+
+            annotation.relationEvidenceId =
+                    relationEvidence.id();
+
+            sink.addEvidence(relationEvidence);
+
+            addAnnotationRelation(
+                    annotation.ownerSymbol,
+                    annotation.descriptor,
+                    annotation.runtimeVisible,
+                    relationEvidence.id(),
+                    sink
+            );
+        }
+
+        private EvidenceFact registerSemanticAnnotationEvidence(
+                AnnotationData annotation,
+                String role,
+                ExtractionSink sink
+        ) {
+            EvidenceFact evidence =
+                    buildAnnotationEvidence(
+                            annotation,
+                            role
+                    );
+
+            sink.addEvidence(evidence);
+            return evidence;
+        }
+
+        private EvidenceFact buildAnnotationEvidence(
+                AnnotationData annotation,
+                String role
+        ) {
+            return BytecodeAnnotationEvidenceFactory.create(
+                    annotation.relativePath,
+                    annotation.module,
+                    annotation.ownerSymbol,
+                    annotation.descriptor,
+                    annotation.qualifiedName,
+                    annotation.runtimeVisible,
+                    annotation.annotationIndex,
+                    role,
+                    annotation.values
+            );
+        }
+
+        private EvidenceFact buildInstructionEvidence(
+                String ownerSymbol,
+                Integer sourceLine,
+                int instructionIndex,
+                int opcode,
+                String role,
+                String targetOwner,
+                String memberName,
+                String descriptor,
+                Boolean interfaceCall
+        ) {
+            return BytecodeInstructionEvidenceFactory.create(
+                    relativePath,
+                    context.module(),
+                    ownerSymbol,
+                    sourceLine,
+                    instructionIndex,
+                    opcode,
+                    role,
+                    targetOwner,
+                    memberName,
+                    descriptor,
+                    interfaceCall
+            );
         }
 
         private EvidenceFact buildBytecodeEvidence(String symbol) {
@@ -495,6 +915,28 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
                     ))
                     .build();
         }
+    }
+
+    private AnnotationVisitor annotationVisitor(
+            Map<String, Object> destination,
+            Runnable onComplete
+    ) {
+        AnnotationVisitor delegate =
+                annotationVisitor(destination);
+
+        return new AnnotationVisitor(
+                ASM_API,
+                delegate
+        ) {
+            @Override
+            public void visitEnd() {
+                super.visitEnd();
+
+                if (onComplete != null) {
+                    onComplete.run();
+                }
+            }
+        };
     }
 
     private AnnotationVisitor annotationVisitor(Map<String, Object> destination) {
@@ -601,7 +1043,6 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
             String typeQualifiedName,
             String typeSymbol,
             List<AnnotationData> annotations,
-            String evidenceId,
             ExtractionSink sink
     ) {
         List<AnnotationData> providerAnnotations = matchingAnnotations(
@@ -634,7 +1075,26 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
                     .kind(ObservationKind.DI_PROVIDER)
                     .siteSymbol(typeSymbol)
                     .targetTypeRef(TypeRefFactory.simple(typeQualifiedName))
-                    .evidenceIds(List.of(evidenceId))
+                    .evidenceIds(
+                            registerSemanticAnnotationEvidenceIds(
+                                    annotations,
+                                    "bean_provider",
+                                    annotationName ->
+                                            isProviderTypeAnnotationName(
+                                                    annotationName
+                                            )
+                                                    || annotationName.endsWith(
+                                                    "Primary"
+                                            )
+                                                    || annotationName.endsWith(
+                                                    "Qualifier"
+                                            )
+                                                    || annotationName.endsWith(
+                                                    "Named"
+                                            ),
+                                    sink
+                            )
+                    )
                     .origin(FactOriginKind.BYTECODE)
                     .confidenceHint(0.9)
                     .note("dependency injection provider")
@@ -697,7 +1157,14 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
         sink.addObservation(ObservationFact.builder()
                 .kind(ObservationKind.CONFIG_WIRING)
                 .siteSymbol(typeSymbol)
-                .evidenceIds(List.of(evidenceId))
+                .evidenceIds(
+                        registerSemanticAnnotationEvidenceIds(
+                                annotations,
+                                "configuration_wiring",
+                                this::isConfigurationAnnotationName,
+                                sink
+                        )
+                )
                 .origin(FactOriginKind.BYTECODE)
                 .confidenceHint(0.9)
                 .note("configuration wiring")
@@ -712,7 +1179,6 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
             List<AnnotationData> methodAnnotations,
             List<AnnotationData> ownerTypeAnnotations,
             String ownerTypeSymbol,
-            String evidenceId,
             ExtractionSink sink
     ) {
         List<AnnotationData> providerAnnotations = matchingAnnotations(
@@ -761,7 +1227,26 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
                     .kind(ObservationKind.DI_PROVIDER)
                     .siteSymbol(methodSymbol)
                     .targetTypeRef(providedType)
-                    .evidenceIds(List.of(evidenceId))
+                    .evidenceIds(
+                            registerSemanticAnnotationEvidenceIds(
+                                    methodAnnotations,
+                                    "bean_provider",
+                                    annotationName ->
+                                            isBeanAnnotationName(
+                                                    annotationName
+                                            )
+                                                    || annotationName.endsWith(
+                                                    "Primary"
+                                            )
+                                                    || annotationName.endsWith(
+                                                    "Qualifier"
+                                            )
+                                                    || annotationName.endsWith(
+                                                    "Named"
+                                            ),
+                                    sink
+                            )
+                    )
                     .origin(FactOriginKind.BYTECODE)
                     .confidenceHint(0.9)
                     .note("dependency injection provider")
@@ -780,7 +1265,14 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
                                     ? null
                                     : methodSignature.params().get(0).typeRef()
                     )
-                    .evidenceIds(List.of(evidenceId))
+                    .evidenceIds(
+                            registerSemanticAnnotationEvidenceIds(
+                                    methodAnnotations,
+                                    "event_subscription",
+                                    this::isEventListenerAnnotationName,
+                                    sink
+                            )
+                    )
                     .origin(FactOriginKind.OBSERVED)
                     .confidenceHint(ConfidenceHints.observation(
                             List.of(EvidenceType.BYTECODE)
@@ -796,6 +1288,50 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
                     ))
                     .build());
         }
+    }
+
+    private List<String> registerSemanticAnnotationEvidenceIds(
+            List<AnnotationData> annotations,
+            String role,
+            Predicate<String> matcher,
+            ExtractionSink sink
+    ) {
+        if (annotations == null
+                || annotations.isEmpty()
+                || matcher == null) {
+            return List.of();
+        }
+
+        LinkedHashSet<String> evidenceIds =
+                new LinkedHashSet<>();
+
+        for (AnnotationData annotation : annotations) {
+            if (annotation == null
+                    || annotation.qualifiedName == null
+                    || !matcher.test(
+                    annotation.qualifiedName
+            )) {
+                continue;
+            }
+
+            EvidenceFact evidence =
+                    BytecodeAnnotationEvidenceFactory.create(
+                            annotation.relativePath,
+                            annotation.module,
+                            annotation.ownerSymbol,
+                            annotation.descriptor,
+                            annotation.qualifiedName,
+                            annotation.runtimeVisible,
+                            annotation.annotationIndex,
+                            role,
+                            annotation.values
+                    );
+
+            sink.addEvidence(evidence);
+            evidenceIds.add(evidence.id());
+        }
+
+        return List.copyOf(evidenceIds);
     }
 
     private List<AnnotationData> matchingAnnotations(
@@ -1299,42 +1835,10 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
         return ("java.lang.Class".equals(qualified)
                 && ("forName".equals(methodName)
                 || "getMethod".equals(methodName)
-                || "getDeclaredMethod".equals(methodName)
-                || "getField".equals(methodName)
-                || "getDeclaredField".equals(methodName)
-                || "getConstructor".equals(methodName)
-                || "getDeclaredConstructor".equals(methodName)
-                || "newInstance".equals(methodName)))
+                || "getDeclaredMethod".equals(methodName)))
                 || ("java.lang.reflect.Method".equals(qualified)
                 && "invoke".equals(methodName))
-                || ("java.lang.reflect.Field".equals(qualified)
-                && ("get".equals(methodName)
-                || "set".equals(methodName)))
                 || ("java.lang.reflect.Constructor".equals(qualified)
                 && "newInstance".equals(methodName));
-    }
-
-    private String reflectionKind(String owner, String methodName) {
-        String qualified = internalNameToQualified(owner);
-        if ("forName".equals(methodName)) {
-            return "type";
-        }
-        if ("getMethod".equals(methodName)
-                || "getDeclaredMethod".equals(methodName)
-                || ("java.lang.reflect.Method".equals(qualified)
-                && "invoke".equals(methodName))) {
-            return "method";
-        }
-        if ("getField".equals(methodName)
-                || "getDeclaredField".equals(methodName)
-                || "java.lang.reflect.Field".equals(qualified)) {
-            return "field";
-        }
-        if ("getConstructor".equals(methodName)
-                || "getDeclaredConstructor".equals(methodName)
-                || "newInstance".equals(methodName)) {
-            return "constructor";
-        }
-        return "unknown";
     }
 }

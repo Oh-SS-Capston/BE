@@ -22,6 +22,7 @@ import com.example.ossdoc.domain.extraction.enums.ObservationKind;
 import com.example.ossdoc.domain.extraction.enums.RelationKind;
 import com.example.ossdoc.domain.extraction.enums.ResolutionStatus;
 import com.example.ossdoc.domain.extraction.enums.SymbolKind;
+import com.example.ossdoc.domain.extraction.service.support.evidence.EvidenceMergePolicy;
 import com.example.ossdoc.domain.extraction.service.support.util.WarningCollector;
 import org.springframework.stereotype.Component;
 
@@ -207,17 +208,7 @@ public class ExtractionMergeSupport {
             Map<String, EvidenceFact> target,
             Map<String, EvidenceFact> source
     ) {
-        if (source == null || source.isEmpty()) {
-            return;
-        }
-
-        for (Map.Entry<String, EvidenceFact> entry : source.entrySet()) {
-            if (entry.getKey() == null || entry.getValue() == null) {
-                continue;
-            }
-
-            target.putIfAbsent(entry.getKey(), entry.getValue());
-        }
+        EvidenceMergePolicy.mergeInto(target, source);
     }
 
     private void mergeSymbols(
@@ -912,39 +903,8 @@ public class ExtractionMergeSupport {
                         : observation.kind().code(),
                 nullToEmpty(observation.siteSymbol()),
                 nullToEmpty(observation.targetSymbol()),
-                semanticTypeRefKey(observation.targetTypeRef()),
-                observationDiscriminator(observation)
+                semanticTypeRefKey(observation.targetTypeRef())
         );
-    }
-
-    private String observationDiscriminator(ObservationFact observation) {
-        if (observation == null
-                || observation.kind() != ObservationKind.REFLECTION_SITE
-                || observation.attrs() == null) {
-            return "";
-        }
-
-        return String.join("~",
-                attrValue(observation.attrs(), "reflection_kind"),
-                attrValue(observation.attrs(), "api_method", "method"),
-                attrValue(observation.attrs(), "target_type"),
-                attrValue(observation.attrs(), "member_name"),
-                attrValue(observation.attrs(), "scope"),
-                attrValue(observation.attrs(), "descriptor")
-        );
-    }
-
-    private String attrValue(Map<String, Object> attrs, String... keys) {
-        if (attrs == null || keys == null) {
-            return "";
-        }
-        for (String key : keys) {
-            Object value = attrs.get(key);
-            if (value != null) {
-                return String.valueOf(value);
-            }
-        }
-        return "";
     }
 
     /**
@@ -1005,18 +965,6 @@ public class ExtractionMergeSupport {
                 .overrides(filterRelations(all, RelationKind.OVERRIDES))
                 .accessesField(filterRelations(all, RelationKind.ACCESSES_FIELD))
                 .annotatedWith(filterRelations(all, RelationKind.ANNOTATED_WITH))
-                .handlesEndpoint(filterRelations(all, RelationKind.HANDLES_ENDPOINT))
-                .declaresBean(filterRelations(all, RelationKind.DECLARES_BEAN))
-                .configuresBean(filterRelations(all, RelationKind.CONFIGURES_BEAN))
-                .injects(filterRelations(all, RelationKind.INJECTS))
-                .publishesEvent(filterRelations(all, RelationKind.PUBLISHES_EVENT))
-                .listensEvent(filterRelations(all, RelationKind.LISTENS_EVENT))
-                .providesSpi(filterRelations(all, RelationKind.PROVIDES_SPI))
-                .loadsService(filterRelations(all, RelationKind.LOADS_SERVICE))
-                .reflectsType(filterRelations(all, RelationKind.REFLECTS_TYPE))
-                .reflectsMethod(filterRelations(all, RelationKind.REFLECTS_METHOD))
-                .reflectsField(filterRelations(all, RelationKind.REFLECTS_FIELD))
-                .reflectsConstructor(filterRelations(all, RelationKind.REFLECTS_CONSTRUCTOR))
                 .build();
     }
 
@@ -1162,18 +1110,6 @@ public class ExtractionMergeSupport {
         addToRelationMap(map, table.overrides());
         addToRelationMap(map, table.accessesField());
         addToRelationMap(map, table.annotatedWith());
-        addToRelationMap(map, table.handlesEndpoint());
-        addToRelationMap(map, table.declaresBean());
-        addToRelationMap(map, table.configuresBean());
-        addToRelationMap(map, table.injects());
-        addToRelationMap(map, table.publishesEvent());
-        addToRelationMap(map, table.listensEvent());
-        addToRelationMap(map, table.providesSpi());
-        addToRelationMap(map, table.loadsService());
-        addToRelationMap(map, table.reflectsType());
-        addToRelationMap(map, table.reflectsMethod());
-        addToRelationMap(map, table.reflectsField());
-        addToRelationMap(map, table.reflectsConstructor());
 
         return map;
     }

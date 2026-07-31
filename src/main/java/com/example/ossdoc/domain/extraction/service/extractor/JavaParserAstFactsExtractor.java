@@ -23,6 +23,8 @@ import com.example.ossdoc.domain.extraction.enums.ResolutionStatus;
 import com.example.ossdoc.domain.extraction.enums.SymbolKind;
 import com.example.ossdoc.domain.extraction.enums.SymbolOriginKind;
 import com.example.ossdoc.domain.extraction.enums.TypeKind;
+import com.example.ossdoc.domain.extraction.service.support.evidence.AstEvidenceFactory;
+import com.example.ossdoc.domain.extraction.service.support.evidence.EvidenceGranularity;
 import com.example.ossdoc.domain.extraction.service.support.util.ConfidenceHints;
 import com.example.ossdoc.domain.extraction.service.support.util.EvidenceIdGenerator;
 import com.example.ossdoc.domain.extraction.service.support.util.RelationResolutionFactory;
@@ -289,40 +291,79 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
     ) {
         String moduleName = moduleDecl.getNameAsString();
         String moduleSymbol = SymbolIdFactory.module(moduleName);
-        EvidenceFact evidence = buildAstEvidence(relativePath, sourceLines, moduleDecl, moduleSymbol, EvidenceType.AST);
+        EvidenceFact evidence = buildAstEvidence(
+                relativePath,
+                sourceLines,
+                moduleDecl,
+                moduleSymbol,
+                EvidenceType.AST
+        );
         sink.addEvidence(evidence);
-        List<String> evidenceIds = List.of(evidence.id());
+        List<String> moduleEvidenceIds = List.of(evidence.id());
 
         for (ModuleDirective directive : moduleDecl.getDirectives()) {
-            if (directive instanceof ModuleExportsDirective e) {
+            if (directive instanceof ModuleExportsDirective exportsDirective) {
                 sink.addObservation(ObservationFact.builder()
                         .kind(ObservationKind.MODULE_EXPORTS)
                         .siteSymbol(moduleSymbol)
-                        .targetSymbol(e.getNameAsString())
+                        .targetSymbol(exportsDirective.getNameAsString())
                         .origin(FactOriginKind.AST)
                         .confidenceHint(0.9)
-                        .evidenceIds(evidenceIds)
+                        .evidenceIds(moduleEvidenceIds)
                         .build());
-            } else if (directive instanceof ModuleUsesDirective u) {
+                continue;
+            }
+
+            if (directive instanceof ModuleUsesDirective usesDirective) {
+                String directiveEvidenceId = registerObservationEvidence(
+                        relativePath,
+                        sourceLines,
+                        usesDirective,
+                        moduleSymbol,
+                        evidence.id(),
+                        EvidenceGranularity.MODULE_DIRECTIVE,
+                        "module_uses",
+                        sink
+                );
+
                 sink.addObservation(ObservationFact.builder()
                         .kind(ObservationKind.MODULE_USES)
                         .siteSymbol(moduleSymbol)
-                        .targetSymbol(u.getNameAsString())
+                        .targetSymbol(usesDirective.getNameAsString())
                         .origin(FactOriginKind.AST)
                         .confidenceHint(0.9)
-                        .evidenceIds(evidenceIds)
+                        .evidenceIds(List.of(directiveEvidenceId))
                         .build());
-            } else if (directive instanceof ModuleProvidesDirective p) {
-                String serviceInterface = p.getNameAsString();
-                for (var impl : p.getWith()) {
+                continue;
+            }
+
+            if (directive instanceof ModuleProvidesDirective providesDirective) {
+                String directiveEvidenceId = registerObservationEvidence(
+                        relativePath,
+                        sourceLines,
+                        providesDirective,
+                        moduleSymbol,
+                        evidence.id(),
+                        EvidenceGranularity.MODULE_DIRECTIVE,
+                        "module_provides",
+                        sink
+                );
+
+                String serviceInterface =
+                        providesDirective.getNameAsString();
+
+                for (var implementation : providesDirective.getWith()) {
                     sink.addObservation(ObservationFact.builder()
                             .kind(ObservationKind.MODULE_PROVIDES)
                             .siteSymbol(moduleSymbol)
                             .targetSymbol(serviceInterface)
                             .origin(FactOriginKind.AST)
                             .confidenceHint(0.9)
-                            .attrs(Map.of("implementation", impl.asString()))
-                            .evidenceIds(evidenceIds)
+                            .attrs(Map.of(
+                                    "implementation",
+                                    implementation.asString()
+                            ))
+                            .evidenceIds(List.of(directiveEvidenceId))
                             .build());
                 }
             }
@@ -436,7 +477,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                         sink
                 );
 
-        for (com.github.javaparser.ast.body.VariableDeclarator variable : fieldDeclaration.getVariables()) {
+        for (VariableDeclarator variable : fieldDeclaration.getVariables()) {
             String fieldSymbol = SymbolIdFactory.field(ownerTypeSymbol.substring("type:".length()), variable.getNameAsString());
             EvidenceFact evidence = buildAstEvidence(relativePath, sourceLines, variable, fieldSymbol, EvidenceType.AST);
             sink.addEvidence(evidence);
@@ -465,7 +506,17 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             sink.addSymbol(fieldFact);
 
             addAnnotationRelations(fieldSymbol, fieldDeclaration.getAnnotations(), annotationRefs, relativePath, sourceLines, evidence.id(), sink);
-            addFieldObservationsIfNeeded(context, fieldDeclaration, fieldSymbol, fieldTypeRef, evidence.id(), sink);
+            addFieldObservationsIfNeeded(
+                    context,
+                    fieldDeclaration,
+                    variable,
+                    fieldSymbol,
+                    fieldTypeRef,
+                    relativePath,
+                    sourceLines,
+                    evidence.id(),
+                    sink
+            );
         }
     }
 
@@ -505,7 +556,15 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
 
         addAnnotationRelations(constructorSymbol, declaration.getAnnotations(), annotationRefs, relativePath, sourceLines, evidence.id(), sink);
         addCallableBodyRelations(declaration, constructorSymbol, relativePath, sourceLines, evidence.id(), sink);
-        addConstructorObservationsIfNeeded(context, declaration, constructorSymbol, evidence.id(), sink);
+        addConstructorObservationsIfNeeded(
+                context,
+                declaration,
+                constructorSymbol,
+                relativePath,
+                sourceLines,
+                evidence.id(),
+                sink
+        );
     }
 
     private void collectMethod(
@@ -719,6 +778,8 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                         addFieldAccessRelation(
                                 callableSymbol,
                                 nameExpr,
+                                relativePath,
+                                sourceLines,
                                 callableEvidenceId,
                                 sink
                         )
@@ -729,6 +790,8 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                         addFieldAccessRelation(
                                 callableSymbol,
                                 fieldAccessExpr,
+                                relativePath,
+                                sourceLines,
                                 callableEvidenceId,
                                 sink
                         )
@@ -740,7 +803,16 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                 .map(pos -> pos.line)
                 .orElse(null);
 
-        String relationEvidenceId = registerExpressionEvidence(relativePath, sourceLines, methodCallExpr, callerSymbol, callableEvidenceId, sink);
+        String relationEvidenceId = registerStructuralEvidence(
+                relativePath,
+                sourceLines,
+                methodCallExpr,
+                callerSymbol,
+                callableEvidenceId,
+                EvidenceGranularity.EXPRESSION,
+                "method_call",
+                sink
+        );
         Map<String, Object> attrs = new LinkedHashMap<>();
         attrs.put("argument_count", methodCallExpr.getArguments().size());
         attrs.put("expression", methodCallExpr.toString());
@@ -789,12 +861,14 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         String rawType =
                 objectCreationExpr.getType().getNameWithScope();
 
-        String relationEvidenceId = registerExpressionEvidence(
+        String relationEvidenceId = registerStructuralEvidence(
                 relativePath,
                 sourceLines,
                 objectCreationExpr,
                 callerSymbol,
                 callableEvidenceId,
+                EvidenceGranularity.EXPRESSION,
+                "object_creation",
                 sink
         );
 
@@ -860,42 +934,67 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         }
     }
 
-    private void addFieldAccessRelation(String callerSymbol, Expression expression, String evidenceId, ExtractionSink sink) {
+    private void addFieldAccessRelation(
+            String callerSymbol,
+            Expression expression,
+            String relativePath,
+            List<String> sourceLines,
+            String fallbackEvidenceId,
+            ExtractionSink sink
+    ) {
         try {
+            ResolvedFieldDeclaration field;
+
             if (expression instanceof NameExpr nameExpr) {
                 var resolved = nameExpr.resolve();
                 if (!resolved.isField()) {
                     return;
                 }
-
-                ResolvedFieldDeclaration field = resolved.asField();
-                sink.addRelation(RelationFact.builder()
-                        .kind(RelationKind.ACCESSES_FIELD)
-                        .srcSymbol(callerSymbol)
-                        .dstSymbol(fieldSymbol(field))
-                        .evidenceIds(List.of(evidenceId))
-                        .resolution(RelationResolutionFactory.resolved())
-                        .origin(FactOriginKind.AST)
-                        .build());
-                return;
-            }
-
-            if (expression instanceof FieldAccessExpr fieldAccessExpr) {
+                field = resolved.asField();
+            } else if (expression instanceof FieldAccessExpr fieldAccessExpr) {
                 var resolved = fieldAccessExpr.resolve();
                 if (!resolved.isField()) {
                     return;
                 }
-
-                ResolvedFieldDeclaration field = resolved.asField();
-                sink.addRelation(RelationFact.builder()
-                        .kind(RelationKind.ACCESSES_FIELD)
-                        .srcSymbol(callerSymbol)
-                        .dstSymbol(fieldSymbol(field))
-                        .evidenceIds(List.of(evidenceId))
-                        .resolution(RelationResolutionFactory.resolved())
-                        .origin(FactOriginKind.AST)
-                        .build());
+                field = resolved.asField();
+            } else {
+                return;
             }
+
+            String relationEvidenceId = registerStructuralEvidence(
+                    relativePath,
+                    sourceLines,
+                    expression,
+                    callerSymbol,
+                    fallbackEvidenceId,
+                    EvidenceGranularity.EXPRESSION,
+                    "field_access",
+                    sink
+            );
+
+            Map<String, Object> attrs = new LinkedHashMap<>();
+            attrs.put("expression", expression.toString());
+
+            sink.addRelation(RelationFact.builder()
+                    .kind(RelationKind.ACCESSES_FIELD)
+                    .srcSymbol(callerSymbol)
+                    .dstSymbol(fieldSymbol(field))
+                    .evidenceIds(List.of(relationEvidenceId))
+                    .resolution(RelationResolutionFactory.resolved())
+                    .origin(FactOriginKind.AST)
+                    .callSiteLine(
+                            expression.getBegin()
+                                    .map(position -> position.line)
+                                    .orElse(null)
+                    )
+                    .confidenceHint(
+                            ConfidenceHints.relation(
+                                    ResolutionStatus.RESOLVED,
+                                    FactOriginKind.AST
+                            )
+                    )
+                    .attrs(Map.copyOf(attrs))
+                    .build());
         } catch (Exception ignored) {
             // best-effort
         }
@@ -983,6 +1082,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                             sourceLines,
                             evidenceId,
                             sink,
+                            "bean_provider",
                             annotationName ->
                                     isDiProviderTypeAnnotation(
                                             annotationName
@@ -1082,6 +1182,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                         sourceLines,
                         evidenceId,
                         sink,
+                        "configuration_wiring",
                         this::isConfigurationAnnotation
                 );
 
@@ -1151,6 +1252,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             List<String> sourceLines,
             String fallbackEvidenceId,
             ExtractionSink sink,
+            String role,
             java.util.function.Predicate<String> matcher
     ) {
         LinkedHashSet<String> evidenceIds =
@@ -1170,12 +1272,14 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                 }
 
                 evidenceIds.add(
-                        registerExpressionEvidence(
+                        registerObservationEvidence(
                                 relativePath,
                                 sourceLines,
                                 annotation,
                                 sourceSymbol,
                                 fallbackEvidenceId,
+                                EvidenceGranularity.ANNOTATION,
+                                role,
                                 sink
                         )
                 );
@@ -1614,9 +1718,9 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         return lastDot < 0
                 ? ""
                 : qualifiedTypeName.substring(
-                0,
-                lastDot
-        );
+                        0,
+                        lastDot
+                );
     }
 
     private String defaultBeanName(
@@ -1629,11 +1733,11 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
 
         if (simpleTypeName.length() > 1
                 && Character.isUpperCase(
-                simpleTypeName.charAt(0)
-        )
+                        simpleTypeName.charAt(0)
+                )
                 && Character.isUpperCase(
-                simpleTypeName.charAt(1)
-        )) {
+                        simpleTypeName.charAt(1)
+                )) {
             return simpleTypeName;
         }
 
@@ -1645,57 +1749,179 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
     private void addFieldObservationsIfNeeded(
             ExtractionContext context,
             FieldDeclaration fieldDeclaration,
+            VariableDeclarator variable,
             String fieldSymbol,
             TypeRef fieldTypeRef,
-            String evidenceId,
+            String relativePath,
+            List<String> sourceLines,
+            String fallbackEvidenceId,
             ExtractionSink sink
     ) {
         if (!context.includeObservations()) {
             return;
         }
 
-        Set<String> annotationNames = nodeAnnotationNames(fieldDeclaration, sink);
-        if (annotationNames.stream().anyMatch(this::isInjectionAnnotation)) {
-            sink.addObservation(ObservationFact.builder()
-                    .kind(ObservationKind.DI_INJECTION_SITE)
-                    .siteSymbol(fieldSymbol)
-                    .targetTypeRef(fieldTypeRef)
-                    .evidenceIds(List.of(evidenceId))
-                    .origin(FactOriginKind.OBSERVED)
-                    .confidenceHint(ConfidenceHints.observation(List.of(EvidenceType.AST)))
-                    .note("field injection")
-                    .attrs(Map.of("annotations", annotationNames))
-                    .build());
+        Set<String> annotationNames =
+                nodeAnnotationNames(fieldDeclaration, sink);
+
+        if (annotationNames.stream()
+                .noneMatch(this::isInjectionAnnotation)) {
+            return;
         }
+
+        LinkedHashSet<String> evidenceIds =
+                new LinkedHashSet<>(
+                        registerAnnotationEvidenceIds(
+                                fieldDeclaration,
+                                fieldSymbol,
+                                relativePath,
+                                sourceLines,
+                                fallbackEvidenceId,
+                                sink,
+                                "injection_annotation",
+                                this::isInjectionAnnotation
+                        )
+                );
+
+        evidenceIds.add(
+                registerObservationEvidence(
+                        relativePath,
+                        sourceLines,
+                        fieldInjectionEvidenceNode(variable),
+                        fieldSymbol,
+                        fallbackEvidenceId,
+                        EvidenceGranularity.MEMBER,
+                        "injection_field",
+                        sink
+                )
+        );
+
+        sink.addObservation(
+                ObservationFact.builder()
+                        .kind(ObservationKind.DI_INJECTION_SITE)
+                        .siteSymbol(fieldSymbol)
+                        .targetTypeRef(fieldTypeRef)
+                        .evidenceIds(List.copyOf(evidenceIds))
+                        .origin(FactOriginKind.OBSERVED)
+                        .confidenceHint(
+                                ConfidenceHints.observation(
+                                        List.of(EvidenceType.AST)
+                                )
+                        )
+                        .note("field injection")
+                        .attrs(Map.of(
+                                "annotations", annotationNames,
+                                "injection_member", variable.getNameAsString()
+                        ))
+                        .build()
+        );
+    }
+
+    /**
+     * VariableDeclarator의 기본 Range가 타입 시작 위치를 제외하는 경우가 있어
+     * 필드 주입 Evidence 범위를 타입부터 변수 선언 끝까지 확장한다.
+     */
+    private Node fieldInjectionEvidenceNode(
+            VariableDeclarator variable
+    ) {
+        if (variable == null) {
+            return null;
+        }
+
+        Optional<Range> typeRange =
+                variable.getType().getRange();
+        Optional<Range> variableRange =
+                variable.getRange();
+
+        if (typeRange.isEmpty()
+                || variableRange.isEmpty()) {
+            return variable;
+        }
+
+        VariableDeclarator evidenceNode =
+                variable.clone();
+
+        evidenceNode.setRange(
+                new Range(
+                        typeRange.get().begin,
+                        variableRange.get().end
+                )
+        );
+
+        return evidenceNode;
     }
 
     private void addConstructorObservationsIfNeeded(
             ExtractionContext context,
             ConstructorDeclaration declaration,
             String constructorSymbol,
-            String evidenceId,
+            String relativePath,
+            List<String> sourceLines,
+            String fallbackEvidenceId,
             ExtractionSink sink
     ) {
         if (!context.includeObservations()) {
             return;
         }
 
-        boolean hasInjection = nodeAnnotationNames(declaration, sink).stream().anyMatch(this::isInjectionAnnotation);
-        if (!hasInjection) {
+        Set<String> annotationNames =
+                nodeAnnotationNames(declaration, sink);
+
+        if (annotationNames.stream()
+                .noneMatch(this::isInjectionAnnotation)) {
             return;
         }
 
+        List<String> annotationEvidenceIds =
+                registerAnnotationEvidenceIds(
+                        declaration,
+                        constructorSymbol,
+                        relativePath,
+                        sourceLines,
+                        fallbackEvidenceId,
+                        sink,
+                        "injection_annotation",
+                        this::isInjectionAnnotation
+                );
+
         for (Parameter parameter : declaration.getParameters()) {
-            sink.addObservation(ObservationFact.builder()
-                    .kind(ObservationKind.DI_INJECTION_SITE)
-                    .siteSymbol(constructorSymbol)
-                    .targetTypeRef(toTypeRef(parameter.getType(), sink))
-                    .evidenceIds(List.of(evidenceId))
-                    .origin(FactOriginKind.OBSERVED)
-                    .confidenceHint(ConfidenceHints.observation(List.of(EvidenceType.AST)))
-                    .note("constructor injection parameter")
-                    .attrs(Map.of("parameter", parameter.getNameAsString()))
-                    .build());
+            LinkedHashSet<String> evidenceIds =
+                    new LinkedHashSet<>(annotationEvidenceIds);
+
+            evidenceIds.add(
+                    registerObservationEvidence(
+                            relativePath,
+                            sourceLines,
+                            parameter,
+                            constructorSymbol,
+                            fallbackEvidenceId,
+                            EvidenceGranularity.PARAMETER,
+                            "constructor_parameter",
+                            sink
+                    )
+            );
+
+            sink.addObservation(
+                    ObservationFact.builder()
+                            .kind(ObservationKind.DI_INJECTION_SITE)
+                            .siteSymbol(constructorSymbol)
+                            .targetTypeRef(
+                                    toTypeRef(parameter.getType(), sink)
+                            )
+                            .evidenceIds(List.copyOf(evidenceIds))
+                            .origin(FactOriginKind.OBSERVED)
+                            .confidenceHint(
+                                    ConfidenceHints.observation(
+                                            List.of(EvidenceType.AST)
+                                    )
+                            )
+                            .note("constructor injection parameter")
+                            .attrs(Map.of(
+                                    "parameter", parameter.getNameAsString(),
+                                    "annotations", annotationNames
+                            ))
+                            .build()
+            );
         }
     }
 
@@ -1734,9 +1960,9 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
 
                 List<String> combinedPaths = pathResolved
                         ? combineHttpPaths(
-                        classMapping.paths(),
-                        methodMapping.paths()
-                )
+                                classMapping.paths(),
+                                methodMapping.paths()
+                        )
                         : List.of();
 
                 List<String> consumes = effectiveMappingCondition(
@@ -1751,23 +1977,27 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
 
                 List<String> evidenceIds = new ArrayList<>();
 
-                String methodEvidenceId = registerExpressionEvidence(
+                String methodEvidenceId = registerObservationEvidence(
                         relativePath,
                         sourceLines,
                         methodMapping.annotation(),
                         methodSymbol,
                         fallbackEvidenceId,
+                        EvidenceGranularity.ANNOTATION,
+                        "endpoint_mapping",
                         sink
                 );
                 evidenceIds.add(methodEvidenceId);
 
                 if (classMapping.annotation() != null) {
-                    String classEvidenceId = registerExpressionEvidence(
+                    String classEvidenceId = registerObservationEvidence(
                             relativePath,
                             sourceLines,
                             classMapping.annotation(),
                             ownerTypeSymbol,
                             fallbackEvidenceId,
+                            EvidenceGranularity.ANNOTATION,
+                            "endpoint_mapping",
                             sink
                     );
 
@@ -2376,6 +2606,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                             sourceLines,
                             evidenceId,
                             sink,
+                            "bean_provider",
                             annotationName ->
                                     isBeanAnnotation(
                                             annotationName
@@ -2413,6 +2644,35 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                 .anyMatch(
                         this::isEventSubscriberAnnotation
                 )) {
+            LinkedHashSet<String> subscriptionEvidenceIds =
+                    new LinkedHashSet<>(
+                            registerAnnotationEvidenceIds(
+                                    declaration,
+                                    methodSymbol,
+                                    relativePath,
+                                    sourceLines,
+                                    evidenceId,
+                                    sink,
+                                    "event_subscription",
+                                    this::isEventSubscriberAnnotation
+                            )
+                    );
+
+            if (!declaration.getParameters().isEmpty()) {
+                subscriptionEvidenceIds.add(
+                        registerObservationEvidence(
+                                relativePath,
+                                sourceLines,
+                                declaration.getParameter(0),
+                                methodSymbol,
+                                evidenceId,
+                                EvidenceGranularity.PARAMETER,
+                                "event_payload_parameter",
+                                sink
+                        )
+                );
+            }
+
             sink.addObservation(
                     ObservationFact.builder()
                             .kind(
@@ -2426,7 +2686,9 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                                     )
                             )
                             .evidenceIds(
-                                    List.of(evidenceId)
+                                    List.copyOf(
+                                            subscriptionEvidenceIds
+                                    )
                             )
                             .origin(
                                     FactOriginKind.OBSERVED
@@ -2470,7 +2732,16 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                                         )
                                         .evidenceIds(
                                                 List.of(
-                                                        evidenceId
+                                                        registerObservationEvidence(
+                                                                relativePath,
+                                                                sourceLines,
+                                                                call,
+                                                                methodSymbol,
+                                                                evidenceId,
+                                                                EvidenceGranularity.EXPRESSION,
+                                                                "event_publication",
+                                                                sink
+                                                        )
                                                 )
                                         )
                                         .origin(
@@ -2501,7 +2772,20 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                                 ObservationFact.builder()
                                         .kind(ObservationKind.REFLECTION_SITE)
                                         .siteSymbol(methodSymbol)
-                                        .evidenceIds(List.of(evidenceId))
+                                        .evidenceIds(
+                                                List.of(
+                                                        registerObservationEvidence(
+                                                                relativePath,
+                                                                sourceLines,
+                                                                call,
+                                                                methodSymbol,
+                                                                evidenceId,
+                                                                EvidenceGranularity.EXPRESSION,
+                                                                "reflection_call",
+                                                                sink
+                                                        )
+                                                )
+                                        )
                                         .origin(FactOriginKind.AST)
                                         .confidenceHint(
                                                 ConfidenceHints.observation(
@@ -2532,7 +2816,16 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                                         )
                                         .evidenceIds(
                                                 List.of(
-                                                        evidenceId
+                                                        registerObservationEvidence(
+                                                                relativePath,
+                                                                sourceLines,
+                                                                call,
+                                                                methodSymbol,
+                                                                evidenceId,
+                                                                EvidenceGranularity.EXPRESSION,
+                                                                "service_loader",
+                                                                sink
+                                                        )
                                                 )
                                         )
                                         .origin(
@@ -2779,12 +3072,14 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             if (rawAnnotationName == null || rawAnnotationName.isBlank()) { continue;}
 
             String relationEvidenceId =
-                    registerExpressionEvidence(
+                    registerStructuralEvidence(
                             relativePath,
                             sourceLines,
                             annotation,
                             sourceSymbol,
                             fallbackEvidenceId,
+                            EvidenceGranularity.ANNOTATION,
+                            "annotation",
                             sink
                     );
 
@@ -3071,7 +3366,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             return new ThrowAnalysis(null, false);
         }
         int bodyLines = method.getEnd().map(e -> e.line).orElse(0)
-                - method.getBegin().map(b -> b.line).orElse(0);
+                      - method.getBegin().map(b -> b.line).orElse(0);
         if (bodyLines > maxBodyLines) {
             return new ThrowAnalysis(List.of(), false);
         }
@@ -3099,7 +3394,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             return null;
         }
         int bodyLines = method.getEnd().map(e -> e.line).orElse(0)
-                - method.getBegin().map(b -> b.line).orElse(0);
+                      - method.getBegin().map(b -> b.line).orElse(0);
         if (bodyLines > maxBodyLines) {
             return List.of();
         }
@@ -3217,6 +3512,62 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             }
         }
         return set;
+    }
+
+    private String registerStructuralEvidence(
+            String relativePath,
+            List<String> sourceLines,
+            Node node,
+            String ownerSymbol,
+            String fallbackEvidenceId,
+            EvidenceGranularity granularity,
+            String role,
+            ExtractionSink sink
+    ) {
+        if (node == null || node.getRange().isEmpty()) {
+            return fallbackEvidenceId;
+        }
+
+        EvidenceFact evidence = AstEvidenceFactory.create(
+                relativePath,
+                sourceLines,
+                node,
+                ownerSymbol,
+                EvidenceType.AST,
+                granularity,
+                role
+        );
+
+        sink.addEvidence(evidence);
+        return evidence.id();
+    }
+
+    private String registerObservationEvidence(
+            String relativePath,
+            List<String> sourceLines,
+            Node node,
+            String ownerSymbol,
+            String fallbackEvidenceId,
+            EvidenceGranularity granularity,
+            String role,
+            ExtractionSink sink
+    ) {
+        if (node == null || node.getRange().isEmpty()) {
+            return fallbackEvidenceId;
+        }
+
+        EvidenceFact evidence = AstEvidenceFactory.create(
+                relativePath,
+                sourceLines,
+                node,
+                ownerSymbol,
+                EvidenceType.AST,
+                granularity,
+                role
+        );
+
+        sink.addEvidence(evidence);
+        return evidence.id();
     }
 
     private String registerExpressionEvidence(
