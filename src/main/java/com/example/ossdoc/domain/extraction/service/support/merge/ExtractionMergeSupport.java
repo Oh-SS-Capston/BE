@@ -978,6 +978,10 @@ public class ExtractionMergeSupport {
                 .declaresBean(filterRelations(all, RelationKind.DECLARES_BEAN))
                 .configuresBean(filterRelations(all, RelationKind.CONFIGURES_BEAN))
                 .injects(filterRelations(all, RelationKind.INJECTS))
+                .publishesEvent(filterRelations(all, RelationKind.PUBLISHES_EVENT))
+                .listensEvent(filterRelations(all, RelationKind.LISTENS_EVENT))
+                .providesSpi(filterRelations(all, RelationKind.PROVIDES_SPI))
+                .loadsService(filterRelations(all, RelationKind.LOADS_SERVICE))
                 .build();
     }
 
@@ -1127,6 +1131,10 @@ public class ExtractionMergeSupport {
         addToRelationMap(map, table.declaresBean());
         addToRelationMap(map, table.configuresBean());
         addToRelationMap(map, table.injects());
+        addToRelationMap(map, table.publishesEvent());
+        addToRelationMap(map, table.listensEvent());
+        addToRelationMap(map, table.providesSpi());
+        addToRelationMap(map, table.loadsService());
 
         return map;
     }

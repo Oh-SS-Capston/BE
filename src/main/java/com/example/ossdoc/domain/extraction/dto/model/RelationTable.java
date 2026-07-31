@@ -7,7 +7,7 @@ import lombok.Builder;
 import java.util.List;
 
 /**
- * 관계 후보를 종류별 bucket으로 나눈 테이블
+ * 관계 후보를 종류별 bucket으로 나눈 테이블.
  */
 @Builder
 @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -37,6 +37,18 @@ public record RelationTable(
         List<RelationFact> configuresBean,
 
         @JsonProperty("injects")
-        List<RelationFact> injects
+        List<RelationFact> injects,
+
+        @JsonProperty("publishes_event")
+        List<RelationFact> publishesEvent,
+
+        @JsonProperty("listens_event")
+        List<RelationFact> listensEvent,
+
+        @JsonProperty("provides_spi")
+        List<RelationFact> providesSpi,
+
+        @JsonProperty("loads_service")
+        List<RelationFact> loadsService
 ) {
 }

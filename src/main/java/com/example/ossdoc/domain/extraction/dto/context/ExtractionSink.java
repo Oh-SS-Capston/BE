@@ -47,6 +47,10 @@ public class ExtractionSink {
     private final Map<String, RelationFact> declaresBean = new LinkedHashMap<>();
     private final Map<String, RelationFact> configuresBean = new LinkedHashMap<>();
     private final Map<String, RelationFact> injects = new LinkedHashMap<>();
+    private final Map<String, RelationFact> publishesEvent = new LinkedHashMap<>();
+    private final Map<String, RelationFact> listensEvent = new LinkedHashMap<>();
+    private final Map<String, RelationFact> providesSpi = new LinkedHashMap<>();
+    private final Map<String, RelationFact> loadsService = new LinkedHashMap<>();
 
     private final Map<String, ObservationFact> diInjectionSites = new LinkedHashMap<>();
     private final Map<String, ObservationFact> diProviders = new LinkedHashMap<>();
@@ -187,6 +191,10 @@ public class ExtractionSink {
                 || !declaresBean.isEmpty()
                 || !configuresBean.isEmpty()
                 || !injects.isEmpty()
+                || !publishesEvent.isEmpty()
+                || !listensEvent.isEmpty()
+                || !providesSpi.isEmpty()
+                || !loadsService.isEmpty()
                 || !diInjectionSites.isEmpty()
                 || !diProviders.isEmpty()
                 || !spiProviders.isEmpty()
@@ -243,6 +251,10 @@ public class ExtractionSink {
                         .declaresBean(List.copyOf(declaresBean.values()))
                         .configuresBean(List.copyOf(configuresBean.values()))
                         .injects(List.copyOf(injects.values()))
+                        .publishesEvent(List.copyOf(publishesEvent.values()))
+                        .listensEvent(List.copyOf(listensEvent.values()))
+                        .providesSpi(List.copyOf(providesSpi.values()))
+                        .loadsService(List.copyOf(loadsService.values()))
                         .build(),
                 ObservationTable.builder()
                         .diInjectionSites(List.copyOf(diInjectionSites.values()))
@@ -286,6 +298,10 @@ public class ExtractionSink {
         items.addAll(declaresBean.values());
         items.addAll(configuresBean.values());
         items.addAll(injects.values());
+        items.addAll(publishesEvent.values());
+        items.addAll(listensEvent.values());
+        items.addAll(providesSpi.values());
+        items.addAll(loadsService.values());
         return List.copyOf(items);
     }
 
@@ -328,6 +344,10 @@ public class ExtractionSink {
             case DECLARES_BEAN -> declaresBean;
             case CONFIGURES_BEAN -> configuresBean;
             case INJECTS -> injects;
+            case PUBLISHES_EVENT -> publishesEvent;
+            case LISTENS_EVENT -> listensEvent;
+            case PROVIDES_SPI -> providesSpi;
+            case LOADS_SERVICE -> loadsService;
         };
     }
 

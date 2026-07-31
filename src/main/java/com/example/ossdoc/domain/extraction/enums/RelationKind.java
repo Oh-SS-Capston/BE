@@ -14,7 +14,11 @@ public enum RelationKind {
     HANDLES_ENDPOINT("handles_endpoint"),
     DECLARES_BEAN("declares_bean"),
     CONFIGURES_BEAN("configures_bean"),
-    INJECTS("injects");
+    INJECTS("injects"),
+    PUBLISHES_EVENT("publishes_event"),
+    LISTENS_EVENT("listens_event"),
+    PROVIDES_SPI("provides_spi"),
+    LOADS_SERVICE("loads_service");
 
     private final String code;
 

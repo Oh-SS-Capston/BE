@@ -36,7 +36,11 @@ final class FactsStatsCalculator {
                 + size(relations == null ? null : relations.handlesEndpoint())
                 + size(relations == null ? null : relations.declaresBean())
                 + size(relations == null ? null : relations.configuresBean())
-                + size(relations == null ? null : relations.injects());
+                + size(relations == null ? null : relations.injects())
+                + size(relations == null ? null : relations.publishesEvent())
+                + size(relations == null ? null : relations.listensEvent())
+                + size(relations == null ? null : relations.providesSpi())
+                + size(relations == null ? null : relations.loadsService());
 
         long observationCount = size(observations == null ? null : observations.diInjectionSites())
                 + size(observations == null ? null : observations.diProviders())

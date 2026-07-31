@@ -162,6 +162,10 @@ final class FactsSectionFactory {
         List<RelationFact> declaresBean = new ArrayList<>();
         List<RelationFact> configuresBean = new ArrayList<>();
         List<RelationFact> injects = new ArrayList<>();
+        List<RelationFact> publishesEvent = new ArrayList<>();
+        List<RelationFact> listensEvent = new ArrayList<>();
+        List<RelationFact> providesSpi = new ArrayList<>();
+        List<RelationFact> loadsService = new ArrayList<>();
 
         for (RelationFact relation : merged.values()) {
             if (relation == null || relation.kind() == null) {
@@ -178,6 +182,10 @@ final class FactsSectionFactory {
                 case DECLARES_BEAN -> declaresBean.add(relation);
                 case CONFIGURES_BEAN -> configuresBean.add(relation);
                 case INJECTS -> injects.add(relation);
+                case PUBLISHES_EVENT -> publishesEvent.add(relation);
+                case LISTENS_EVENT -> listensEvent.add(relation);
+                case PROVIDES_SPI -> providesSpi.add(relation);
+                case LOADS_SERVICE -> loadsService.add(relation);
             }
         }
 
@@ -190,6 +198,10 @@ final class FactsSectionFactory {
         declaresBean.sort(RELATION_ORDER);
         configuresBean.sort(RELATION_ORDER);
         injects.sort(RELATION_ORDER);
+        publishesEvent.sort(RELATION_ORDER);
+        listensEvent.sort(RELATION_ORDER);
+        providesSpi.sort(RELATION_ORDER);
+        loadsService.sort(RELATION_ORDER);
 
         return RelationTable.builder()
                 .calls(List.copyOf(calls))
@@ -201,6 +213,10 @@ final class FactsSectionFactory {
                 .declaresBean(List.copyOf(declaresBean))
                 .configuresBean(List.copyOf(configuresBean))
                 .injects(List.copyOf(injects))
+                .publishesEvent(List.copyOf(publishesEvent))
+                .listensEvent(List.copyOf(listensEvent))
+                .providesSpi(List.copyOf(providesSpi))
+                .loadsService(List.copyOf(loadsService))
                 .build();
     }
 
@@ -358,6 +374,10 @@ final class FactsSectionFactory {
         addAll(all, table.declaresBean());
         addAll(all, table.configuresBean());
         addAll(all, table.injects());
+        addAll(all, table.publishesEvent());
+        addAll(all, table.listensEvent());
+        addAll(all, table.providesSpi());
+        addAll(all, table.loadsService());
         return all;
     }
 
