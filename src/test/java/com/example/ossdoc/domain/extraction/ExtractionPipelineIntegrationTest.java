@@ -608,6 +608,218 @@ class ExtractionPipelineIntegrationTest {
     }
 
     @Test
+    @DisplayName("AST_PLUS_BYTECODE 모드 — 어노테이션 관계 병합과 양쪽 Evidence 보존")
+    void extractFacts_withBytecode_mergesAnnotatedWithOriginsAndEvidence() {
+        FactsExtractRequest request =
+                FactsExtractRequest.builder()
+                        .runId(TEST_RUN_ID)
+                        .mode(
+                                ExtractionMode.AST_PLUS_BYTECODE
+                        )
+                        .includeObservations(false)
+                        .includeTests(false)
+                        .failFast(false)
+                        .build();
+
+        FactsExtractResponse response =
+                factsExtractionFacade.extract(request);
+
+        assertNotNull(response);
+
+        assertEquals(
+                "ast_and_bytecode",
+                response.mode()
+        );
+
+        JsonNode factsJson =
+                captureFactsJson();
+
+        JsonNode annotatedWith =
+                factsJson.path("relations")
+                        .path("annotated_with");
+
+        assertTrue(
+                annotatedWith.isArray(),
+                "relations.annotated_with는 배열이어야 함"
+        );
+
+        Set<String> expectedAnnotations =
+                Set.of(
+                        "TypeMarker",
+                        "FieldMarker",
+                        "ConstructorMarker",
+                        "MethodMarker"
+                );
+
+        JsonNode evidenceSection =
+                factsJson.path("evidence");
+
+        for (String annotationName
+                : expectedAnnotations) {
+
+            JsonNode mergedRelation = null;
+            int matchingRelationCount = 0;
+
+            for (JsonNode relation : annotatedWith) {
+                String destination =
+                        firstNonBlankText(
+                                relation,
+                                "dst_symbol",
+                                "dstSymbol",
+                                "dst_raw_ref",
+                                "dstRawRef"
+                        );
+
+                if (destination != null
+                        && destination.endsWith(
+                        annotationName
+                )) {
+                    mergedRelation = relation;
+                    matchingRelationCount++;
+                }
+            }
+
+            assertEquals(
+                    1,
+                    matchingRelationCount,
+                    annotationName
+                            + " 관계는 AST와 BYTECODE가 병합된 한 건만 존재해야 함"
+            );
+
+            assertNotNull(
+                    mergedRelation,
+                    annotationName
+                            + " 병합 관계가 존재해야 함"
+            );
+
+            assertEquals(
+                    "ast_and_bytecode",
+                    mergedRelation.path("origin")
+                            .asText(),
+                    annotationName
+                            + " 관계 origin이 AST_AND_BYTECODE여야 함"
+            );
+
+            assertEquals(
+                    "resolved",
+                    mergedRelation.path("resolution")
+                            .path("status")
+                            .asText(),
+                    annotationName
+                            + " 관계가 RESOLVED 상태여야 함"
+            );
+
+            JsonNode attrs =
+                    mergedRelation.path("attrs");
+
+            assertEquals(
+                    "@"
+                            + annotationName,
+                    attrs.path("expression")
+                            .asText(),
+                    annotationName
+                            + " AST 표현식 속성이 보존되어야 함"
+            );
+
+            assertEquals(
+                    "Lsample/"
+                            + annotationName
+                            + ";",
+                    attrs.path("descriptor")
+                            .asText(),
+                    annotationName
+                            + " ASM descriptor가 보존되어야 함"
+            );
+
+            assertTrue(
+                    attrs.path("runtime_visible")
+                            .isBoolean(),
+                    annotationName
+                            + " runtime_visible 속성이 존재해야 함"
+            );
+
+            assertFalse(
+                    attrs.path("runtime_visible")
+                            .asBoolean(),
+                    annotationName
+                            + " 기본 CLASS retention은 runtime visible이 아니어야 함"
+            );
+
+            JsonNode evidenceIds =
+                    mergedRelation.path(
+                            "evidence_ids"
+                    );
+
+            assertTrue(
+                    evidenceIds.isArray(),
+                    annotationName
+                            + " 관계의 evidence_ids는 배열이어야 함"
+            );
+
+            assertTrue(
+                    evidenceIds.size() >= 2,
+                    annotationName
+                            + " 관계에 AST와 BYTECODE Evidence가 모두 연결되어야 함"
+            );
+
+            Set<String> evidenceTypes =
+                    new HashSet<>();
+
+            for (JsonNode evidenceIdNode
+                    : evidenceIds) {
+
+                if (!evidenceIdNode.isTextual()
+                        || evidenceIdNode.asText()
+                        .isBlank()) {
+                    continue;
+                }
+
+                JsonNode evidence =
+                        findEvidence(
+                                evidenceSection,
+                                evidenceIdNode.asText()
+                        );
+
+                assertNotNull(
+                        evidence,
+                        annotationName
+                                + " 관계가 참조하는 Evidence가 존재해야 함"
+                );
+
+                String evidenceType =
+                        firstNonBlankText(
+                                evidence,
+                                "type"
+                        );
+
+                if (evidenceType != null) {
+                    evidenceTypes.add(
+                            evidenceType
+                    );
+                }
+            }
+
+            assertTrue(
+                    evidenceTypes.contains("ast"),
+                    annotationName
+                            + " 관계에 AST Evidence가 있어야 함"
+            );
+
+            assertTrue(
+                    evidenceTypes.contains("bytecode"),
+                    annotationName
+                            + " 관계에 BYTECODE Evidence가 있어야 함"
+            );
+        }
+
+        assertEquals(
+                expectedAnnotations.size(),
+                annotatedWith.size(),
+                "네 ANNOTATED_WITH 관계가 중복 없이 병합되어야 함"
+        );
+    }
+
+    @Test
     @DisplayName("AST_PLUS_BYTECODE 모드 — 소스와 바이트코드 추출")
     void extractFacts_withBytecode_succeeds() {
         FactsExtractRequest request =

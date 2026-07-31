@@ -157,6 +157,7 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
 
         @Override
         public AnnotationVisitor visitAnnotation(String descriptor, boolean visible) {
+            addAnnotationRelation(typeSymbol, descriptor, visible, typeEvidenceId, sink);
             if (context.includeObservations() && isProviderTypeAnnotation(descriptor)) {
                 sink.addObservation(ObservationFact.builder()
                         .kind(ObservationKind.DI_PROVIDER)
@@ -196,6 +197,7 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
             return new FieldVisitor(ASM_API) {
                 @Override
                 public AnnotationVisitor visitAnnotation(String annotationDescriptor, boolean visible) {
+                    addAnnotationRelation(fieldSymbol, annotationDescriptor, visible, evidence.id(), sink);
                     if (context.includeObservations() && isInjectionAnnotation(annotationDescriptor)) {
                         sink.addObservation(ObservationFact.builder()
                                 .kind(ObservationKind.DI_INJECTION_SITE)
@@ -241,6 +243,7 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
             return new MethodVisitor(ASM_API) {
                 @Override
                 public AnnotationVisitor visitAnnotation(String annotationDescriptor, boolean visible) {
+                    addAnnotationRelation(symbol, annotationDescriptor, visible, evidence.id(), sink);
                     if (context.includeObservations()) {
                         if (isBeanAnnotation(annotationDescriptor)) {
                             sink.addObservation(ObservationFact.builder()
@@ -370,6 +373,45 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
                 .returns(typeRefFromAsmType(methodType.getReturnType()))
                 .throwsTypes(throwsTypes)
                 .build();
+    }
+
+    private void addAnnotationRelation(
+            String sourceSymbol,
+            String annotationDescriptor,
+            boolean runtimeVisible,
+            String evidenceId,
+            ExtractionSink sink
+    ) {
+        if (sourceSymbol == null || sourceSymbol.isBlank() || annotationDescriptor == null || annotationDescriptor.isBlank() || evidenceId == null || evidenceId.isBlank()) {return;}
+
+        final String annotationQualifiedName;
+
+        try {
+            TypeRef annotationTypeRef =
+                    descriptorToTypeRef(annotationDescriptor);
+
+            annotationQualifiedName =
+                    annotationTypeRef == null ? null : annotationTypeRef.raw();
+
+        } catch (Exception e) {
+            sink.addWarning("failed to resolve bytecode annotation descriptor: " + annotationDescriptor + " (" + e.getClass().getSimpleName() + ")");
+            return;
+        }
+
+        if (annotationQualifiedName == null || annotationQualifiedName.isBlank()) {return;}
+
+        sink.addRelation(
+                RelationFact.builder()
+                        .kind(RelationKind.ANNOTATED_WITH)
+                        .srcSymbol(sourceSymbol)
+                        .dstSymbol(SymbolIdFactory.type(annotationQualifiedName))
+                        .evidenceIds(List.of(evidenceId))
+                        .resolution(RelationResolutionFactory.resolved())
+                        .origin(FactOriginKind.BYTECODE)
+                        .confidenceHint(ConfidenceHints.relation(ResolutionStatus.RESOLVED, FactOriginKind.BYTECODE))
+                        .attrs(Map.of("descriptor", annotationDescriptor, "runtime_visible", runtimeVisible))
+                        .build()
+        );
     }
 
     private TypeRef descriptorToTypeRef(String descriptor) {
