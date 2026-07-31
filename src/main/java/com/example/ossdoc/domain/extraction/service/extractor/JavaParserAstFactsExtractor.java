@@ -326,6 +326,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         EvidenceFact evidence = buildAstEvidence(relativePath, sourceLines, typeDeclaration, typeSymbol, EvidenceType.AST);
         sink.addEvidence(evidence);
 
+        List<TypeRef> annotationRefs = annotationTypeRefs(typeDeclaration.getAnnotations(), sink);
         TypeKind typeKind = typeKind(typeDeclaration);
         String javadocText = extractDocCommentFromSource(sourceLines, typeDeclaration);
         boolean isSealed = typeDeclaration instanceof ClassOrInterfaceDeclaration coid &&
@@ -344,7 +345,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                 .access(accessLevel(typeDeclaration))
                 .modifiers(modifierKinds(typeDeclaration.getModifiers()))
                 .origin(SymbolOriginKind.AST)
-                .annotations(annotationTypeRefs(typeDeclaration.getAnnotations(), sink))
+                .annotations(annotationRefs)
                 .evidenceIds(List.of(evidence.id()))
                 .attrs(typeAttributes(typeDeclaration))
                 .superTypeRef(superTypeRef(typeDeclaration, sink))
@@ -359,7 +360,23 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                 .build();
         sink.addSymbol(typeFact);
 
-        addTypeObservationsIfNeeded(context, typeDeclaration, typeSymbol, evidence.id(), sink);
+        addAnnotationRelations(
+                typeSymbol,
+                typeDeclaration.getAnnotations(),
+                annotationRefs,
+                relativePath,
+                sourceLines,
+                evidence.id(),
+                sink
+        );
+
+        addTypeObservationsIfNeeded(
+                context,
+                typeDeclaration,
+                typeSymbol,
+                evidence.id(),
+                sink
+        );
 
         for (BodyDeclaration<?> member : typeDeclaration.getMembers()) {
             if (member instanceof FieldDeclaration fieldDeclaration) {
@@ -394,6 +411,12 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             List<String> sourceLines,
             ExtractionSink sink
     ) {
+        List<TypeRef> annotationRefs =
+                annotationTypeRefs(
+                        fieldDeclaration.getAnnotations(),
+                        sink
+                );
+
         for (com.github.javaparser.ast.body.VariableDeclarator variable : fieldDeclaration.getVariables()) {
             String fieldSymbol = SymbolIdFactory.field(ownerTypeSymbol.substring("type:".length()), variable.getNameAsString());
             EvidenceFact evidence = buildAstEvidence(relativePath, sourceLines, variable, fieldSymbol, EvidenceType.AST);
@@ -414,7 +437,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                     .access(accessLevel(fieldDeclaration))
                     .modifiers(modifierKinds(fieldDeclaration.getModifiers()))
                     .origin(SymbolOriginKind.AST)
-                    .annotations(annotationTypeRefs(fieldDeclaration.getAnnotations(), sink))
+                    .annotations(annotationRefs)
                     .evidenceIds(List.of(evidence.id()))
                     .signature(signature)
                     .sourceFile(relativePath)
@@ -422,6 +445,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                     .build();
             sink.addSymbol(fieldFact);
 
+            addAnnotationRelations(fieldSymbol, fieldDeclaration.getAnnotations(), annotationRefs, relativePath, sourceLines, evidence.id(), sink);
             addFieldObservationsIfNeeded(context, fieldDeclaration, fieldSymbol, fieldTypeRef, evidence.id(), sink);
         }
     }
@@ -439,6 +463,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         String ownerQualifiedName = ownerTypeSymbol.substring("type:".length());
         String constructorSymbol = SymbolIdFactory.constructor(ownerQualifiedName, signature);
         EvidenceFact evidence = buildAstEvidence(relativePath, sourceLines, declaration, constructorSymbol, EvidenceType.AST);
+        List<TypeRef> annotationRefs = annotationTypeRefs(declaration.getAnnotations(), sink);
         sink.addEvidence(evidence);
 
         SymbolFact fact = SymbolFact.builder()
@@ -451,7 +476,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                 .access(accessLevel(declaration))
                 .modifiers(modifierKinds(declaration.getModifiers()))
                 .origin(SymbolOriginKind.AST)
-                .annotations(annotationTypeRefs(declaration.getAnnotations(), sink))
+                .annotations(annotationRefs)
                 .evidenceIds(List.of(evidence.id()))
                 .signature(signature)
                 .sourceFile(relativePath)
@@ -459,6 +484,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                 .build();
         sink.addSymbol(fact);
 
+        addAnnotationRelations(constructorSymbol, declaration.getAnnotations(), annotationRefs, relativePath, sourceLines, evidence.id(), sink);
         addCallableBodyRelations(declaration, constructorSymbol, relativePath, sourceLines, evidence.id(), sink);
         addConstructorObservationsIfNeeded(context, declaration, constructorSymbol, evidence.id(), sink);
     }
@@ -476,6 +502,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         String ownerQualifiedName = ownerTypeSymbol.substring("type:".length());
         String methodSymbol = SymbolIdFactory.method(ownerQualifiedName, declaration.getNameAsString(), signature);
         EvidenceFact evidence = buildAstEvidence(relativePath, sourceLines, declaration, methodSymbol, EvidenceType.AST);
+        List<TypeRef> annotationRefs = annotationTypeRefs(declaration.getAnnotations(), sink);
         sink.addEvidence(evidence);
 
         ThrowAnalysis throwAnalysis = analyzeThrows(declaration, sink);
@@ -491,7 +518,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                 .access(accessLevel(declaration))
                 .modifiers(modifierKinds(declaration.getModifiers()))
                 .origin(SymbolOriginKind.AST)
-                .annotations(annotationTypeRefs(declaration.getAnnotations(), sink))
+                .annotations(annotationRefs)
                 .evidenceIds(List.of(evidence.id()))
                 .signature(signature)
                 .sourceFile(relativePath)
@@ -502,6 +529,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                 .build();
         sink.addSymbol(fact);
 
+        addAnnotationRelations(methodSymbol, declaration.getAnnotations(), annotationRefs, relativePath, sourceLines, evidence.id(), sink);
         addCallableBodyRelations(declaration, methodSymbol, relativePath, sourceLines, evidence.id(), sink);
         addMethodObservationsIfNeeded(context, declaration, methodSymbol, evidence.id(), sink);
         addOverridesRelationIfPresent(declaration, methodSymbol, declaration.getNameAsString(), signature, evidence.id(), sink);
@@ -1210,6 +1238,80 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             return List.of();
         }
         return annotations.stream().map(annotation -> toAnnotationTypeRef(annotation, sink)).toList();
+    }
+
+    private void addAnnotationRelations(
+            String sourceSymbol,
+            List<AnnotationExpr> annotations,
+            List<TypeRef> annotationRefs,
+            String relativePath,
+            List<String> sourceLines,
+            String fallbackEvidenceId,
+            ExtractionSink sink
+    ) {
+        if (sourceSymbol == null || sourceSymbol.isBlank() || annotations == null || annotations.isEmpty()) {return;}
+        List<TypeRef> safeRefs = annotationRefs == null ? List.of() : annotationRefs;
+
+        for (int index = 0;
+             index < annotations.size();
+             index++) {
+
+            AnnotationExpr annotation = annotations.get(index);
+
+            if (annotation == null) {continue;}
+
+            TypeRef annotationRef = index < safeRefs.size() ? safeRefs.get(index) : null;
+            String rawAnnotationName = annotationRef != null && annotationRef.raw() != null && !annotationRef.raw().isBlank() ? annotationRef.raw() : annotation.getNameAsString();
+            if (rawAnnotationName == null || rawAnnotationName.isBlank()) { continue;}
+
+            String relationEvidenceId =
+                    registerExpressionEvidence(
+                            relativePath,
+                            sourceLines,
+                            annotation,
+                            sourceSymbol,
+                            fallbackEvidenceId,
+                            sink
+                    );
+
+            Map<String, Object> attrs = new LinkedHashMap<>();
+            attrs.put("expression", annotation.toString());
+            Map<String, String> attributes = annotationAttributes(annotation);
+
+            if (!attributes.isEmpty()) {attrs.put("attributes", attributes);}
+
+            boolean resolved = annotationRef != null && !Boolean.TRUE.equals(annotationRef.unresolved());
+
+            if (resolved) {
+                sink.addRelation(
+                        RelationFact.builder()
+                                .kind(RelationKind.ANNOTATED_WITH)
+                                .srcSymbol(sourceSymbol)
+                                .dstSymbol(SymbolIdFactory.type(rawAnnotationName))
+                                .evidenceIds(List.of(relationEvidenceId))
+                                .resolution(RelationResolutionFactory.resolved())
+                                .origin(FactOriginKind.AST)
+                                .confidenceHint(ConfidenceHints.relation(ResolutionStatus.RESOLVED, FactOriginKind.AST))
+                                .attrs(attrs)
+                                .build()
+                );
+
+                continue;
+            }
+
+            sink.addRelation(
+                    RelationFact.builder()
+                            .kind(RelationKind.ANNOTATED_WITH)
+                            .srcSymbol(sourceSymbol)
+                            .dstRawRef(rawAnnotationName)
+                            .evidenceIds(List.of(relationEvidenceId))
+                            .resolution(RelationResolutionFactory.unresolved("AnnotationTypeUnresolved"))
+                            .origin(FactOriginKind.AST)
+                            .confidenceHint(ConfidenceHints.relation(ResolutionStatus.UNRESOLVED, FactOriginKind.AST))
+                            .attrs(attrs)
+                            .build()
+            );
+        }
     }
 
     private Set<String> nodeAnnotationNames(NodeWithAnnotations<?> node, ExtractionSink sink) {

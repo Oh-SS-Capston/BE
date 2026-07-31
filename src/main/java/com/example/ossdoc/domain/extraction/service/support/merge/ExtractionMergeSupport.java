@@ -798,6 +798,7 @@ public class ExtractionMergeSupport {
                 .creates(filterRelations(all, RelationKind.CREATES))
                 .overrides(filterRelations(all, RelationKind.OVERRIDES))
                 .accessesField(filterRelations(all, RelationKind.ACCESSES_FIELD))
+                .annotatedWith(filterRelations(all, RelationKind.ANNOTATED_WITH))
                 .build();
     }
 
@@ -942,6 +943,7 @@ public class ExtractionMergeSupport {
         addToRelationMap(map, table.creates());
         addToRelationMap(map, table.overrides());
         addToRelationMap(map, table.accessesField());
+        addToRelationMap(map, table.annotatedWith());
 
         return map;
     }

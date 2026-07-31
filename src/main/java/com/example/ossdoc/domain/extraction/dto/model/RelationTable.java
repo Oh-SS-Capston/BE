@@ -22,6 +22,9 @@ public record RelationTable(
         List<RelationFact> overrides,
 
         @JsonProperty("accesses_field")
-        List<RelationFact> accessesField
+        List<RelationFact> accessesField,
+
+        @JsonProperty("annotated_with")
+        List<RelationFact> annotatedWith
 ) {
 }

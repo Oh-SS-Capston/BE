@@ -39,6 +39,7 @@ public class ExtractionSink {
     private final Map<String, RelationFact> creates = new LinkedHashMap<>();
     private final Map<String, RelationFact> overrides = new LinkedHashMap<>();
     private final Map<String, RelationFact> accessesField = new LinkedHashMap<>();
+    private final Map<String, RelationFact> annotatedWith = new LinkedHashMap<>();
 
     private final Map<String, ObservationFact> diInjectionSites = new LinkedHashMap<>();
     private final Map<String, ObservationFact> diProviders = new LinkedHashMap<>();
@@ -160,6 +161,7 @@ public class ExtractionSink {
                 || !creates.isEmpty()
                 || !overrides.isEmpty()
                 || !accessesField.isEmpty()
+                || !annotatedWith.isEmpty()
                 || !diInjectionSites.isEmpty()
                 || !diProviders.isEmpty()
                 || !spiProviders.isEmpty()
@@ -211,6 +213,7 @@ public class ExtractionSink {
                         .creates(List.copyOf(creates.values()))
                         .overrides(List.copyOf(overrides.values()))
                         .accessesField(List.copyOf(accessesField.values()))
+                        .annotatedWith(List.copyOf(annotatedWith.values()))
                         .build(),
                 ObservationTable.builder()
                         .diInjectionSites(List.copyOf(diInjectionSites.values()))
@@ -249,6 +252,7 @@ public class ExtractionSink {
         items.addAll(creates.values());
         items.addAll(overrides.values());
         items.addAll(accessesField.values());
+        items.addAll(annotatedWith.values());
         return List.copyOf(items);
     }
 
@@ -286,6 +290,7 @@ public class ExtractionSink {
             case CREATES -> creates;
             case OVERRIDES -> overrides;
             case ACCESSES_FIELD -> accessesField;
+            case ANNOTATED_WITH -> annotatedWith;
         };
     }
 

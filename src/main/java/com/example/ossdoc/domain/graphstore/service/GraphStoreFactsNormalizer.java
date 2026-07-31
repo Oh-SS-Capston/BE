@@ -213,6 +213,15 @@ public class GraphStoreFactsNormalizer {
         addRelations(result, table.getThrowsType());
         addRelations(result, table.getAnnotatedBy());
 
+        List<RawRelationFactDto> annotatedWith =
+                table.getAnnotatedWith();
+
+        addRelations(result, annotatedWith);
+
+        if (annotatedWith == null || annotatedWith.isEmpty()) {
+            addRelations(result, table.getAnnotatedBy());
+        }
+
         return result;
     }
 

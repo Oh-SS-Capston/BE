@@ -137,6 +137,7 @@ final class FactsSectionFactory {
         List<RelationFact> creates = new ArrayList<>();
         List<RelationFact> overrides = new ArrayList<>();
         List<RelationFact> accessesField = new ArrayList<>();
+        List<RelationFact> annotatedWith = new ArrayList<>();
 
         for (RelationFact relation : merged.values()) {
             if (relation == null || relation.kind() == null) {
@@ -148,6 +149,7 @@ final class FactsSectionFactory {
                 case CREATES -> creates.add(relation);
                 case OVERRIDES -> overrides.add(relation);
                 case ACCESSES_FIELD -> accessesField.add(relation);
+                case ANNOTATED_WITH -> annotatedWith.add(relation);
             }
         }
 
@@ -155,12 +157,14 @@ final class FactsSectionFactory {
         creates.sort(RELATION_ORDER);
         overrides.sort(RELATION_ORDER);
         accessesField.sort(RELATION_ORDER);
+        annotatedWith.sort(RELATION_ORDER);
 
         return RelationTable.builder()
                 .calls(List.copyOf(calls))
                 .creates(List.copyOf(creates))
                 .overrides(List.copyOf(overrides))
                 .accessesField(List.copyOf(accessesField))
+                .annotatedWith(List.copyOf(annotatedWith))
                 .build();
     }
 
@@ -313,6 +317,7 @@ final class FactsSectionFactory {
         addAll(all, table.creates());
         addAll(all, table.overrides());
         addAll(all, table.accessesField());
+        addAll(all, table.annotatedWith());
         return all;
     }
 

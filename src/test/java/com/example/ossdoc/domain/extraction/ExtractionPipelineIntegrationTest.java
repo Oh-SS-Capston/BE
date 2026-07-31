@@ -344,6 +344,9 @@ class ExtractionPipelineIntegrationTest {
         JsonNode accessesField =
                 relations.path("accesses_field");
 
+        JsonNode annotatedWith =
+                relations.path("annotated_with");
+
         assertTrue(
                 creates.isArray(),
                 "relations.creates는 배열이어야 함"
@@ -416,7 +419,8 @@ class ExtractionPipelineIntegrationTest {
                 arraySize(calls)
                         + arraySize(creates)
                         + arraySize(overrides)
-                        + arraySize(accessesField);
+                        + arraySize(accessesField)
+                        + arraySize(annotatedWith);
 
         assertEquals(
                 expectedRelationCount,
@@ -424,6 +428,182 @@ class ExtractionPipelineIntegrationTest {
                         .path("relations")
                         .asLong(),
                 "stats.relations에 CREATES 개수도 포함되어야 함"
+        );
+    }
+
+    @Test
+    @DisplayName("AST_ONLY 모드 — 어노테이션 관계와 표현식 Evidence 보존")
+    void extractFacts_astOnly_preservesAnnotatedWithAndExpressionEvidence() {
+        FactsExtractRequest request =
+                FactsExtractRequest.builder()
+                        .runId(TEST_RUN_ID)
+                        .mode(ExtractionMode.AST_ONLY)
+                        .includeObservations(false)
+                        .includeTests(false)
+                        .failFast(false)
+                        .build();
+
+        FactsExtractResponse response =
+                factsExtractionFacade.extract(request);
+
+        assertNotNull(response);
+
+        JsonNode factsJson =
+                captureFactsJson();
+
+        JsonNode relations =
+                factsJson.path("relations");
+
+        JsonNode annotatedWith =
+                relations.path("annotated_with");
+
+        assertTrue(
+                annotatedWith.isArray(),
+                "relations.annotated_with는 배열이어야 함"
+        );
+
+        assertTrue(
+                annotatedWith.size() >= 4,
+                "타입·필드·생성자·메서드 어노테이션 관계가 생성되어야 함"
+        );
+
+        Set<String> expectedAnnotations =
+                Set.of(
+                        "TypeMarker",
+                        "FieldMarker",
+                        "ConstructorMarker",
+                        "MethodMarker"
+                );
+
+        Set<String> actualAnnotations =
+                new HashSet<>();
+
+        for (JsonNode relation : annotatedWith) {
+            String destination =
+                    firstNonBlankText(
+                            relation,
+                            "dst_symbol",
+                            "dstSymbol",
+                            "dst_raw_ref",
+                            "dstRawRef"
+                    );
+
+            if (destination != null) {
+                for (String expectedAnnotation
+                        : expectedAnnotations) {
+
+                    if (destination.endsWith(
+                            expectedAnnotation
+                    )) {
+                        actualAnnotations.add(
+                                expectedAnnotation
+                        );
+                    }
+                }
+            }
+
+            JsonNode callSiteLine =
+                    relation.get("call_site_line");
+
+            if (callSiteLine == null) {
+                callSiteLine =
+                        relation.get("callSiteLine");
+            }
+
+            assertTrue(
+                    callSiteLine == null
+                            || callSiteLine.isNull(),
+                    "ANNOTATED_WITH에는 callSiteLine이 저장되면 안 됨"
+            );
+
+            JsonNode expression =
+                    relation.path("attrs")
+                            .path("expression");
+
+            assertTrue(
+                    expression.isTextual()
+                            && expression.asText()
+                            .startsWith("@"),
+                    "어노테이션 원문이 attrs.expression에 저장되어야 함"
+            );
+        }
+
+        assertEquals(
+                expectedAnnotations,
+                actualAnnotations,
+                "네 종류의 선언 어노테이션 관계가 모두 생성되어야 함"
+        );
+
+        Set<String> annotationEvidenceIds =
+                collectEvidenceIds(annotatedWith);
+
+        assertFalse(
+                annotationEvidenceIds.isEmpty(),
+                "ANNOTATED_WITH 관계에 Evidence가 연결되어야 함"
+        );
+
+        JsonNode evidenceSection =
+                factsJson.path("evidence");
+
+        Set<String> evidenceSnippets =
+                new HashSet<>();
+
+        for (String evidenceId
+                : annotationEvidenceIds) {
+
+            JsonNode evidence =
+                    findEvidence(
+                            evidenceSection,
+                            evidenceId
+                    );
+
+            if (evidence == null) {
+                continue;
+            }
+
+            String snippet =
+                    evidence.path("snippet")
+                            .asText("");
+
+            if (!snippet.isBlank()) {
+                evidenceSnippets.add(snippet);
+            }
+        }
+
+        for (String annotationName
+                : expectedAnnotations) {
+
+            assertTrue(
+                    evidenceSnippets.stream()
+                            .anyMatch(
+                                    snippet ->
+                                            snippet.contains(
+                                                    "@"
+                                                            + annotationName
+                                            )
+                            ),
+                    annotationName
+                            + " 표현식 범위의 Evidence가 존재해야 함"
+            );
+        }
+
+        long expectedRelationCount =
+                arraySize(relations.path("calls"))
+                        + arraySize(relations.path("creates"))
+                        + arraySize(relations.path("overrides"))
+                        + arraySize(
+                        relations.path(
+                                "accesses_field"
+                        )
+                )
+                        + arraySize(annotatedWith);
+
+        assertEquals(
+                expectedRelationCount,
+                factsJson.path("stats")
+                        .path("relations")
+                        .asLong(),
+                "stats.relations에 ANNOTATED_WITH 개수도 포함되어야 함"
         );
     }
 
@@ -567,27 +747,46 @@ class ExtractionPipelineIntegrationTest {
                 sourceFile,
                 """
                 package sample;
-
+        
+                @TypeMarker
                 public class CreatesSample {
-
+        
+                    @FieldMarker
                     private final Target field =
                             new Target();
-
+        
+                    @ConstructorMarker
+                    public CreatesSample() {
+                    }
+        
+                    @MethodMarker
                     public Target create() {
                         return new Target();
                     }
-
+        
                     public String callTarget() {
                         Target target = new Target();
                         return target.name();
                     }
                 }
-
+        
                 class Target {
-
+        
                     String name() {
                         return "target";
                     }
+                }
+        
+                @interface TypeMarker {
+                }
+        
+                @interface FieldMarker {
+                }
+        
+                @interface ConstructorMarker {
+                }
+        
+                @interface MethodMarker {
                 }
                 """,
                 StandardCharsets.UTF_8

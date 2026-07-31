@@ -29,7 +29,8 @@ final class FactsStatsCalculator {
         long relationCount = size(relations.calls())
                 + size(relations.creates())
                 + size(relations.overrides())
-                + size(relations.accessesField());
+                + size(relations.accessesField())
+                + size(relations.annotatedWith());
 
         long observationCount = size(observations.diInjectionSites())
                 + size(observations.diProviders())

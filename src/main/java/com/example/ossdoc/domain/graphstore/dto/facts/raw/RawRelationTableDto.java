@@ -40,6 +40,9 @@ public class RawRelationTableDto {
     @JsonProperty("throws_type")
     private List<RawRelationFactDto> throwsType = new ArrayList<>();
 
+    @JsonProperty("annotated_with")
+    private List<RawRelationFactDto> annotatedWith = new ArrayList<>();
+
     @JsonProperty("annotated_by")
     private List<RawRelationFactDto> annotatedBy = new ArrayList<>();
 }

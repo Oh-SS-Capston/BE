@@ -9,7 +9,8 @@ public enum RelationKind {
     CALLS("calls"),
     CREATES("creates"),
     OVERRIDES("overrides"),
-    ACCESSES_FIELD("accesses_field");
+    ACCESSES_FIELD("accesses_field"),
+    ANNOTATED_WITH("annotated_with");
 
     private final String code;
 
@@ -18,7 +19,4 @@ public enum RelationKind {
     }
 
     @JsonValue
-    public String code() {
-        return code;
-    }
-}
+    public String code() { return code; }}
