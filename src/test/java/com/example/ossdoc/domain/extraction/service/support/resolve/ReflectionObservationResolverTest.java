@@ -17,10 +17,10 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ReflectionObservationResolverTest {
@@ -29,8 +29,8 @@ class ReflectionObservationResolverTest {
             new ReflectionObservationResolver();
 
     @Test
-    @DisplayName("Reflection observation을 타입·메서드·필드·생성자 관계로 분리한다")
-    void resolvesReflectionRelations() {
+    @DisplayName("Reflection 관계 네 종류에 공통 Resolution·Confidence 정책을 적용한다")
+    void resolvesReflectionRelationsWithSharedPolicy() {
         ObservationFact type = reflection(
                 "method:sample.ReflectionClient#loadType()",
                 Map.of(
@@ -73,7 +73,10 @@ class ReflectionObservationResolverTest {
         );
 
         ObservationResolutionResult result = resolver.resolve(
-                contextOf(List.of(type, method, field, constructor))
+                contextOf(
+                        List.of(type, method, field, constructor),
+                        resolvedSymbols()
+                )
         );
 
         assertTrue(result.warnings().isEmpty());
@@ -103,19 +106,32 @@ class ReflectionObservationResolverTest {
         );
 
         for (RelationFact relation : result.relations()) {
-            assertEquals(ResolutionStatus.RESOLVED, relation.resolution().status());
+            assertEquals(
+                    ResolutionStatus.RESOLVED,
+                    relation.resolution().status()
+            );
             assertEquals(DerivationKind.DERIVED, relation.derivation());
             assertEquals(FactOriginKind.AST, relation.origin());
+            assertEquals(0.923, relation.confidenceHint(), 0.0001);
             assertEquals(
                     "ReflectionObservationResolver",
                     relation.attrs().get("resolver")
             );
+            assertEquals(
+                    "exact_symbol",
+                    relation.attrs().get("resolution_basis")
+            );
+            assertEquals(
+                    "high",
+                    relation.attrs().get("confidence_band")
+            );
+            assertEquals(true, relation.attrs().get("default_visible"));
         }
     }
 
     @Test
-    @DisplayName("invoke처럼 대상 멤버를 알 수 없는 reflection은 PARTIAL로 보존한다")
-    void keepsUnknownInvocationAsPartial() {
+    @DisplayName("대상 타입과 멤버를 모두 알 수 없는 invoke는 UNRESOLVED로 보존한다")
+    void keepsUnknownInvocationAsUnresolved() {
         ObservationFact invocation = reflection(
                 "method:sample.ReflectionClient#invoke(java.lang.reflect.Method)",
                 Map.of(
@@ -127,14 +143,98 @@ class ReflectionObservationResolverTest {
         );
 
         ObservationResolutionResult result = resolver.resolve(
-                contextOf(List.of(invocation))
+                contextOf(List.of(invocation), resolvedSymbols())
         );
 
         RelationFact relation = result.relations().get(0);
         assertEquals(RelationKind.REFLECTS_METHOD, relation.kind());
-        assertEquals(ResolutionStatus.PARTIAL, relation.resolution().status());
+        assertEquals(
+                ResolutionStatus.UNRESOLVED,
+                relation.resolution().status()
+        );
         assertTrue(relation.dstRawRef().contains("unresolved-reflection"));
         assertEquals(List.of("ev-invoke"), relation.evidenceIds());
+        assertEquals(
+                "unknown_target",
+                relation.attrs().get("resolution_basis")
+        );
+        assertEquals(false, relation.attrs().get("default_visible"));
+    }
+
+    @Test
+    @DisplayName("정적으로 알려진 외부 타입은 RAW_REFERENCE PARTIAL 관계로 유지한다")
+    void keepsExternalStaticTypeAsRawReference() {
+        ObservationFact observation = reflection(
+                "method:sample.ReflectionClient#loadExternal()",
+                Map.of(
+                        "api_method", "forName",
+                        "reflection_kind", "type",
+                        "target_type", "external.lib.Plugin"
+                ),
+                "ev-external"
+        );
+
+        RelationFact relation = resolver.resolve(
+                contextOf(List.of(observation), resolvedSymbols())
+        ).relations().get(0);
+
+        assertEquals(ResolutionStatus.PARTIAL, relation.resolution().status());
+        assertEquals("type:external.lib.Plugin", relation.dstRawRef());
+        assertEquals(
+                "raw_reference",
+                relation.attrs().get("resolution_basis")
+        );
+        assertEquals("medium", relation.attrs().get("confidence_band"));
+        assertFalse((Boolean) relation.attrs().get("default_visible"));
+    }
+
+    @Test
+    @DisplayName("동일 단순 이름의 타입 후보가 여러 개면 AMBIGUOUS_CANDIDATES로 처리한다")
+    void marksAmbiguousTypeCandidates() {
+        ObservationFact observation = reflection(
+                "method:sample.ReflectionClient#loadAmbiguous()",
+                Map.of(
+                        "api_method", "forName",
+                        "reflection_kind", "type",
+                        "target_type", "SharedTarget"
+                ),
+                "ev-ambiguous"
+        );
+
+        SymbolTable symbols = SymbolTable.builder()
+                .types(List.of(
+                        symbol(
+                                "type:sample.one.SharedTarget",
+                                SymbolKind.TYPE,
+                                "SharedTarget",
+                                null,
+                                "sample.one.SharedTarget"
+                        ),
+                        symbol(
+                                "type:sample.two.SharedTarget",
+                                SymbolKind.TYPE,
+                                "SharedTarget",
+                                null,
+                                "sample.two.SharedTarget"
+                        )
+                ))
+                .methods(List.of())
+                .fields(List.of())
+                .constructors(List.of())
+                .build();
+
+        RelationFact relation = resolver.resolve(
+                contextOf(List.of(observation), symbols)
+        ).relations().get(0);
+
+        assertEquals(ResolutionStatus.PARTIAL, relation.resolution().status());
+        assertEquals(
+                "ambiguous_candidates",
+                relation.attrs().get("resolution_basis")
+        );
+        assertEquals(2, relation.attrs().get("candidate_count"));
+        assertEquals("medium", relation.attrs().get("confidence_band"));
+        assertFalse((Boolean) relation.attrs().get("default_visible"));
     }
 
     private ObservationFact reflection(
@@ -153,9 +253,21 @@ class ReflectionObservationResolverTest {
     }
 
     private ObservationResolutionContext contextOf(
-            List<ObservationFact> observations
+            List<ObservationFact> observations,
+            SymbolTable symbols
     ) {
-        SymbolTable symbols = SymbolTable.builder()
+        return ObservationResolutionContext.from(
+                ExtractionAggregate.builder()
+                        .symbols(symbols)
+                        .observations(ObservationTable.builder()
+                                .reflectionSites(observations)
+                                .build())
+                        .build()
+        );
+    }
+
+    private SymbolTable resolvedSymbols() {
+        return SymbolTable.builder()
                 .types(List.of(symbol(
                         "type:sample.ReflectTarget",
                         SymbolKind.TYPE,
@@ -185,15 +297,6 @@ class ReflectionObservationResolverTest {
                         null
                 )))
                 .build();
-
-        return ObservationResolutionContext.from(
-                ExtractionAggregate.builder()
-                        .symbols(symbols)
-                        .observations(ObservationTable.builder()
-                                .reflectionSites(observations)
-                                .build())
-                        .build()
-        );
     }
 
     private SymbolFact symbol(

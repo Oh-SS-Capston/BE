@@ -21,11 +21,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SpiObservationResolverTest {
 
-    private final SpiObservationResolver resolver = new SpiObservationResolver();
+    private final SpiObservationResolver resolver =
+            new SpiObservationResolver();
 
     @Test
-    @DisplayName("ServiceLoader와 module uses를 LOADS_SERVICE로, module provides를 PROVIDES_SPI로 생성한다")
-    void resolvesSpiRelations() {
+    @DisplayName("ServiceLoader·module uses·module provides에 공통 정책을 적용한다")
+    void resolvesSpiRelationsWithCommonPolicy() {
         ObservationFact serviceLoader = ObservationFact.builder()
                 .kind(ObservationKind.SPI_PROVIDER)
                 .siteSymbol("method:sample.PluginRegistry#loadPlugins()")
@@ -62,7 +63,8 @@ class SpiObservationResolverTest {
         assertEquals(3, result.relations().size());
 
         List<RelationFact> loads = result.relations().stream()
-                .filter(relation -> relation.kind() == RelationKind.LOADS_SERVICE)
+                .filter(relation ->
+                        relation.kind() == RelationKind.LOADS_SERVICE)
                 .toList();
         assertEquals(2, loads.size());
         assertTrue(loads.stream().allMatch(relation ->
@@ -71,19 +73,41 @@ class SpiObservationResolverTest {
         assertTrue(loads.stream().allMatch(relation ->
                 relation.resolution().status() == ResolutionStatus.RESOLVED
         ));
+        assertTrue(loads.stream().allMatch(relation ->
+                "exact_symbol".equals(
+                        relation.attrs().get("resolution_basis")
+                )
+        ));
+        assertTrue(loads.stream().allMatch(relation ->
+                "high".equals(relation.attrs().get("confidence_band"))
+        ));
+        assertTrue(loads.stream().allMatch(relation ->
+                Boolean.TRUE.equals(relation.attrs().get("default_visible"))
+        ));
+        assertTrue(loads.stream().allMatch(relation ->
+                Math.abs(relation.confidenceHint() - 0.923) < 0.0001
+        ));
 
         RelationFact provides = result.relations().stream()
-                .filter(relation -> relation.kind() == RelationKind.PROVIDES_SPI)
+                .filter(relation ->
+                        relation.kind() == RelationKind.PROVIDES_SPI)
                 .findFirst()
                 .orElseThrow();
         assertEquals("type:sample.DefaultPlugin", provides.srcSymbol());
         assertEquals("type:sample.Plugin", provides.dstSymbol());
         assertEquals(DerivationKind.DERIVED, provides.derivation());
-        assertEquals("module:sample.plugin", provides.attrs().get("module_symbol"));
+        assertEquals(
+                "module:sample.plugin",
+                provides.attrs().get("module_symbol")
+        );
+        assertEquals("exact_symbol", provides.attrs().get("resolution_basis"));
+        assertEquals("high", provides.attrs().get("confidence_band"));
+        assertEquals(Boolean.TRUE, provides.attrs().get("default_visible"));
+        assertEquals(0.923, provides.confidenceHint(), 0.0001);
     }
 
     @Test
-    @DisplayName("ServiceLoader 대상 타입이 unresolved면 PARTIAL LOADS_SERVICE로 남긴다")
+    @DisplayName("ServiceLoader 대상 문자열만 확인되면 RAW_REFERENCE 기반 PARTIAL로 남긴다")
     void keepsUnresolvedServiceAsPartialRelation() {
         ObservationFact serviceLoader = ObservationFact.builder()
                 .kind(ObservationKind.SPI_PROVIDER)
@@ -103,6 +127,35 @@ class SpiObservationResolverTest {
         assertEquals(RelationKind.LOADS_SERVICE, relation.kind());
         assertEquals(ResolutionStatus.PARTIAL, relation.resolution().status());
         assertEquals("service:pluginClassExpression", relation.dstRawRef());
+        assertEquals("raw_reference", relation.attrs().get("resolution_basis"));
+        assertEquals("medium", relation.attrs().get("confidence_band"));
+        assertEquals(Boolean.FALSE, relation.attrs().get("default_visible"));
+        assertEquals(0.4, relation.confidenceHint(), 0.0001);
+    }
+
+    @Test
+    @DisplayName("module provides 구현체가 없으면 module source를 사용하고 INFERRED_SYMBOL로 남긴다")
+    void marksMissingImplementationAsInferred() {
+        ObservationFact moduleProvides = ObservationFact.builder()
+                .kind(ObservationKind.MODULE_PROVIDES)
+                .siteSymbol("module:sample.plugin")
+                .targetSymbol("sample.Plugin")
+                .evidenceIds(List.of("ev-module-provides"))
+                .origin(FactOriginKind.AST)
+                .confidenceHint(0.9)
+                .build();
+
+        RelationFact relation = resolver.resolve(
+                contextOf(null, null, moduleProvides)
+        ).relations().get(0);
+
+        assertEquals(RelationKind.PROVIDES_SPI, relation.kind());
+        assertEquals("module:sample.plugin", relation.srcSymbol());
+        assertEquals(ResolutionStatus.PARTIAL, relation.resolution().status());
+        assertEquals("inferred_symbol", relation.attrs().get("resolution_basis"));
+        assertEquals("medium", relation.attrs().get("confidence_band"));
+        assertEquals(Boolean.FALSE, relation.attrs().get("default_visible"));
+        assertEquals(0.57, relation.confidenceHint(), 0.0001);
     }
 
     private ObservationResolutionContext contextOf(

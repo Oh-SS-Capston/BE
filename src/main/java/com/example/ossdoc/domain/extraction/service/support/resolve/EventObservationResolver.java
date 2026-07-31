@@ -8,13 +8,20 @@ import com.example.ossdoc.domain.extraction.enums.DerivationKind;
 import com.example.ossdoc.domain.extraction.enums.FactOriginKind;
 import com.example.ossdoc.domain.extraction.enums.ObservationKind;
 import com.example.ossdoc.domain.extraction.enums.RelationKind;
-import com.example.ossdoc.domain.extraction.service.support.util.RelationResolutionFactory;
+import com.example.ossdoc.domain.extraction.service.support.policy.ConfidenceAssessment;
+import com.example.ossdoc.domain.extraction.service.support.policy.RelationConfidencePolicy;
+import com.example.ossdoc.domain.extraction.service.support.policy.RelationPolicyInput;
+import com.example.ossdoc.domain.extraction.service.support.policy.RelationResolutionPolicy;
+import com.example.ossdoc.domain.extraction.service.support.policy.ResolutionAssessment;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -23,6 +30,27 @@ import java.util.Set;
 public class EventObservationResolver implements ObservationRelationResolver {
 
     private static final String UNRESOLVED_EVENT = "<unresolved-event>";
+
+    private RelationResolutionPolicy resolutionPolicy;
+    private RelationConfidencePolicy confidencePolicy;
+
+    public EventObservationResolver() {
+        this.resolutionPolicy = new RelationResolutionPolicy();
+        this.confidencePolicy = new RelationConfidencePolicy();
+    }
+
+    @Autowired(required = false)
+    void configurePolicies(
+            RelationResolutionPolicy resolutionPolicy,
+            RelationConfidencePolicy confidencePolicy
+    ) {
+        if (resolutionPolicy != null) {
+            this.resolutionPolicy = resolutionPolicy;
+        }
+        if (confidencePolicy != null) {
+            this.confidencePolicy = confidencePolicy;
+        }
+    }
 
     @Override
     public Set<ObservationKind> supportedKinds() {
@@ -38,7 +66,9 @@ public class EventObservationResolver implements ObservationRelationResolver {
     }
 
     @Override
-    public ObservationResolutionResult resolve(ObservationResolutionContext context) {
+    public ObservationResolutionResult resolve(
+            ObservationResolutionContext context
+    ) {
         if (context == null) {
             return new ObservationResolutionResult(
                     List.of(),
@@ -90,85 +120,140 @@ public class EventObservationResolver implements ObservationRelationResolver {
 
             String siteSymbol = trimToNull(observation.siteSymbol());
             if (siteSymbol == null) {
-                warnings.add(observation.kind() + " observation has no siteSymbol and was skipped");
+                warnings.add(
+                        observation.kind()
+                                + " observation has no siteSymbol and was skipped"
+                );
                 continue;
             }
 
-            EventTarget target = eventTarget(observation);
-            Map<String, Object> attrs = new LinkedHashMap<>();
-            if (observation.attrs() != null) {
-                attrs.putAll(observation.attrs());
-            }
-            attrs.put("semantic_kind", semanticKind);
-            attrs.put("resolver", getClass().getSimpleName());
-            attrs.put("event_type", target.rawType());
-            attrs.put("target_resolution", target.resolved() ? "resolved" : "partial");
-
-            double fallbackConfidence = target.resolved() ? 0.9 : 0.4;
-            double confidence = observation.confidenceHint() == null
-                    ? fallbackConfidence
-                    : target.resolved()
-                    ? observation.confidenceHint()
-                    : Math.min(observation.confidenceHint(), fallbackConfidence);
-
-            RelationFact.RelationFactBuilder builder = RelationFact.builder()
-                    .kind(relationKind)
-                    .srcSymbol(siteSymbol)
-                    .evidenceIds(sanitizeEvidenceIds(observation.evidenceIds()))
-                    .resolution(target.resolved()
-                            ? RelationResolutionFactory.resolved()
-                            : RelationResolutionFactory.partial(
-                            "Event type could not be fully resolved"
-                    ))
-                    .origin(observation.origin() == null
-                            ? FactOriginKind.OBSERVED
-                            : observation.origin())
-                    .derivation(DerivationKind.DERIVED)
-                    .confidenceHint(confidence)
-                    .attrs(Map.copyOf(attrs));
-
-            if (target.resolved()) {
-                builder.dstSymbol(target.typeSymbol());
-            } else {
-                builder.dstRawRef("event:" + target.rawType());
-            }
-
-            relations.add(builder.build());
+            relations.add(buildRelation(
+                    observation,
+                    relationKind,
+                    semanticKind,
+                    siteSymbol,
+                    eventTarget(observation)
+            ));
         }
+    }
+
+    private RelationFact buildRelation(
+            ObservationFact observation,
+            RelationKind relationKind,
+            String semanticKind,
+            String siteSymbol,
+            EventTarget target
+    ) {
+        List<String> evidenceIds = sanitizeEvidenceIds(
+                observation.evidenceIds()
+        );
+        FactOriginKind origin = observation.origin() == null
+                ? FactOriginKind.OBSERVED
+                : observation.origin();
+
+        RelationPolicyInput policyInput = RelationPolicyInput.builder()
+                .origin(origin)
+                .derivation(DerivationKind.DERIVED)
+                .targetSymbolResolved(target.symbolResolved())
+                .targetReferenceKnown(target.referenceKnown())
+                .targetReferenceAuthoritative(
+                        target.referenceAuthoritative()
+                )
+                .inferred(false)
+                .candidateCount(target.referenceKnown() ? 1 : 0)
+                .evidencePresent(!evidenceIds.isEmpty())
+                .sourceConfidenceHint(observation.confidenceHint())
+                .build();
+
+        ResolutionAssessment resolution = resolutionPolicy.assess(policyInput);
+        ConfidenceAssessment confidence = confidencePolicy.assess(
+                policyInput,
+                resolution
+        );
+
+        Map<String, Object> attrs = copyNonNullAttrs(observation.attrs());
+        attrs.put("semantic_kind", semanticKind);
+        attrs.put("resolver", getClass().getSimpleName());
+        attrs.put("event_type", target.rawType());
+        attrs.put(
+                "target_resolution",
+                resolution.status().name().toLowerCase(Locale.ROOT)
+        );
+        putPolicyAttrs(attrs, resolution, confidence);
+
+        RelationFact.RelationFactBuilder builder = RelationFact.builder()
+                .kind(relationKind)
+                .srcSymbol(siteSymbol)
+                .evidenceIds(evidenceIds)
+                .resolution(resolution.toRelationResolution())
+                .origin(origin)
+                .derivation(DerivationKind.DERIVED)
+                .confidenceHint(confidence.value())
+                .attrs(immutableAttrs(attrs));
+
+        if (target.typeSymbol() != null) {
+            builder.dstSymbol(target.typeSymbol());
+        } else {
+            builder.dstRawRef("event:" + target.rawType());
+        }
+
+        return builder.build();
     }
 
     private EventTarget eventTarget(ObservationFact observation) {
         String targetSymbol = trimToNull(observation.targetSymbol());
         if (targetSymbol != null) {
             String typeSymbol = normalizeTypeSymbol(targetSymbol);
-            return new EventTarget(typeSymbol, rawType(typeSymbol), true);
+            return new EventTarget(
+                    typeSymbol,
+                    rawType(typeSymbol),
+                    true,
+                    true,
+                    true
+            );
         }
 
         TypeRef typeRef = observation.targetTypeRef();
         if (typeRef == null) {
-            return new EventTarget(null, UNRESOLVED_EVENT, false);
+            return EventTarget.unknown();
         }
 
         String raw = firstNonBlank(typeRef.raw(), typeRef.sourceText());
         if (raw == null) {
-            return new EventTarget(null, UNRESOLVED_EVENT, false);
+            return EventTarget.unknown();
         }
 
-        boolean resolved = !Boolean.TRUE.equals(typeRef.unresolved());
+        boolean authoritative = !Boolean.TRUE.equals(typeRef.unresolved());
         return new EventTarget(
-                resolved ? normalizeTypeSymbol(raw) : null,
+                authoritative ? normalizeTypeSymbol(raw) : null,
                 rawType(raw),
-                resolved
+                false,
+                true,
+                authoritative
         );
+    }
+
+    private void putPolicyAttrs(
+            Map<String, Object> attrs,
+            ResolutionAssessment resolution,
+            ConfidenceAssessment confidence
+    ) {
+        attrs.put("resolution_basis", resolution.basis().code());
+        attrs.put("confidence_band", confidence.band().code());
+        attrs.put("default_visible", confidence.defaultVisible());
     }
 
     private String normalizeTypeSymbol(String value) {
         String trimmed = value.trim();
-        return trimmed.startsWith("type:") ? trimmed : "type:" + trimmed;
+        return trimmed.startsWith("type:")
+                ? trimmed
+                : "type:" + trimmed;
     }
 
     private String rawType(String value) {
-        String trimmed = value == null ? UNRESOLVED_EVENT : value.trim();
+        String trimmed = value == null
+                ? UNRESOLVED_EVENT
+                : value.trim();
         if (trimmed.startsWith("type:")) {
             return trimmed.substring("type:".length());
         }
@@ -176,6 +261,27 @@ public class EventObservationResolver implements ObservationRelationResolver {
             return trimmed.substring("event:".length());
         }
         return trimmed.isBlank() ? UNRESOLVED_EVENT : trimmed;
+    }
+
+    private Map<String, Object> copyNonNullAttrs(
+            Map<String, Object> source
+    ) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        if (source == null) {
+            return result;
+        }
+        for (Map.Entry<String, Object> entry : source.entrySet()) {
+            if (entry.getKey() != null && entry.getValue() != null) {
+                result.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return result;
+    }
+
+    private Map<String, Object> immutableAttrs(
+            Map<String, Object> attrs
+    ) {
+        return Collections.unmodifiableMap(new LinkedHashMap<>(attrs));
     }
 
     private List<String> sanitizeEvidenceIds(List<String> source) {
@@ -207,7 +313,18 @@ public class EventObservationResolver implements ObservationRelationResolver {
     private record EventTarget(
             String typeSymbol,
             String rawType,
-            boolean resolved
+            boolean symbolResolved,
+            boolean referenceKnown,
+            boolean referenceAuthoritative
     ) {
+        private static EventTarget unknown() {
+            return new EventTarget(
+                    null,
+                    UNRESOLVED_EVENT,
+                    false,
+                    false,
+                    false
+            );
+        }
     }
 }

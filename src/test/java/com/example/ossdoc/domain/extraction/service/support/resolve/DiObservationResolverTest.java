@@ -96,7 +96,7 @@ class DiObservationResolverTest {
                 List.of("ev-injection", "ev-provider"),
                 relation.evidenceIds()
         );
-        assertEquals(1.0, relation.confidenceHint());
+        assertEquals(0.975, relation.confidenceHint(), 0.0001);
         assertEquals(
                 "exact_type",
                 relation.attrs().get("match_strategy")
@@ -105,6 +105,9 @@ class DiObservationResolverTest {
                 fieldSymbol,
                 relation.attrs().get("injection_site_symbol")
         );
+        assertEquals("exact_symbol", relation.attrs().get("resolution_basis"));
+        assertEquals("high", relation.attrs().get("confidence_band"));
+        assertEquals(true, relation.attrs().get("default_visible"));
     }
 
     @Test
@@ -167,7 +170,10 @@ class DiObservationResolverTest {
                 "qualifier",
                 relation.attrs().get("match_strategy")
         );
-        assertEquals(0.9, relation.confidenceHint());
+        assertEquals(0.96, relation.confidenceHint(), 0.0001);
+        assertEquals("exact_reference", relation.attrs().get("resolution_basis"));
+        assertEquals("high", relation.attrs().get("confidence_band"));
+        assertEquals(true, relation.attrs().get("default_visible"));
     }
 
     @Test
@@ -223,7 +229,10 @@ class DiObservationResolverTest {
                 "primary",
                 relation.attrs().get("match_strategy")
         );
-        assertEquals(0.8, relation.confidenceHint());
+        assertEquals(0.945, relation.confidenceHint(), 0.0001);
+        assertEquals("exact_reference", relation.attrs().get("resolution_basis"));
+        assertEquals("high", relation.attrs().get("confidence_band"));
+        assertEquals(true, relation.attrs().get("default_visible"));
     }
 
     @Test
@@ -286,6 +295,77 @@ class DiObservationResolverTest {
                 relation.attrs().get("match_strategy")
         );
         assertEquals(2, relation.attrs().get("candidate_count"));
+        assertEquals(0.6, relation.confidenceHint(), 0.0001);
+        assertEquals(
+                "ambiguous_candidates",
+                relation.attrs().get("resolution_basis")
+        );
+        assertEquals("medium", relation.attrs().get("confidence_band"));
+        assertEquals(false, relation.attrs().get("default_visible"));
+    }
+
+    @Test
+    @DisplayName("파라미터명으로 선택한 provider는 추론 기반 PARTIAL 관계로 분류한다")
+    void classifiesParameterNameMatchAsInferredPartial() {
+        String ctorSymbol = "ctor:sample.ReportService#<init>(sample.ReportStore)";
+
+        ObservationFact injection = injection(
+                ctorSymbol,
+                "sample.ReportStore",
+                Map.of("parameter", "archiveStore"),
+                List.of("ev-injection"),
+                FactOriginKind.AST
+        );
+
+        ObservationFact current = provider(
+                "method:sample.ReportConfig#currentStore()",
+                "sample.ReportStore",
+                List.of("currentStore"),
+                List.of(),
+                false,
+                List.of("ev-current"),
+                FactOriginKind.AST
+        );
+        ObservationFact archive = provider(
+                "method:sample.ReportConfig#archiveStore()",
+                "sample.ReportStore",
+                List.of("archiveStore"),
+                List.of(),
+                false,
+                List.of("ev-archive"),
+                FactOriginKind.AST
+        );
+
+        SymbolFact constructor = SymbolFact.builder()
+                .symbol(ctorSymbol)
+                .kind(SymbolKind.CONSTRUCTOR)
+                .ownerSymbol("type:sample.ReportService")
+                .build();
+
+        ObservationResolutionResult result = resolver.resolve(
+                contextOf(
+                        List.of(injection),
+                        List.of(current, archive),
+                        List.of(constructor)
+                )
+        );
+
+        assertEquals(1, result.relations().size());
+        RelationFact relation = result.relations().get(0);
+
+        assertEquals("bean:archiveStore", relation.dstRawRef());
+        assertEquals(
+                ResolutionStatus.PARTIAL,
+                relation.resolution().status()
+        );
+        assertEquals("parameter_name", relation.attrs().get("match_strategy"));
+        assertEquals(
+                "inferred_reference",
+                relation.attrs().get("resolution_basis")
+        );
+        assertEquals(0.57, relation.confidenceHint(), 0.0001);
+        assertEquals("medium", relation.attrs().get("confidence_band"));
+        assertEquals(false, relation.attrs().get("default_visible"));
     }
 
     @Test

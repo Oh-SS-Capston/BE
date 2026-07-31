@@ -7,7 +7,12 @@ import com.example.ossdoc.domain.extraction.enums.DerivationKind;
 import com.example.ossdoc.domain.extraction.enums.FactOriginKind;
 import com.example.ossdoc.domain.extraction.enums.ObservationKind;
 import com.example.ossdoc.domain.extraction.enums.RelationKind;
-import com.example.ossdoc.domain.extraction.service.support.util.RelationResolutionFactory;
+import com.example.ossdoc.domain.extraction.service.support.policy.ConfidenceAssessment;
+import com.example.ossdoc.domain.extraction.service.support.policy.RelationConfidencePolicy;
+import com.example.ossdoc.domain.extraction.service.support.policy.RelationPolicyInput;
+import com.example.ossdoc.domain.extraction.service.support.policy.RelationResolutionPolicy;
+import com.example.ossdoc.domain.extraction.service.support.policy.ResolutionAssessment;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.lang.reflect.Array;
@@ -21,19 +26,35 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
-/**
- * HTTP_ENDPOINT observation을 HANDLES_ENDPOINT 의미 관계로 승격한다.
- *
- * <p>하나의 observation에 복수 HTTP method/path가 있으면 가능한 조합마다
- * 별도 relation을 생성한다. path를 정적으로 해석하지 못한 경우에도
- * observation을 버리지 않고 PARTIAL relation으로 남긴다.</p>
- */
+/** HTTP_ENDPOINT observation을 HANDLES_ENDPOINT 의미 관계로 승격한다. */
 @Component
 public class EndpointObservationResolver
         implements ObservationRelationResolver {
 
     private static final String UNRESOLVED_PATH = "<unresolved-path>";
     private static final String CONFLICTING_METHOD = "<conflicting-method>";
+
+    private RelationResolutionPolicy resolutionPolicy;
+    private RelationConfidencePolicy confidencePolicy;
+
+    public EndpointObservationResolver() {
+        this.resolutionPolicy = new RelationResolutionPolicy();
+        this.confidencePolicy = new RelationConfidencePolicy();
+    }
+
+    /** 일반 애플리케이션에서는 Spring 공통 정책 Bean을 사용하고, 단위 테스트는 기본 정책으로 동작한다. */
+    @Autowired(required = false)
+    void configurePolicies(
+            RelationResolutionPolicy resolutionPolicy,
+            RelationConfidencePolicy confidencePolicy
+    ) {
+        if (resolutionPolicy != null) {
+            this.resolutionPolicy = resolutionPolicy;
+        }
+        if (confidencePolicy != null) {
+            this.confidencePolicy = confidencePolicy;
+        }
+    }
 
     @Override
     public Set<ObservationKind> supportedKinds() {
@@ -73,10 +94,7 @@ public class EndpointObservationResolver
             resolveEndpoint(endpoint, relations, warnings);
         }
 
-        return new ObservationResolutionResult(
-                relations,
-                warnings
-        );
+        return new ObservationResolutionResult(relations, warnings);
     }
 
     private void resolveEndpoint(
@@ -90,9 +108,7 @@ public class EndpointObservationResolver
 
         String siteSymbol = trimToNull(endpoint.siteSymbol());
         if (siteSymbol == null) {
-            warnings.add(
-                    "HTTP_ENDPOINT observation has no siteSymbol and was skipped"
-            );
+            warnings.add("HTTP_ENDPOINT observation has no siteSymbol and was skipped");
             return;
         }
 
@@ -111,10 +127,7 @@ public class EndpointObservationResolver
                 observationAttrs.get("mapping_conflict")
         );
         boolean unresolvedPath = "unresolved".equalsIgnoreCase(
-                Objects.toString(
-                        observationAttrs.get("path_resolution"),
-                        ""
-                )
+                Objects.toString(observationAttrs.get("path_resolution"), "")
         ) || paths.isEmpty();
 
         if (mappingConflict) {
@@ -128,8 +141,9 @@ public class EndpointObservationResolver
                         CONFLICTING_METHOD,
                         path,
                         false,
-                        "HTTP endpoint method mapping conflict",
-                        0.4
+                        true,
+                        2,
+                        "HTTP endpoint method mapping conflict"
                 ));
             }
             return;
@@ -146,8 +160,9 @@ public class EndpointObservationResolver
                         method,
                         UNRESOLVED_PATH,
                         false,
-                        "HTTP endpoint path could not be resolved",
-                        0.6
+                        true,
+                        1,
+                        "HTTP endpoint path could not be resolved"
                 ));
             }
             return;
@@ -160,8 +175,9 @@ public class EndpointObservationResolver
                         method,
                         path,
                         true,
-                        null,
-                        0.9
+                        true,
+                        1,
+                        null
                 ));
             }
         }
@@ -171,17 +187,45 @@ public class EndpointObservationResolver
             ObservationFact endpoint,
             String httpMethod,
             String path,
-            boolean resolved,
-            String partialReason,
-            double fallbackConfidence
+            boolean authoritativeReference,
+            boolean referenceKnown,
+            int candidateCount,
+            String reasonOverride
     ) {
         String normalizedMethod = trimToNull(httpMethod) == null
                 ? "ANY"
                 : httpMethod.trim().toUpperCase(Locale.ROOT);
-
         String normalizedPath = UNRESOLVED_PATH.equals(path)
                 ? UNRESOLVED_PATH
                 : normalizeHttpPath(path);
+
+        List<String> evidenceIds = sanitizeEvidenceIds(endpoint.evidenceIds());
+        FactOriginKind origin = endpoint.origin() == null
+                ? FactOriginKind.OBSERVED
+                : endpoint.origin();
+
+        RelationPolicyInput policyInput = RelationPolicyInput.builder()
+                .origin(origin)
+                .derivation(DerivationKind.DERIVED)
+                .targetReferenceKnown(referenceKnown)
+                .targetReferenceAuthoritative(authoritativeReference)
+                .candidateCount(candidateCount)
+                .evidencePresent(!evidenceIds.isEmpty())
+                .sourceConfidenceHint(endpoint.confidenceHint())
+                .build();
+
+        ResolutionAssessment resolution = resolutionPolicy.assess(policyInput);
+        if (reasonOverride != null) {
+            resolution = new ResolutionAssessment(
+                    resolution.status(),
+                    resolution.basis(),
+                    reasonOverride
+            );
+        }
+        ConfidenceAssessment confidence = confidencePolicy.assess(
+                policyInput,
+                resolution
+        );
 
         Map<String, Object> attrs = new LinkedHashMap<>();
         if (endpoint.attrs() != null) {
@@ -191,92 +235,74 @@ public class EndpointObservationResolver
         attrs.put("path", normalizedPath);
         attrs.put("semantic_kind", "http_endpoint");
         attrs.put("resolver", getClass().getSimpleName());
-
-        double confidence = endpoint.confidenceHint() == null
-                ? fallbackConfidence
-                : resolved
-                ? endpoint.confidenceHint()
-                : Math.min(endpoint.confidenceHint(), fallbackConfidence);
+        putPolicyAttrs(attrs, resolution, confidence);
 
         return RelationFact.builder()
                 .kind(RelationKind.HANDLES_ENDPOINT)
                 .srcSymbol(endpoint.siteSymbol())
                 .dstRawRef(normalizedMethod + " " + normalizedPath)
-                .evidenceIds(sanitizeEvidenceIds(endpoint.evidenceIds()))
-                .resolution(
-                        resolved
-                                ? RelationResolutionFactory.resolved()
-                                : RelationResolutionFactory.partial(partialReason)
-                )
-                .origin(endpoint.origin() == null
-                        ? FactOriginKind.OBSERVED
-                        : endpoint.origin())
+                .evidenceIds(evidenceIds)
+                .resolution(resolution.toRelationResolution())
+                .origin(origin)
                 .derivation(DerivationKind.DERIVED)
-                .confidenceHint(confidence)
+                .confidenceHint(confidence.value())
                 .attrs(Map.copyOf(attrs))
                 .build();
     }
 
+    private void putPolicyAttrs(
+            Map<String, Object> attrs,
+            ResolutionAssessment resolution,
+            ConfidenceAssessment confidence
+    ) {
+        attrs.put("resolution_basis", resolution.basis().code());
+        attrs.put("confidence_band", confidence.band().code());
+        attrs.put("default_visible", confidence.defaultVisible());
+    }
+
     private List<String> normalizeHttpMethods(List<String> rawMethods) {
         LinkedHashSet<String> normalized = new LinkedHashSet<>();
-
         for (String rawMethod : rawMethods) {
             String method = trimToNull(rawMethod);
-            if (method == null) {
-                continue;
+            if (method != null) {
+                normalized.add(method.toUpperCase(Locale.ROOT));
             }
-            normalized.add(method.toUpperCase(Locale.ROOT));
         }
-
         return List.copyOf(normalized);
     }
 
     private List<String> normalizeHttpPaths(List<String> rawPaths) {
         LinkedHashSet<String> normalized = new LinkedHashSet<>();
-
         for (String rawPath : rawPaths) {
             String path = trimToNull(rawPath);
-            if (path == null) {
-                continue;
+            if (path != null) {
+                normalized.add(normalizeHttpPath(path));
             }
-            normalized.add(normalizeHttpPath(path));
         }
-
         return List.copyOf(normalized);
     }
 
     private String normalizeHttpPath(String path) {
         String normalized = path == null ? "" : path.trim();
-
         if (normalized.isEmpty()) {
             return "/";
         }
-
-        if (!normalized.startsWith("/")) {
-            return "/" + normalized;
-        }
-
-        return normalized;
+        return normalized.startsWith("/") ? normalized : "/" + normalized;
     }
 
     private List<String> stringList(Object raw) {
         if (raw == null) {
             return List.of();
         }
-
         LinkedHashSet<String> result = new LinkedHashSet<>();
         collectStrings(raw, result);
         return List.copyOf(result);
     }
 
-    private void collectStrings(
-            Object raw,
-            Collection<String> destination
-    ) {
+    private void collectStrings(Object raw, Collection<String> destination) {
         if (raw == null) {
             return;
         }
-
         if (raw instanceof CharSequence sequence) {
             String value = trimToNull(sequence.toString());
             if (value != null) {
@@ -284,14 +310,12 @@ public class EndpointObservationResolver
             }
             return;
         }
-
         if (raw instanceof Collection<?> collection) {
             for (Object item : collection) {
                 collectStrings(item, destination);
             }
             return;
         }
-
         if (raw.getClass().isArray()) {
             int length = Array.getLength(raw);
             for (int index = 0; index < length; index++) {
@@ -299,7 +323,6 @@ public class EndpointObservationResolver
             }
             return;
         }
-
         String value = trimToNull(String.valueOf(raw));
         if (value != null) {
             destination.add(value);
@@ -310,15 +333,13 @@ public class EndpointObservationResolver
         if (raw instanceof Boolean value) {
             return value;
         }
-        return raw != null
-                && Boolean.parseBoolean(String.valueOf(raw));
+        return raw != null && Boolean.parseBoolean(String.valueOf(raw));
     }
 
     private List<String> sanitizeEvidenceIds(List<String> source) {
         if (source == null || source.isEmpty()) {
             return List.of();
         }
-
         LinkedHashSet<String> result = new LinkedHashSet<>();
         for (String evidenceId : source) {
             String normalized = trimToNull(evidenceId);
@@ -333,7 +354,6 @@ public class EndpointObservationResolver
         if (value == null) {
             return null;
         }
-
         String trimmed = value.trim();
         return trimmed.isEmpty() ? null : trimmed;
     }

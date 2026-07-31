@@ -10,7 +10,12 @@ import com.example.ossdoc.domain.extraction.enums.DerivationKind;
 import com.example.ossdoc.domain.extraction.enums.FactOriginKind;
 import com.example.ossdoc.domain.extraction.enums.ObservationKind;
 import com.example.ossdoc.domain.extraction.enums.RelationKind;
-import com.example.ossdoc.domain.extraction.service.support.util.RelationResolutionFactory;
+import com.example.ossdoc.domain.extraction.service.support.policy.ConfidenceAssessment;
+import com.example.ossdoc.domain.extraction.service.support.policy.RelationConfidencePolicy;
+import com.example.ossdoc.domain.extraction.service.support.policy.RelationPolicyInput;
+import com.example.ossdoc.domain.extraction.service.support.policy.RelationResolutionPolicy;
+import com.example.ossdoc.domain.extraction.service.support.policy.ResolutionAssessment;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.lang.reflect.Array;
@@ -34,6 +39,28 @@ import java.util.Set;
 @Component
 public class DiObservationResolver
         implements ObservationRelationResolver {
+
+    private RelationResolutionPolicy resolutionPolicy;
+    private RelationConfidencePolicy confidencePolicy;
+
+    public DiObservationResolver() {
+        this.resolutionPolicy = new RelationResolutionPolicy();
+        this.confidencePolicy = new RelationConfidencePolicy();
+    }
+
+    /** 일반 애플리케이션에서는 Spring 공통 정책 Bean을 사용하고, 단위 테스트는 기본 정책으로 동작한다. */
+    @Autowired(required = false)
+    void configurePolicies(
+            RelationResolutionPolicy resolutionPolicy,
+            RelationConfidencePolicy confidencePolicy
+    ) {
+        if (resolutionPolicy != null) {
+            this.resolutionPolicy = resolutionPolicy;
+        }
+        if (confidencePolicy != null) {
+            this.confidencePolicy = confidencePolicy;
+        }
+    }
 
     @Override
     public Set<ObservationKind> supportedKinds() {
@@ -196,6 +223,52 @@ public class DiObservationResolver
             Selection selection
     ) {
         ProviderCandidate provider = selection.candidate();
+        Destination destination = destinationOf(provider);
+        List<String> evidenceIds = mergeEvidenceIds(
+                injection.evidenceIds(),
+                provider.observation().evidenceIds()
+        );
+        FactOriginKind origin = mergeOrigin(
+                injection.origin(),
+                provider.observation().origin()
+        );
+
+        boolean qualifierMatched = "qualifier".equals(selection.strategy());
+        boolean primaryMatched = "primary".equals(selection.strategy());
+
+        RelationPolicyInput policyInput = RelationPolicyInput.builder()
+                .origin(origin)
+                .derivation(DerivationKind.DERIVED)
+                .targetSymbolResolved(destination.symbol() != null)
+                .targetReferenceKnown(
+                        destination.symbol() != null
+                                || destination.rawRef() != null
+                )
+                .targetReferenceAuthoritative(destination.rawRef() != null)
+                .inferred(selection.partial())
+                .candidateCount(1)
+                .qualifierMatched(qualifierMatched)
+                .primaryMatched(primaryMatched)
+                .evidencePresent(!evidenceIds.isEmpty())
+                .sourceConfidenceHint(maxConfidenceHint(
+                        injection.confidenceHint(),
+                        provider.observation().confidenceHint()
+                ))
+                .build();
+
+        ResolutionAssessment resolution = resolutionPolicy.assess(policyInput);
+        if (selection.reason() != null) {
+            resolution = new ResolutionAssessment(
+                    resolution.status(),
+                    resolution.basis(),
+                    selection.reason()
+            );
+        }
+        ConfidenceAssessment confidence = confidencePolicy.assess(
+                policyInput,
+                resolution
+        );
+
         Map<String, Object> attrs = baseAttrs(
                 injection,
                 injectionSiteSymbol,
@@ -209,26 +282,18 @@ public class DiObservationResolver
         attrs.put("qualifiers", provider.qualifiers());
         attrs.put("primary", provider.primary());
         attrs.put("candidate_count", selection.candidateCount());
+        putPolicyAttrs(attrs, resolution, confidence);
 
         RelationFact.RelationFactBuilder builder = RelationFact.builder()
                 .kind(RelationKind.INJECTS)
                 .srcSymbol(sourceTypeSymbol)
-                .evidenceIds(mergeEvidenceIds(
-                        injection.evidenceIds(),
-                        provider.observation().evidenceIds()
-                ))
-                .resolution(selection.partial()
-                        ? RelationResolutionFactory.partial(selection.reason())
-                        : RelationResolutionFactory.resolved())
-                .origin(mergeOrigin(
-                        injection.origin(),
-                        provider.observation().origin()
-                ))
+                .evidenceIds(evidenceIds)
+                .resolution(resolution.toRelationResolution())
+                .origin(origin)
                 .derivation(DerivationKind.DERIVED)
-                .confidenceHint(selection.confidence())
+                .confidenceHint(confidence.value())
                 .attrs(immutableAttrs(attrs));
 
-        Destination destination = destinationOf(provider);
         if (destination.symbol() != null) {
             builder.dstSymbol(destination.symbol());
         } else {
@@ -248,11 +313,6 @@ public class DiObservationResolver
             String parameterName,
             Selection selection
     ) {
-        Map<String, Object> attrs = baseAttrs(
-                injection,
-                injectionSiteSymbol,
-                injectionType
-        );
         String matchStrategy = selection.strategy() == null
                 ? "ambiguous"
                 : selection.strategy();
@@ -260,6 +320,45 @@ public class DiObservationResolver
                 ? "Multiple DI providers matched the injection type"
                 : selection.reason();
 
+        List<String> evidenceIds = mergeCandidateEvidence(
+                injection.evidenceIds(),
+                candidates
+        );
+        FactOriginKind origin = mergeCandidateOrigins(
+                injection.origin(),
+                candidates
+        );
+
+        RelationPolicyInput policyInput = RelationPolicyInput.builder()
+                .origin(origin)
+                .derivation(DerivationKind.DERIVED)
+                .targetReferenceKnown(true)
+                .targetReferenceAuthoritative(false)
+                .inferred(false)
+                .candidateCount(candidates.size())
+                .evidencePresent(!evidenceIds.isEmpty())
+                .sourceConfidenceHint(mergeCandidateConfidenceHint(
+                        injection.confidenceHint(),
+                        candidates
+                ))
+                .build();
+
+        ResolutionAssessment resolution = resolutionPolicy.assess(policyInput);
+        resolution = new ResolutionAssessment(
+                resolution.status(),
+                resolution.basis(),
+                partialReason
+        );
+        ConfidenceAssessment confidence = confidencePolicy.assess(
+                policyInput,
+                resolution
+        );
+
+        Map<String, Object> attrs = baseAttrs(
+                injection,
+                injectionSiteSymbol,
+                injectionType
+        );
         attrs.put("match_strategy", matchStrategy);
         attrs.put("candidate_count", candidates.size());
         attrs.put(
@@ -274,24 +373,17 @@ public class DiObservationResolver
         if (parameterName != null) {
             attrs.put("parameter_name", parameterName);
         }
+        putPolicyAttrs(attrs, resolution, confidence);
 
         return RelationFact.builder()
                 .kind(RelationKind.INJECTS)
                 .srcSymbol(sourceTypeSymbol)
                 .dstRawRef("type:" + injectionType)
-                .evidenceIds(mergeCandidateEvidence(
-                        injection.evidenceIds(),
-                        candidates
-                ))
-                .resolution(RelationResolutionFactory.partial(
-                        partialReason
-                ))
-                .origin(mergeCandidateOrigins(
-                        injection.origin(),
-                        candidates
-                ))
+                .evidenceIds(evidenceIds)
+                .resolution(resolution.toRelationResolution())
+                .origin(origin)
                 .derivation(DerivationKind.DERIVED)
-                .confidenceHint(0.6)
+                .confidenceHint(confidence.value())
                 .attrs(immutableAttrs(attrs))
                 .build();
     }
@@ -303,6 +395,37 @@ public class DiObservationResolver
             String injectionType,
             String internalTypeSymbol
     ) {
+        List<String> evidenceIds = sanitizeEvidenceIds(injection.evidenceIds());
+        FactOriginKind origin = injection.origin() == null
+                ? FactOriginKind.OBSERVED
+                : injection.origin();
+        String reason = internalTypeSymbol == null
+                ? "No DI provider observation matched the injection type"
+                : "Internal type found but DI provider observation was absent";
+
+        RelationPolicyInput policyInput = RelationPolicyInput.builder()
+                .origin(origin)
+                .derivation(DerivationKind.DERIVED)
+                .targetSymbolResolved(internalTypeSymbol != null)
+                .targetReferenceKnown(true)
+                .targetReferenceAuthoritative(false)
+                .inferred(true)
+                .candidateCount(0)
+                .evidencePresent(!evidenceIds.isEmpty())
+                .sourceConfidenceHint(injection.confidenceHint())
+                .build();
+
+        ResolutionAssessment resolution = resolutionPolicy.assess(policyInput);
+        resolution = new ResolutionAssessment(
+                resolution.status(),
+                resolution.basis(),
+                reason
+        );
+        ConfidenceAssessment confidence = confidencePolicy.assess(
+                policyInput,
+                resolution
+        );
+
         Map<String, Object> attrs = baseAttrs(
                 injection,
                 injectionSiteSymbol,
@@ -315,21 +438,16 @@ public class DiObservationResolver
                         : "internal_type_fallback"
         );
         attrs.put("candidate_count", 0);
+        putPolicyAttrs(attrs, resolution, confidence);
 
         RelationFact.RelationFactBuilder builder = RelationFact.builder()
                 .kind(RelationKind.INJECTS)
                 .srcSymbol(sourceTypeSymbol)
-                .evidenceIds(sanitizeEvidenceIds(injection.evidenceIds()))
-                .resolution(RelationResolutionFactory.partial(
-                        internalTypeSymbol == null
-                                ? "No DI provider observation matched the injection type"
-                                : "Internal type found but DI provider observation was absent"
-                ))
-                .origin(injection.origin() == null
-                        ? FactOriginKind.OBSERVED
-                        : injection.origin())
+                .evidenceIds(evidenceIds)
+                .resolution(resolution.toRelationResolution())
+                .origin(origin)
                 .derivation(DerivationKind.DERIVED)
-                .confidenceHint(internalTypeSymbol == null ? 0.4 : 0.6)
+                .confidenceHint(confidence.value())
                 .attrs(immutableAttrs(attrs));
 
         if (internalTypeSymbol != null) {
@@ -359,7 +477,6 @@ public class DiObservationResolver
                 return Selection.resolved(
                         qualified.get(0),
                         "qualifier",
-                        0.9,
                         candidates.size()
                 );
             }
@@ -379,10 +496,10 @@ public class DiObservationResolver
                     .filter(candidate -> candidate.matchesName(parameterName))
                     .toList();
             if (named.size() == 1) {
-                return Selection.resolved(
+                return Selection.partial(
                         named.get(0),
                         "parameter_name",
-                        0.7,
+                        "Provider selected by injection parameter name",
                         candidates.size()
                 );
             }
@@ -397,7 +514,6 @@ public class DiObservationResolver
                 return Selection.partial(
                         candidate,
                         "simple_type_name",
-                        0.6,
                         "Provider matched by unresolved simple type name",
                         1
                 );
@@ -405,7 +521,6 @@ public class DiObservationResolver
             return Selection.resolved(
                     candidate,
                     "exact_type",
-                    1.0,
                     1
             );
         }
@@ -417,7 +532,6 @@ public class DiObservationResolver
             return Selection.resolved(
                     primaryCandidates.get(0),
                     "primary",
-                    0.8,
                     candidates.size()
             );
         }
@@ -975,6 +1089,40 @@ public class DiObservationResolver
         return Collections.unmodifiableMap(new LinkedHashMap<>(attrs));
     }
 
+    private void putPolicyAttrs(
+            Map<String, Object> attrs,
+            ResolutionAssessment resolution,
+            ConfidenceAssessment confidence
+    ) {
+        attrs.put("resolution_basis", resolution.basis().code());
+        attrs.put("confidence_band", confidence.band().code());
+        attrs.put("default_visible", confidence.defaultVisible());
+    }
+
+    private Double maxConfidenceHint(Double left, Double right) {
+        if (left == null) {
+            return right;
+        }
+        if (right == null) {
+            return left;
+        }
+        return Math.max(left, right);
+    }
+
+    private Double mergeCandidateConfidenceHint(
+            Double injectionHint,
+            List<ProviderCandidate> candidates
+    ) {
+        Double merged = injectionHint;
+        for (ProviderCandidate candidate : candidates) {
+            merged = maxConfidenceHint(
+                    merged,
+                    candidate.observation().confidenceHint()
+            );
+        }
+        return merged;
+    }
+
     private String trimToNull(String value) {
         if (value == null) {
             return null;
@@ -998,7 +1146,6 @@ public class DiObservationResolver
     private record Selection(
             ProviderCandidate candidate,
             String strategy,
-            double confidence,
             boolean partial,
             String reason,
             int candidateCount
@@ -1006,13 +1153,11 @@ public class DiObservationResolver
         private static Selection resolved(
                 ProviderCandidate candidate,
                 String strategy,
-                double confidence,
                 int candidateCount
         ) {
             return new Selection(
                     candidate,
                     strategy,
-                    confidence,
                     false,
                     null,
                     candidateCount
@@ -1022,14 +1167,12 @@ public class DiObservationResolver
         private static Selection partial(
                 ProviderCandidate candidate,
                 String strategy,
-                double confidence,
                 String reason,
                 int candidateCount
         ) {
             return new Selection(
                     candidate,
                     strategy,
-                    confidence,
                     true,
                     reason,
                     candidateCount
@@ -1048,7 +1191,6 @@ public class DiObservationResolver
             return new Selection(
                     null,
                     strategy,
-                    0.0,
                     false,
                     reason,
                     candidateCount

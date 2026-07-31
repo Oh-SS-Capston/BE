@@ -10,13 +10,20 @@ import com.example.ossdoc.domain.extraction.enums.DerivationKind;
 import com.example.ossdoc.domain.extraction.enums.FactOriginKind;
 import com.example.ossdoc.domain.extraction.enums.ObservationKind;
 import com.example.ossdoc.domain.extraction.enums.RelationKind;
-import com.example.ossdoc.domain.extraction.service.support.util.RelationResolutionFactory;
+import com.example.ossdoc.domain.extraction.service.support.policy.ConfidenceAssessment;
+import com.example.ossdoc.domain.extraction.service.support.policy.RelationConfidencePolicy;
+import com.example.ossdoc.domain.extraction.service.support.policy.RelationPolicyInput;
+import com.example.ossdoc.domain.extraction.service.support.policy.RelationResolutionPolicy;
+import com.example.ossdoc.domain.extraction.service.support.policy.ResolutionAssessment;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -26,6 +33,27 @@ public class ReflectionObservationResolver implements ObservationRelationResolve
 
     private static final String UNKNOWN_TYPE = "<unresolved-reflection-type>";
     private static final String UNKNOWN_MEMBER = "<unresolved-reflection-member>";
+
+    private RelationResolutionPolicy resolutionPolicy;
+    private RelationConfidencePolicy confidencePolicy;
+
+    public ReflectionObservationResolver() {
+        this.resolutionPolicy = new RelationResolutionPolicy();
+        this.confidencePolicy = new RelationConfidencePolicy();
+    }
+
+    @Autowired(required = false)
+    void configurePolicies(
+            RelationResolutionPolicy resolutionPolicy,
+            RelationConfidencePolicy confidencePolicy
+    ) {
+        if (resolutionPolicy != null) {
+            this.resolutionPolicy = resolutionPolicy;
+        }
+        if (confidencePolicy != null) {
+            this.confidencePolicy = confidencePolicy;
+        }
+    }
 
     @Override
     public Set<ObservationKind> supportedKinds() {
@@ -120,15 +148,67 @@ public class ReflectionObservationResolver implements ObservationRelationResolve
                     RelationKind.REFLECTS_TYPE,
                     "reflection:" + (apiMethod == null ? "unknown" : apiMethod),
                     "Reflection API kind could not be classified",
-                    "unknown_api"
+                    "unknown_api",
+                    apiMethod != null,
+                    0
             );
         };
 
-        Map<String, Object> attrs = new LinkedHashMap<>(sourceAttrs);
+        List<String> evidenceIds = sanitizeEvidenceIds(
+                observation.evidenceIds()
+        );
+        FactOriginKind origin = observation.origin() == null
+                ? FactOriginKind.OBSERVED
+                : observation.origin();
+
+        RelationPolicyInput policyInput = RelationPolicyInput.builder()
+                .origin(origin)
+                .derivation(DerivationKind.DERIVED)
+                .targetSymbolResolved(target.symbolResolved())
+                .targetReferenceKnown(target.referenceKnown())
+                .targetReferenceAuthoritative(
+                        target.referenceAuthoritative()
+                )
+                .inferred(target.inferred())
+                .candidateCount(target.candidateCount())
+                .evidencePresent(!evidenceIds.isEmpty())
+                .sourceConfidenceHint(observation.confidenceHint())
+                .build();
+
+        ResolutionAssessment policyResolution =
+                resolutionPolicy.assess(policyInput);
+        ResolutionAssessment resolution = target.reason() == null
+                || policyResolution.status()
+                == com.example.ossdoc.domain.extraction.enums.ResolutionStatus.RESOLVED
+                ? policyResolution
+                : new ResolutionAssessment(
+                        policyResolution.status(),
+                        policyResolution.basis(),
+                        target.reason()
+                );
+        ConfidenceAssessment confidence = confidencePolicy.assess(
+                policyInput,
+                resolution
+        );
+
+        Map<String, Object> attrs = copyNonNullAttrs(sourceAttrs);
         attrs.put("resolver", getClass().getSimpleName());
         attrs.put("semantic_kind", "reflection_reference");
         attrs.put("reflection_kind", reflectionKind.code);
         attrs.put("match_strategy", target.matchStrategy());
+        attrs.put(
+                "target_resolution",
+                resolution.status().name().toLowerCase(Locale.ROOT)
+        );
+        attrs.put("resolution_basis", resolution.basis().code());
+        attrs.put("confidence_band", confidence.band().code());
+        attrs.put("default_visible", confidence.defaultVisible());
+        if (target.candidateCount() > 1) {
+            attrs.put("candidate_count", target.candidateCount());
+        }
+        if (target.inferred()) {
+            attrs.put("inferred_match", true);
+        }
         if (apiMethod != null) {
             attrs.put("api_method", apiMethod);
         }
@@ -139,26 +219,15 @@ public class ReflectionObservationResolver implements ObservationRelationResolve
             attrs.put("member_name", memberName);
         }
 
-        double fallbackConfidence = target.resolved() ? 0.85 : 0.35;
-        double confidence = observation.confidenceHint() == null
-                ? fallbackConfidence
-                : target.resolved()
-                ? Math.min(observation.confidenceHint(), 0.9)
-                : Math.min(observation.confidenceHint(), fallbackConfidence);
-
         RelationFact.RelationFactBuilder builder = RelationFact.builder()
                 .kind(target.relationKind())
                 .srcSymbol(siteSymbol)
-                .evidenceIds(sanitizeEvidenceIds(observation.evidenceIds()))
-                .resolution(target.resolved()
-                        ? RelationResolutionFactory.resolved()
-                        : RelationResolutionFactory.partial(target.reason()))
-                .origin(observation.origin() == null
-                        ? FactOriginKind.OBSERVED
-                        : observation.origin())
+                .evidenceIds(evidenceIds)
+                .resolution(resolution.toRelationResolution())
+                .origin(origin)
                 .derivation(DerivationKind.DERIVED)
-                .confidenceHint(confidence)
-                .attrs(Map.copyOf(attrs));
+                .confidenceHint(confidence.value())
+                .attrs(immutableAttrs(attrs));
 
         if (target.dstSymbol() != null) {
             builder.dstSymbol(target.dstSymbol());
@@ -179,7 +248,9 @@ public class ReflectionObservationResolver implements ObservationRelationResolve
                     RelationKind.REFLECTS_TYPE,
                     "type:" + UNKNOWN_TYPE,
                     "Reflection target type could not be statically determined",
-                    "unresolved_type"
+                    "unresolved_type",
+                    false,
+                    0
             );
         }
 
@@ -196,7 +267,9 @@ public class ReflectionObservationResolver implements ObservationRelationResolve
                     RelationKind.REFLECTS_TYPE,
                     "type:" + normalizedType,
                     "Multiple extracted types matched the reflection target",
-                    "ambiguous_type"
+                    "ambiguous_type",
+                    true,
+                    matches.size()
             );
         }
 
@@ -204,7 +277,9 @@ public class ReflectionObservationResolver implements ObservationRelationResolve
                 RelationKind.REFLECTS_TYPE,
                 "type:" + normalizedType,
                 "Reflection target type is statically known but not present in extracted symbols",
-                "static_type_raw_ref"
+                "static_type_raw_ref",
+                true,
+                0
         );
     }
 
@@ -221,7 +296,11 @@ public class ReflectionObservationResolver implements ObservationRelationResolve
                     RelationKind.REFLECTS_METHOD,
                     methodRawRef(normalizedType, normalizedMember, parameterTypes),
                     "Reflection method owner or member name could not be statically determined",
-                    "unresolved_method"
+                    "unresolved_method",
+                    normalizedType != null
+                            || normalizedMember != null
+                            || (parameterTypes != null && !parameterTypes.isEmpty()),
+                    0
             );
         }
 
@@ -245,7 +324,9 @@ public class ReflectionObservationResolver implements ObservationRelationResolve
                     RelationKind.REFLECTS_METHOD,
                     methodRawRef(normalizedType, normalizedMember, parameterTypes),
                     "Multiple reflected method candidates matched the extracted symbols",
-                    "ambiguous_method_overload"
+                    "ambiguous_method_overload",
+                    true,
+                    matches.size()
             );
         }
 
@@ -253,7 +334,9 @@ public class ReflectionObservationResolver implements ObservationRelationResolve
                 RelationKind.REFLECTS_METHOD,
                 methodRawRef(normalizedType, normalizedMember, parameterTypes),
                 "Reflected method was statically described but no extracted symbol matched",
-                "static_method_raw_ref"
+                "static_method_raw_ref",
+                true,
+                0
         );
     }
 
@@ -269,7 +352,9 @@ public class ReflectionObservationResolver implements ObservationRelationResolve
                     RelationKind.REFLECTS_FIELD,
                     fieldRawRef(normalizedType, normalizedMember),
                     "Reflection field owner or member name could not be statically determined",
-                    "unresolved_field"
+                    "unresolved_field",
+                    normalizedType != null || normalizedMember != null,
+                    0
             );
         }
 
@@ -291,7 +376,9 @@ public class ReflectionObservationResolver implements ObservationRelationResolve
                     RelationKind.REFLECTS_FIELD,
                     fieldRawRef(normalizedType, normalizedMember),
                     "Multiple reflected field candidates matched the extracted symbols",
-                    "ambiguous_field"
+                    "ambiguous_field",
+                    true,
+                    matches.size()
             );
         }
 
@@ -299,7 +386,9 @@ public class ReflectionObservationResolver implements ObservationRelationResolve
                 RelationKind.REFLECTS_FIELD,
                 fieldRawRef(normalizedType, normalizedMember),
                 "Reflected field was statically described but no extracted symbol matched",
-                "static_field_raw_ref"
+                "static_field_raw_ref",
+                true,
+                0
         );
     }
 
@@ -314,7 +403,9 @@ public class ReflectionObservationResolver implements ObservationRelationResolve
                     RelationKind.REFLECTS_CONSTRUCTOR,
                     constructorRawRef(null, parameterTypes),
                     "Reflection constructor target type could not be statically determined",
-                    "unresolved_constructor"
+                    "unresolved_constructor",
+                    parameterTypes != null && !parameterTypes.isEmpty(),
+                    0
             );
         }
 
@@ -338,7 +429,9 @@ public class ReflectionObservationResolver implements ObservationRelationResolve
                     RelationKind.REFLECTS_CONSTRUCTOR,
                     constructorRawRef(normalizedType, parameterTypes),
                     "Multiple reflected constructor candidates matched the extracted symbols",
-                    "ambiguous_constructor"
+                    "ambiguous_constructor",
+                    true,
+                    matches.size()
             );
         }
 
@@ -346,7 +439,9 @@ public class ReflectionObservationResolver implements ObservationRelationResolve
                 RelationKind.REFLECTS_CONSTRUCTOR,
                 constructorRawRef(normalizedType, parameterTypes),
                 "Reflected constructor was statically described but no extracted symbol matched",
-                "static_constructor_raw_ref"
+                "static_constructor_raw_ref",
+                true,
+                0
         );
     }
 
@@ -571,6 +666,27 @@ public class ReflectionObservationResolver implements ObservationRelationResolve
         return List.copyOf(result);
     }
 
+    private Map<String, Object> copyNonNullAttrs(
+            Map<String, Object> source
+    ) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        if (source == null) {
+            return result;
+        }
+        for (Map.Entry<String, Object> entry : source.entrySet()) {
+            if (entry.getKey() != null && entry.getValue() != null) {
+                result.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return result;
+    }
+
+    private Map<String, Object> immutableAttrs(
+            Map<String, Object> attrs
+    ) {
+        return Collections.unmodifiableMap(new LinkedHashMap<>(attrs));
+    }
+
     private List<String> sanitizeEvidenceIds(List<String> source) {
         if (source == null || source.isEmpty()) {
             return List.of();
@@ -646,10 +762,18 @@ public class ReflectionObservationResolver implements ObservationRelationResolve
             RelationKind relationKind,
             String dstSymbol,
             String dstRawRef,
-            boolean resolved,
+            boolean symbolResolved,
+            boolean referenceKnown,
+            boolean referenceAuthoritative,
+            boolean inferred,
+            int candidateCount,
             String reason,
             String matchStrategy
     ) {
+        private ResolutionTarget {
+            candidateCount = Math.max(0, candidateCount);
+        }
+
         private static ResolutionTarget resolved(
                 RelationKind kind,
                 String dstSymbol,
@@ -660,6 +784,10 @@ public class ReflectionObservationResolver implements ObservationRelationResolve
                     dstSymbol,
                     null,
                     true,
+                    true,
+                    true,
+                    false,
+                    1,
                     null,
                     matchStrategy
             );
@@ -669,13 +797,19 @@ public class ReflectionObservationResolver implements ObservationRelationResolve
                 RelationKind kind,
                 String dstRawRef,
                 String reason,
-                String matchStrategy
+                String matchStrategy,
+                boolean referenceKnown,
+                int candidateCount
         ) {
             return new ResolutionTarget(
                     kind,
                     null,
                     dstRawRef,
                     false,
+                    referenceKnown,
+                    false,
+                    false,
+                    candidateCount,
                     reason,
                     matchStrategy
             );

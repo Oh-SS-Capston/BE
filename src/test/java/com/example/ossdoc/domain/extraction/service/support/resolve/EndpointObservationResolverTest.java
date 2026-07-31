@@ -27,7 +27,7 @@ class EndpointObservationResolverTest {
             new EndpointObservationResolver();
 
     @Test
-    @DisplayName("복수 HTTP method와 path를 조합해 HANDLES_ENDPOINT를 생성한다")
+    @DisplayName("복수 HTTP method와 path를 공통 정책 기반 HANDLES_ENDPOINT로 생성한다")
     void resolvesMethodAndPathCombinations() {
         ObservationFact observation = ObservationFact.builder()
                 .kind(ObservationKind.HTTP_ENDPOINT)
@@ -71,27 +71,19 @@ class EndpointObservationResolverTest {
                     "method:sample.UserController#find()",
                     relation.srcSymbol()
             );
-            assertEquals(
-                    ResolutionStatus.RESOLVED,
-                    relation.resolution().status()
-            );
+            assertEquals(ResolutionStatus.RESOLVED, relation.resolution().status());
             assertEquals(DerivationKind.DERIVED, relation.derivation());
             assertEquals(FactOriginKind.AST, relation.origin());
-            assertEquals(
-                    List.of("ev-method", "ev-class"),
-                    relation.evidenceIds()
-            );
-            assertEquals(
-                    "EndpointObservationResolver",
-                    relation.attrs().get("resolver")
-            );
-            assertTrue(relation.attrs().containsKey("http_method"));
-            assertTrue(relation.attrs().containsKey("path"));
+            assertEquals(List.of("ev-method", "ev-class"), relation.evidenceIds());
+            assertEquals(0.923, relation.confidenceHint());
+            assertEquals("exact_reference", relation.attrs().get("resolution_basis"));
+            assertEquals("high", relation.attrs().get("confidence_band"));
+            assertEquals(true, relation.attrs().get("default_visible"));
         }
     }
 
     @Test
-    @DisplayName("경로를 해석하지 못해도 PARTIAL HANDLES_ENDPOINT를 보존한다")
+    @DisplayName("경로를 해석하지 못하면 공통 정책의 RAW_REFERENCE PARTIAL로 보존한다")
     void preservesUnresolvedPathAsPartialRelation() {
         ObservationFact observation = ObservationFact.builder()
                 .kind(ObservationKind.HTTP_ENDPOINT)
@@ -114,18 +106,17 @@ class EndpointObservationResolverTest {
         );
 
         assertEquals(1, result.relations().size());
-
         RelationFact relation = result.relations().get(0);
         assertEquals("GET <unresolved-path>", relation.dstRawRef());
-        assertEquals(
-                ResolutionStatus.PARTIAL,
-                relation.resolution().status()
-        );
+        assertEquals(ResolutionStatus.PARTIAL, relation.resolution().status());
         assertEquals(
                 "HTTP endpoint path could not be resolved",
                 relation.resolution().reason()
         );
-        assertEquals(0.6, relation.confidenceHint());
+        assertEquals(0.66, relation.confidenceHint());
+        assertEquals("raw_reference", relation.attrs().get("resolution_basis"));
+        assertEquals("medium", relation.attrs().get("confidence_band"));
+        assertEquals(false, relation.attrs().get("default_visible"));
     }
 
     @Test
@@ -145,9 +136,7 @@ class EndpointObservationResolverTest {
 
         assertTrue(result.relations().isEmpty());
         assertFalse(result.warnings().isEmpty());
-        assertTrue(
-                result.warnings().get(0).contains("siteSymbol")
-        );
+        assertTrue(result.warnings().get(0).contains("siteSymbol"));
     }
 
     private ObservationResolutionContext contextOf(
@@ -158,7 +147,6 @@ class EndpointObservationResolverTest {
                         .httpEndpoints(List.of(observations))
                         .build())
                 .build();
-
         return ObservationResolutionContext.from(aggregate);
     }
 }

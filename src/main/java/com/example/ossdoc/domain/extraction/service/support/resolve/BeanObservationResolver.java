@@ -8,7 +8,12 @@ import com.example.ossdoc.domain.extraction.enums.DerivationKind;
 import com.example.ossdoc.domain.extraction.enums.FactOriginKind;
 import com.example.ossdoc.domain.extraction.enums.ObservationKind;
 import com.example.ossdoc.domain.extraction.enums.RelationKind;
-import com.example.ossdoc.domain.extraction.service.support.util.RelationResolutionFactory;
+import com.example.ossdoc.domain.extraction.service.support.policy.ConfidenceAssessment;
+import com.example.ossdoc.domain.extraction.service.support.policy.RelationConfidencePolicy;
+import com.example.ossdoc.domain.extraction.service.support.policy.RelationPolicyInput;
+import com.example.ossdoc.domain.extraction.service.support.policy.RelationResolutionPolicy;
+import com.example.ossdoc.domain.extraction.service.support.policy.ResolutionAssessment;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.lang.reflect.Array;
@@ -21,16 +26,31 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-/**
- * DI_PROVIDER observation을 DECLARES_BEAN 의미 관계로 승격한다.
- *
- * <p>명시된 Bean 이름이나 alias가 여러 개면 이름마다 relation을 생성한다.
- * Bean 이름이 없지만 제공 타입 또는 provider symbol에서 이름을 추론할 수 있으면
- * PARTIAL relation으로 보존한다.</p>
- */
+/** DI_PROVIDER observation을 DECLARES_BEAN 의미 관계로 승격한다. */
 @Component
 public class BeanObservationResolver
         implements ObservationRelationResolver {
+
+    private RelationResolutionPolicy resolutionPolicy;
+    private RelationConfidencePolicy confidencePolicy;
+
+    public BeanObservationResolver() {
+        this.resolutionPolicy = new RelationResolutionPolicy();
+        this.confidencePolicy = new RelationConfidencePolicy();
+    }
+
+    @Autowired(required = false)
+    void configurePolicies(
+            RelationResolutionPolicy resolutionPolicy,
+            RelationConfidencePolicy confidencePolicy
+    ) {
+        if (resolutionPolicy != null) {
+            this.resolutionPolicy = resolutionPolicy;
+        }
+        if (confidencePolicy != null) {
+            this.confidencePolicy = confidencePolicy;
+        }
+    }
 
     @Override
     public Set<ObservationKind> supportedKinds() {
@@ -65,15 +85,10 @@ public class BeanObservationResolver
 
         List<RelationFact> relations = new ArrayList<>();
         List<String> warnings = new ArrayList<>();
-
         for (ObservationFact provider : providers) {
             resolveProvider(provider, relations, warnings);
         }
-
-        return new ObservationResolutionResult(
-                relations,
-                warnings
-        );
+        return new ObservationResolutionResult(relations, warnings);
     }
 
     private void resolveProvider(
@@ -87,32 +102,24 @@ public class BeanObservationResolver
 
         String siteSymbol = trimToNull(provider.siteSymbol());
         if (siteSymbol == null) {
-            warnings.add(
-                    "DI_PROVIDER observation has no siteSymbol and was skipped"
-            );
+            warnings.add("DI_PROVIDER observation has no siteSymbol and was skipped");
             return;
         }
 
         Map<String, Object> observationAttrs = provider.attrs() == null
                 ? Map.of()
                 : provider.attrs();
-
         String providedType = resolveProvidedType(
                 provider.targetTypeRef(),
                 observationAttrs.get("provided_type")
         );
-
         List<String> declaredBeanNames = normalizeNames(
                 stringList(observationAttrs.get("bean_names"))
         );
 
         NameResolution names = declaredBeanNames.isEmpty()
                 ? inferBeanNames(siteSymbol, providedType)
-                : new NameResolution(
-                        declaredBeanNames,
-                        true,
-                        null
-                );
+                : new NameResolution(declaredBeanNames, true, null);
 
         if (names.beanNames().isEmpty()) {
             warnings.add(
@@ -138,51 +145,72 @@ public class BeanObservationResolver
             String beanName,
             String providedType,
             boolean declaredName,
-            String partialReason
+            String reasonOverride
     ) {
+        List<String> evidenceIds = sanitizeEvidenceIds(provider.evidenceIds());
+        FactOriginKind origin = provider.origin() == null
+                ? FactOriginKind.OBSERVED
+                : provider.origin();
+
+        RelationPolicyInput policyInput = RelationPolicyInput.builder()
+                .origin(origin)
+                .derivation(DerivationKind.DERIVED)
+                .targetReferenceKnown(true)
+                .targetReferenceAuthoritative(true)
+                .inferred(!declaredName)
+                .candidateCount(1)
+                .evidencePresent(!evidenceIds.isEmpty())
+                .sourceConfidenceHint(provider.confidenceHint())
+                .build();
+
+        ResolutionAssessment resolution = resolutionPolicy.assess(policyInput);
+        if (reasonOverride != null) {
+            resolution = new ResolutionAssessment(
+                    resolution.status(),
+                    resolution.basis(),
+                    reasonOverride
+            );
+        }
+        ConfidenceAssessment confidence = confidencePolicy.assess(
+                policyInput,
+                resolution
+        );
+
         Map<String, Object> attrs = copyNonNullAttrs(provider.attrs());
         attrs.put("bean_name", beanName);
         attrs.put("bean_reference", "bean:" + beanName);
         attrs.put("name_resolution", declaredName ? "declared" : "inferred");
         attrs.put("semantic_kind", "bean_declaration");
         attrs.put("resolver", getClass().getSimpleName());
-
         if (providedType != null) {
             attrs.put("provided_type", providedType);
         }
-
-        double fallbackConfidence = declaredName ? 0.9 : 0.7;
-        double confidence = provider.confidenceHint() == null
-                ? fallbackConfidence
-                : declaredName
-                ? provider.confidenceHint()
-                : Math.min(provider.confidenceHint(), fallbackConfidence);
+        putPolicyAttrs(attrs, resolution, confidence);
 
         return RelationFact.builder()
                 .kind(RelationKind.DECLARES_BEAN)
                 .srcSymbol(provider.siteSymbol())
                 .dstRawRef("bean:" + beanName)
-                .evidenceIds(sanitizeEvidenceIds(provider.evidenceIds()))
-                .resolution(
-                        declaredName
-                                ? RelationResolutionFactory.resolved()
-                                : RelationResolutionFactory.partial(partialReason)
-                )
-                .origin(provider.origin() == null
-                        ? FactOriginKind.OBSERVED
-                        : provider.origin())
+                .evidenceIds(evidenceIds)
+                .resolution(resolution.toRelationResolution())
+                .origin(origin)
                 .derivation(DerivationKind.DERIVED)
-                .confidenceHint(confidence)
-                .attrs(Collections.unmodifiableMap(
-                        new LinkedHashMap<>(attrs)
-                ))
+                .confidenceHint(confidence.value())
+                .attrs(Collections.unmodifiableMap(new LinkedHashMap<>(attrs)))
                 .build();
     }
 
-    private NameResolution inferBeanNames(
-            String siteSymbol,
-            String providedType
+    private void putPolicyAttrs(
+            Map<String, Object> attrs,
+            ResolutionAssessment resolution,
+            ConfidenceAssessment confidence
     ) {
+        attrs.put("resolution_basis", resolution.basis().code());
+        attrs.put("confidence_band", confidence.band().code());
+        attrs.put("default_visible", confidence.defaultVisible());
+    }
+
+    private NameResolution inferBeanNames(String siteSymbol, String providedType) {
         String fromType = defaultBeanNameFromType(providedType);
         if (fromType != null) {
             return new NameResolution(
@@ -208,56 +236,40 @@ public class BeanObservationResolver
         );
     }
 
-    private String resolveProvidedType(
-            TypeRef targetTypeRef,
-            Object rawProvidedType
-    ) {
+    private String resolveProvidedType(TypeRef targetTypeRef, Object rawProvidedType) {
         String fromAttrs = trimToNull(
-                rawProvidedType == null
-                        ? null
-                        : String.valueOf(rawProvidedType)
+                rawProvidedType == null ? null : String.valueOf(rawProvidedType)
         );
-
-        if (fromAttrs != null) {
-            return fromAttrs;
-        }
-
-        return targetTypeRef == null
-                ? null
-                : trimToNull(targetTypeRef.raw());
+        return fromAttrs != null
+                ? fromAttrs
+                : targetTypeRef == null ? null : trimToNull(targetTypeRef.raw());
     }
 
     private String defaultBeanNameFromType(String providedType) {
         String normalized = trimToNull(providedType);
-        if (normalized == null
-                || "void".equals(normalized)) {
+        if (normalized == null || "void".equals(normalized)) {
             return null;
         }
-
-        int packageSeparator = normalized.lastIndexOf('.');
-        int nestedSeparator = normalized.lastIndexOf('$');
-        int separator = Math.max(packageSeparator, nestedSeparator);
-
+        int separator = Math.max(
+                normalized.lastIndexOf('.'),
+                normalized.lastIndexOf('$')
+        );
         String simpleName = separator >= 0
                 ? normalized.substring(separator + 1)
                 : normalized;
-
         return trimToNull(decapitalize(simpleName));
     }
-
 
     private String decapitalize(String value) {
         String normalized = trimToNull(value);
         if (normalized == null) {
             return null;
         }
-
         if (normalized.length() > 1
                 && Character.isUpperCase(normalized.charAt(0))
                 && Character.isUpperCase(normalized.charAt(1))) {
             return normalized;
         }
-
         return Character.toLowerCase(normalized.charAt(0))
                 + normalized.substring(1);
     }
@@ -267,7 +279,6 @@ public class BeanObservationResolver
         if (symbol == null) {
             return null;
         }
-
         int hashIndex = symbol.lastIndexOf('#');
         if (hashIndex >= 0 && hashIndex + 1 < symbol.length()) {
             String methodPart = symbol.substring(hashIndex + 1);
@@ -277,26 +288,20 @@ public class BeanObservationResolver
             }
             return trimToNull(methodPart);
         }
-
         if (symbol.startsWith("type:")) {
-            return defaultBeanNameFromType(
-                    symbol.substring("type:".length())
-            );
+            return defaultBeanNameFromType(symbol.substring("type:".length()));
         }
-
         return null;
     }
 
     private List<String> normalizeNames(List<String> rawNames) {
         LinkedHashSet<String> normalized = new LinkedHashSet<>();
-
         for (String rawName : rawNames) {
             String name = trimToNull(rawName);
             if (name != null) {
                 normalized.add(name);
             }
         }
-
         return List.copyOf(normalized);
     }
 
@@ -304,20 +309,15 @@ public class BeanObservationResolver
         if (raw == null) {
             return List.of();
         }
-
         LinkedHashSet<String> result = new LinkedHashSet<>();
         collectStrings(raw, result);
         return List.copyOf(result);
     }
 
-    private void collectStrings(
-            Object raw,
-            Collection<String> destination
-    ) {
+    private void collectStrings(Object raw, Collection<String> destination) {
         if (raw == null) {
             return;
         }
-
         if (raw instanceof CharSequence sequence) {
             String value = trimToNull(sequence.toString());
             if (value != null) {
@@ -325,14 +325,12 @@ public class BeanObservationResolver
             }
             return;
         }
-
         if (raw instanceof Collection<?> collection) {
             for (Object item : collection) {
                 collectStrings(item, destination);
             }
             return;
         }
-
         if (raw.getClass().isArray()) {
             int length = Array.getLength(raw);
             for (int index = 0; index < length; index++) {
@@ -340,29 +338,22 @@ public class BeanObservationResolver
             }
             return;
         }
-
         String value = trimToNull(String.valueOf(raw));
         if (value != null) {
             destination.add(value);
         }
     }
 
-    private Map<String, Object> copyNonNullAttrs(
-            Map<String, Object> source
-    ) {
+    private Map<String, Object> copyNonNullAttrs(Map<String, Object> source) {
         Map<String, Object> copied = new LinkedHashMap<>();
-
         if (source == null || source.isEmpty()) {
             return copied;
         }
-
         for (Map.Entry<String, Object> entry : source.entrySet()) {
-            if (entry.getKey() == null || entry.getValue() == null) {
-                continue;
+            if (entry.getKey() != null && entry.getValue() != null) {
+                copied.put(entry.getKey(), entry.getValue());
             }
-            copied.put(entry.getKey(), entry.getValue());
         }
-
         return copied;
     }
 
@@ -370,7 +361,6 @@ public class BeanObservationResolver
         if (source == null || source.isEmpty()) {
             return List.of();
         }
-
         LinkedHashSet<String> result = new LinkedHashSet<>();
         for (String evidenceId : source) {
             String normalized = trimToNull(evidenceId);
@@ -385,7 +375,6 @@ public class BeanObservationResolver
         if (value == null) {
             return null;
         }
-
         String trimmed = value.trim();
         return trimmed.isEmpty() ? null : trimmed;
     }

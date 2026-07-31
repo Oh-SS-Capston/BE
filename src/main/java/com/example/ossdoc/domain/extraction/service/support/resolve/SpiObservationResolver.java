@@ -8,13 +8,20 @@ import com.example.ossdoc.domain.extraction.enums.DerivationKind;
 import com.example.ossdoc.domain.extraction.enums.FactOriginKind;
 import com.example.ossdoc.domain.extraction.enums.ObservationKind;
 import com.example.ossdoc.domain.extraction.enums.RelationKind;
-import com.example.ossdoc.domain.extraction.service.support.util.RelationResolutionFactory;
+import com.example.ossdoc.domain.extraction.service.support.policy.ConfidenceAssessment;
+import com.example.ossdoc.domain.extraction.service.support.policy.RelationConfidencePolicy;
+import com.example.ossdoc.domain.extraction.service.support.policy.RelationPolicyInput;
+import com.example.ossdoc.domain.extraction.service.support.policy.RelationResolutionPolicy;
+import com.example.ossdoc.domain.extraction.service.support.policy.ResolutionAssessment;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -23,6 +30,27 @@ import java.util.Set;
 public class SpiObservationResolver implements ObservationRelationResolver {
 
     private static final String UNRESOLVED_SERVICE = "<unresolved-service>";
+
+    private RelationResolutionPolicy resolutionPolicy;
+    private RelationConfidencePolicy confidencePolicy;
+
+    public SpiObservationResolver() {
+        this.resolutionPolicy = new RelationResolutionPolicy();
+        this.confidencePolicy = new RelationConfidencePolicy();
+    }
+
+    @Autowired(required = false)
+    void configurePolicies(
+            RelationResolutionPolicy resolutionPolicy,
+            RelationConfidencePolicy confidencePolicy
+    ) {
+        if (resolutionPolicy != null) {
+            this.resolutionPolicy = resolutionPolicy;
+        }
+        if (confidencePolicy != null) {
+            this.confidencePolicy = confidencePolicy;
+        }
+    }
 
     @Override
     public Set<ObservationKind> supportedKinds() {
@@ -39,7 +67,9 @@ public class SpiObservationResolver implements ObservationRelationResolver {
     }
 
     @Override
-    public ObservationResolutionResult resolve(ObservationResolutionContext context) {
+    public ObservationResolutionResult resolve(
+            ObservationResolutionContext context
+    ) {
         if (context == null) {
             return new ObservationResolutionResult(
                     List.of(),
@@ -138,7 +168,10 @@ public class SpiObservationResolver implements ObservationRelationResolver {
 
         String siteSymbol = trimToNull(observation.siteSymbol());
         if (siteSymbol == null) {
-            warnings.add(observation.kind() + " observation has no siteSymbol and was skipped");
+            warnings.add(
+                    observation.kind()
+                            + " observation has no siteSymbol and was skipped"
+            );
             return;
         }
 
@@ -152,8 +185,8 @@ public class SpiObservationResolver implements ObservationRelationResolver {
                 observation,
                 RelationKind.LOADS_SERVICE,
                 siteSymbol,
-                service.resolved(),
-                "SPI service type could not be fully resolved",
+                service,
+                false,
                 attrs
         );
         applyDestination(builder, service, "service:");
@@ -201,12 +234,15 @@ public class SpiObservationResolver implements ObservationRelationResolver {
         ServiceTarget service = serviceTarget(observation);
 
         if (implementationType == null && moduleSymbol == null) {
-            warnings.add(observation.kind() + " observation has no provider or siteSymbol and was skipped");
+            warnings.add(
+                    observation.kind()
+                            + " observation has no provider or siteSymbol and was skipped"
+            );
             return;
         }
 
-        boolean resolved = implementationType != null && service.resolved();
-        String sourceSymbol = implementationType == null
+        boolean inferredProvider = implementationType == null;
+        String sourceSymbol = inferredProvider
                 ? moduleSymbol
                 : normalizeTypeSymbol(implementationType);
 
@@ -214,6 +250,10 @@ public class SpiObservationResolver implements ObservationRelationResolver {
         attrs.put("semantic_kind", "spi_provider");
         attrs.put("mechanism", mechanism);
         attrs.put("service_type", service.rawType());
+        attrs.put(
+                "provider_resolution",
+                inferredProvider ? "module_fallback" : "explicit_implementation"
+        );
         if (implementationType != null) {
             attrs.put("implementation_type", rawType(implementationType));
         }
@@ -225,10 +265,8 @@ public class SpiObservationResolver implements ObservationRelationResolver {
                 observation,
                 RelationKind.PROVIDES_SPI,
                 sourceSymbol,
-                resolved,
-                implementationType == null
-                        ? "SPI implementation type is missing"
-                        : "SPI service type could not be fully resolved",
+                service,
+                inferredProvider,
                 attrs
         );
         applyDestination(builder, service, "service:");
@@ -239,30 +277,52 @@ public class SpiObservationResolver implements ObservationRelationResolver {
             ObservationFact observation,
             RelationKind kind,
             String sourceSymbol,
-            boolean resolved,
-            String partialReason,
+            ServiceTarget service,
+            boolean inferred,
             Map<String, Object> attrs
     ) {
-        double fallback = resolved ? 0.9 : 0.5;
-        double confidence = observation.confidenceHint() == null
-                ? fallback
-                : resolved
-                ? observation.confidenceHint()
-                : Math.min(observation.confidenceHint(), fallback);
+        List<String> evidenceIds = sanitizeEvidenceIds(
+                observation.evidenceIds()
+        );
+        FactOriginKind origin = observation.origin() == null
+                ? FactOriginKind.OBSERVED
+                : observation.origin();
+
+        RelationPolicyInput policyInput = RelationPolicyInput.builder()
+                .origin(origin)
+                .derivation(DerivationKind.DERIVED)
+                .targetSymbolResolved(service.symbolResolved())
+                .targetReferenceKnown(service.referenceKnown())
+                .targetReferenceAuthoritative(
+                        service.referenceAuthoritative()
+                )
+                .inferred(inferred)
+                .candidateCount(service.referenceKnown() ? 1 : 0)
+                .evidencePresent(!evidenceIds.isEmpty())
+                .sourceConfidenceHint(observation.confidenceHint())
+                .build();
+
+        ResolutionAssessment resolution = resolutionPolicy.assess(policyInput);
+        ConfidenceAssessment confidence = confidencePolicy.assess(
+                policyInput,
+                resolution
+        );
+
+        attrs.put(
+                "target_resolution",
+                resolution.status().name().toLowerCase(Locale.ROOT)
+        );
+        putPolicyAttrs(attrs, resolution, confidence);
 
         return RelationFact.builder()
                 .kind(kind)
                 .srcSymbol(sourceSymbol)
-                .evidenceIds(sanitizeEvidenceIds(observation.evidenceIds()))
-                .resolution(resolved
-                        ? RelationResolutionFactory.resolved()
-                        : RelationResolutionFactory.partial(partialReason))
-                .origin(observation.origin() == null
-                        ? FactOriginKind.OBSERVED
-                        : observation.origin())
+                .evidenceIds(evidenceIds)
+                .resolution(resolution.toRelationResolution())
+                .origin(origin)
                 .derivation(DerivationKind.DERIVED)
-                .confidenceHint(confidence)
-                .attrs(Map.copyOf(attrs));
+                .confidenceHint(confidence.value())
+                .attrs(immutableAttrs(attrs));
     }
 
     private void applyDestination(
@@ -270,7 +330,7 @@ public class SpiObservationResolver implements ObservationRelationResolver {
             ServiceTarget service,
             String unresolvedPrefix
     ) {
-        if (service.resolved()) {
+        if (service.typeSymbol() != null) {
             builder.dstSymbol(service.typeSymbol());
         } else {
             builder.dstRawRef(unresolvedPrefix + service.rawType());
@@ -281,35 +341,71 @@ public class SpiObservationResolver implements ObservationRelationResolver {
         String targetSymbol = trimToNull(observation.targetSymbol());
         if (targetSymbol != null) {
             String typeSymbol = normalizeTypeSymbol(targetSymbol);
-            return new ServiceTarget(typeSymbol, rawType(typeSymbol), true);
+            return new ServiceTarget(
+                    typeSymbol,
+                    rawType(typeSymbol),
+                    true,
+                    true,
+                    true
+            );
         }
 
         TypeRef typeRef = observation.targetTypeRef();
         if (typeRef == null) {
-            return new ServiceTarget(null, UNRESOLVED_SERVICE, false);
+            return ServiceTarget.unknown();
         }
 
         String raw = firstNonBlank(typeRef.raw(), typeRef.sourceText());
         if (raw == null) {
-            return new ServiceTarget(null, UNRESOLVED_SERVICE, false);
+            return ServiceTarget.unknown();
         }
 
-        boolean resolved = !Boolean.TRUE.equals(typeRef.unresolved());
+        boolean authoritative = !Boolean.TRUE.equals(typeRef.unresolved());
         return new ServiceTarget(
-                resolved ? normalizeTypeSymbol(raw) : null,
+                authoritative ? normalizeTypeSymbol(raw) : null,
                 rawType(raw),
-                resolved
+                false,
+                true,
+                authoritative
         );
     }
 
+    private void putPolicyAttrs(
+            Map<String, Object> attrs,
+            ResolutionAssessment resolution,
+            ConfidenceAssessment confidence
+    ) {
+        attrs.put("resolution_basis", resolution.basis().code());
+        attrs.put("confidence_band", confidence.band().code());
+        attrs.put("default_visible", confidence.defaultVisible());
+    }
+
     private Map<String, Object> baseAttrs(ObservationFact observation) {
-        Map<String, Object> attrs = new LinkedHashMap<>();
-        if (observation.attrs() != null) {
-            attrs.putAll(observation.attrs());
-        }
+        Map<String, Object> attrs = copyNonNullAttrs(observation.attrs());
         attrs.put("resolver", getClass().getSimpleName());
         attrs.put("source_observation_kind", observation.kind().name());
         return attrs;
+    }
+
+    private Map<String, Object> copyNonNullAttrs(
+            Map<String, Object> source
+    ) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        if (source == null) {
+            return result;
+        }
+        for (Map.Entry<String, Object> entry : source.entrySet()) {
+            if (entry.getKey() != null && entry.getValue() != null) {
+                result.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return result;
+    }
+
+    private Map<String, Object> immutableAttrs(
+            Map<String, Object> attrs
+    ) {
+        return Collections.unmodifiableMap(new LinkedHashMap<>(attrs));
     }
 
     private String firstString(Map<String, Object> attrs, String... keys) {
@@ -331,11 +427,15 @@ public class SpiObservationResolver implements ObservationRelationResolver {
 
     private String normalizeTypeSymbol(String value) {
         String trimmed = value.trim();
-        return trimmed.startsWith("type:") ? trimmed : "type:" + trimmed;
+        return trimmed.startsWith("type:")
+                ? trimmed
+                : "type:" + trimmed;
     }
 
     private String rawType(String value) {
-        String trimmed = value == null ? UNRESOLVED_SERVICE : value.trim();
+        String trimmed = value == null
+                ? UNRESOLVED_SERVICE
+                : value.trim();
         if (trimmed.startsWith("type:")) {
             return trimmed.substring("type:".length());
         }
@@ -374,7 +474,18 @@ public class SpiObservationResolver implements ObservationRelationResolver {
     private record ServiceTarget(
             String typeSymbol,
             String rawType,
-            boolean resolved
+            boolean symbolResolved,
+            boolean referenceKnown,
+            boolean referenceAuthoritative
     ) {
+        private static ServiceTarget unknown() {
+            return new ServiceTarget(
+                    null,
+                    UNRESOLVED_SERVICE,
+                    false,
+                    false,
+                    false
+            );
+        }
     }
 }

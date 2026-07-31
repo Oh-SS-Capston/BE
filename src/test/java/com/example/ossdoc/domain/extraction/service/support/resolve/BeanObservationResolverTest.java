@@ -105,6 +105,13 @@ class BeanObservationResolverTest {
                     "declared",
                     relation.attrs().get("name_resolution")
             );
+            assertEquals(0.975, relation.confidenceHint());
+            assertEquals(
+                    "exact_reference",
+                    relation.attrs().get("resolution_basis")
+            );
+            assertEquals("high", relation.attrs().get("confidence_band"));
+            assertEquals(true, relation.attrs().get("default_visible"));
         }
     }
 
@@ -140,11 +147,17 @@ class BeanObservationResolverTest {
                 "Bean name inferred from provided type",
                 relation.resolution().reason()
         );
-        assertEquals(0.7, relation.confidenceHint());
+        assertEquals(0.57, relation.confidenceHint());
         assertEquals(
                 "inferred",
                 relation.attrs().get("name_resolution")
         );
+        assertEquals(
+                "inferred_reference",
+                relation.attrs().get("resolution_basis")
+        );
+        assertEquals("medium", relation.attrs().get("confidence_band"));
+        assertEquals(false, relation.attrs().get("default_visible"));
     }
 
     @Test
