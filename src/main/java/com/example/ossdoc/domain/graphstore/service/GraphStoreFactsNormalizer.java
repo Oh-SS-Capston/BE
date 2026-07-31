@@ -299,33 +299,38 @@ public class GraphStoreFactsNormalizer {
             if ("type".equals(kind)) {
                 if (symbol.superclassTypeRef() != null
                         && !symbol.superclassTypeRef().isBlank()) {
-                    relations.add(makeDerivedRelation(
+
+                    addDerivedTypeRelation(
+                            relations,
                             "EXTENDS",
                             symbol.symbol(),
                             symbol.superclassTypeRef(),
                             symbol.origin(),
                             new BigDecimal("0.95")
-                    ));
+                    );
                 }
 
                 if (symbol.interfaceTypeRefs() != null) {
                     for (String reference : symbol.interfaceTypeRefs()) {
-                        if (reference == null || reference.isBlank()) {
+                        if (reference == null
+                                || reference.isBlank()) {
                             continue;
                         }
 
-                        relations.add(makeDerivedRelation(
+                        addDerivedTypeRelation(
+                                relations,
                                 "IMPLEMENTS",
                                 symbol.symbol(),
                                 reference,
                                 symbol.origin(),
                                 new BigDecimal("0.95")
-                        ));
+                        );
                     }
                 }
 
                 if (symbol.packageSymbol() != null
                         && !symbol.packageSymbol().isBlank()) {
+
                     packageToTypes
                             .computeIfAbsent(
                                     symbol.packageSymbol(),
@@ -339,26 +344,31 @@ public class GraphStoreFactsNormalizer {
             if (isMemberKind(kind)
                     && symbol.ownerTypeSymbol() != null
                     && !symbol.ownerTypeSymbol().isBlank()) {
-                relations.add(makeDerivedRelation(
-                        "CONTAINS",
-                        symbol.ownerTypeSymbol(),
-                        symbol.symbol(),
-                        symbol.origin(),
-                        BigDecimal.ONE
-                ));
+
+                relations.add(
+                        makeDerivedRelation(
+                                "CONTAINS",
+                                symbol.ownerTypeSymbol(),
+                                symbol.symbol(),
+                                symbol.origin(),
+                                BigDecimal.ONE
+                        )
+                );
             }
 
             // 3-D: HAS_FIELD (field symbol → field type)
             if ("field".equals(kind)
                     && symbol.fieldTypeRef() != null
                     && !symbol.fieldTypeRef().isBlank()) {
-                relations.add(makeDerivedRelation(
+
+                addDerivedTypeRelation(
+                        relations,
                         "HAS_FIELD",
                         symbol.symbol(),
                         symbol.fieldTypeRef(),
                         symbol.origin(),
                         new BigDecimal("0.9")
-                ));
+                );
             }
 
             // 3-E: RETURNS / PARAM / THROWS
@@ -367,47 +377,57 @@ public class GraphStoreFactsNormalizer {
 
                 if (symbol.returnTypeRef() != null
                         && !symbol.returnTypeRef().isBlank()
-                        && !isPrimitiveOrVoid(symbol.returnTypeRef())) {
-                    relations.add(makeDerivedRelation(
+                        && !isPrimitiveOrVoid(
+                        symbol.returnTypeRef()
+                )) {
+                    addDerivedTypeRelation(
+                            relations,
                             "RETURNS",
                             symbol.symbol(),
                             symbol.returnTypeRef(),
                             symbol.origin(),
                             new BigDecimal("0.9")
-                    ));
+                    );
                 }
 
                 if (symbol.paramTypeRefs() != null) {
-                    for (String reference : symbol.paramTypeRefs()) {
+                    for (String reference :
+                            symbol.paramTypeRefs()) {
+
                         if (reference == null
                                 || reference.isBlank()
                                 || isPrimitiveOrVoid(reference)) {
                             continue;
                         }
 
-                        relations.add(makeDerivedRelation(
+                        addDerivedTypeRelation(
+                                relations,
                                 "PARAM",
                                 symbol.symbol(),
                                 reference,
                                 symbol.origin(),
                                 new BigDecimal("0.9")
-                        ));
+                        );
                     }
                 }
 
                 if (symbol.throwsTypeRefs() != null) {
-                    for (String reference : symbol.throwsTypeRefs()) {
-                        if (reference == null || reference.isBlank()) {
+                    for (String reference :
+                            symbol.throwsTypeRefs()) {
+
+                        if (reference == null
+                                || reference.isBlank()) {
                             continue;
                         }
 
-                        relations.add(makeDerivedRelation(
+                        addDerivedTypeRelation(
+                                relations,
                                 "THROWS",
                                 symbol.symbol(),
                                 reference,
                                 symbol.origin(),
                                 new BigDecimal("0.9")
-                        ));
+                        );
                     }
                 }
             }
@@ -420,47 +440,52 @@ public class GraphStoreFactsNormalizer {
             String packageSymbol = entry.getKey();
 
             if (!existingSymbols.contains(packageSymbol)) {
-                derivedSymbols.add(new NormalizedSymbolFact(
-                        packageSymbol,
-                        null,
-                        "package",
-                        null,
-                        null,
-                        null,
-                        List.of(),
-                        "derived",
-                        packageSymbol,
-                        null,
-                        null,
-                        null,
-                        null,
-                        List.of(),
-                        null,
-                        null,
-                        List.of(),
-                        null,
-                        List.of(),
-                        List.of(),
-                        null,
-                        null,
-                        null
-                ));
+                derivedSymbols.add(
+                        new NormalizedSymbolFact(
+                                packageSymbol,
+                                null,
+                                "package",
+                                null,
+                                null,
+                                null,
+                                List.of(),
+                                "derived",
+                                packageSymbol,
+                                null,
+                                null,
+                                null,
+                                null,
+                                List.of(),
+                                null,
+                                null,
+                                List.of(),
+                                null,
+                                List.of(),
+                                List.of(),
+                                null,
+                                null,
+                                null
+                        )
+                );
 
                 existingSymbols.add(packageSymbol);
             }
 
-            for (NormalizedSymbolFact typeSymbol : entry.getValue()) {
-                relations.add(makeDerivedRelation(
-                        "CONTAINS",
-                        packageSymbol,
-                        typeSymbol.symbol(),
-                        typeSymbol.origin(),
-                        BigDecimal.ONE
-                ));
+            for (NormalizedSymbolFact typeSymbol :
+                    entry.getValue()) {
+
+                relations.add(
+                        makeDerivedRelation(
+                                "CONTAINS",
+                                packageSymbol,
+                                typeSymbol.symbol(),
+                                typeSymbol.origin(),
+                                BigDecimal.ONE
+                        )
+                );
             }
         }
     }
-
     // ── TypeRef JsonNode 추출 헬퍼 ───────────────────────────────────────────
 
     private String extractTypeRefRaw(JsonNode typeRefNode) {
@@ -575,6 +600,60 @@ public class GraphStoreFactsNormalizer {
 
     private boolean isPrimitiveOrVoid(String reference) {
         return PRIMITIVES_AND_VOID.contains(reference.trim());
+    }
+
+    private void addDerivedTypeRelation(
+            List<NormalizedRelationFact> relations,
+            String kind,
+            String sourceSymbol,
+            String typeReference,
+            String origin,
+            BigDecimal confidence
+    ) {
+        String destinationSymbol =
+                toTypeSymbolId(typeReference);
+
+        if (destinationSymbol == null) {
+            return;
+        }
+
+        relations.add(
+                makeDerivedRelation(
+                        kind,
+                        sourceSymbol,
+                        destinationSymbol,
+                        origin,
+                        confidence
+                )
+        );
+    }
+
+    private String toTypeSymbolId(String reference) {
+        if (reference == null || reference.isBlank()) {
+            return null;
+        }
+
+        String normalized =
+                normalizeInnerClassSeparator(
+                        reference.trim()
+                );
+
+        boolean alreadyPrefixed =
+                normalized.startsWith("type:");
+
+        String rawTypeName =
+                alreadyPrefixed
+                        ? normalized.substring("type:".length())
+                        : normalized;
+
+        if (rawTypeName.isBlank()
+                || isPrimitiveOrVoid(rawTypeName)) {
+            return null;
+        }
+
+        return alreadyPrefixed
+                ? normalized
+                : "type:" + normalized;
     }
 
     /**
