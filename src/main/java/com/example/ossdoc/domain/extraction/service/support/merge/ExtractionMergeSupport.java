@@ -912,8 +912,39 @@ public class ExtractionMergeSupport {
                         : observation.kind().code(),
                 nullToEmpty(observation.siteSymbol()),
                 nullToEmpty(observation.targetSymbol()),
-                semanticTypeRefKey(observation.targetTypeRef())
+                semanticTypeRefKey(observation.targetTypeRef()),
+                observationDiscriminator(observation)
         );
+    }
+
+    private String observationDiscriminator(ObservationFact observation) {
+        if (observation == null
+                || observation.kind() != ObservationKind.REFLECTION_SITE
+                || observation.attrs() == null) {
+            return "";
+        }
+
+        return String.join("~",
+                attrValue(observation.attrs(), "reflection_kind"),
+                attrValue(observation.attrs(), "api_method", "method"),
+                attrValue(observation.attrs(), "target_type"),
+                attrValue(observation.attrs(), "member_name"),
+                attrValue(observation.attrs(), "scope"),
+                attrValue(observation.attrs(), "descriptor")
+        );
+    }
+
+    private String attrValue(Map<String, Object> attrs, String... keys) {
+        if (attrs == null || keys == null) {
+            return "";
+        }
+        for (String key : keys) {
+            Object value = attrs.get(key);
+            if (value != null) {
+                return String.valueOf(value);
+            }
+        }
+        return "";
     }
 
     /**
@@ -982,6 +1013,10 @@ public class ExtractionMergeSupport {
                 .listensEvent(filterRelations(all, RelationKind.LISTENS_EVENT))
                 .providesSpi(filterRelations(all, RelationKind.PROVIDES_SPI))
                 .loadsService(filterRelations(all, RelationKind.LOADS_SERVICE))
+                .reflectsType(filterRelations(all, RelationKind.REFLECTS_TYPE))
+                .reflectsMethod(filterRelations(all, RelationKind.REFLECTS_METHOD))
+                .reflectsField(filterRelations(all, RelationKind.REFLECTS_FIELD))
+                .reflectsConstructor(filterRelations(all, RelationKind.REFLECTS_CONSTRUCTOR))
                 .build();
     }
 
@@ -1135,6 +1170,10 @@ public class ExtractionMergeSupport {
         addToRelationMap(map, table.listensEvent());
         addToRelationMap(map, table.providesSpi());
         addToRelationMap(map, table.loadsService());
+        addToRelationMap(map, table.reflectsType());
+        addToRelationMap(map, table.reflectsMethod());
+        addToRelationMap(map, table.reflectsField());
+        addToRelationMap(map, table.reflectsConstructor());
 
         return map;
     }

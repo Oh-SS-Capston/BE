@@ -10,6 +10,7 @@ import com.example.ossdoc.domain.extraction.dto.model.SymbolFact;
 import com.example.ossdoc.domain.extraction.dto.model.TypeRef;
 import com.example.ossdoc.domain.extraction.enums.DerivationKind;
 import com.example.ossdoc.domain.extraction.enums.FactOriginKind;
+import com.example.ossdoc.domain.extraction.enums.ObservationKind;
 import com.example.ossdoc.domain.extraction.enums.ResolutionStatus;
 
 import java.util.ArrayList;
@@ -411,8 +412,44 @@ final class FactsDedupSupport {
                         : observation.kind().code()),
                 safe(observation.siteSymbol()),
                 safe(observation.targetSymbol()),
-                semanticTypeRefKey(observation.targetTypeRef())
+                semanticTypeRefKey(observation.targetTypeRef()),
+                observationDiscriminator(observation)
         );
+    }
+
+    private static String observationDiscriminator(
+            ObservationFact observation
+    ) {
+        if (observation == null
+                || observation.kind() != ObservationKind.REFLECTION_SITE
+                || observation.attrs() == null) {
+            return "";
+        }
+
+        return String.join("~",
+                attrValue(observation.attrs(), "reflection_kind"),
+                attrValue(observation.attrs(), "api_method", "method"),
+                attrValue(observation.attrs(), "target_type"),
+                attrValue(observation.attrs(), "member_name"),
+                attrValue(observation.attrs(), "scope"),
+                attrValue(observation.attrs(), "descriptor")
+        );
+    }
+
+    private static String attrValue(
+            Map<String, Object> attrs,
+            String... keys
+    ) {
+        if (attrs == null || keys == null) {
+            return "";
+        }
+        for (String key : keys) {
+            Object value = attrs.get(key);
+            if (value != null) {
+                return String.valueOf(value);
+            }
+        }
+        return "";
     }
 
     /**

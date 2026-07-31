@@ -166,6 +166,10 @@ final class FactsSectionFactory {
         List<RelationFact> listensEvent = new ArrayList<>();
         List<RelationFact> providesSpi = new ArrayList<>();
         List<RelationFact> loadsService = new ArrayList<>();
+        List<RelationFact> reflectsType = new ArrayList<>();
+        List<RelationFact> reflectsMethod = new ArrayList<>();
+        List<RelationFact> reflectsField = new ArrayList<>();
+        List<RelationFact> reflectsConstructor = new ArrayList<>();
 
         for (RelationFact relation : merged.values()) {
             if (relation == null || relation.kind() == null) {
@@ -186,6 +190,10 @@ final class FactsSectionFactory {
                 case LISTENS_EVENT -> listensEvent.add(relation);
                 case PROVIDES_SPI -> providesSpi.add(relation);
                 case LOADS_SERVICE -> loadsService.add(relation);
+                case REFLECTS_TYPE -> reflectsType.add(relation);
+                case REFLECTS_METHOD -> reflectsMethod.add(relation);
+                case REFLECTS_FIELD -> reflectsField.add(relation);
+                case REFLECTS_CONSTRUCTOR -> reflectsConstructor.add(relation);
             }
         }
 
@@ -202,6 +210,10 @@ final class FactsSectionFactory {
         listensEvent.sort(RELATION_ORDER);
         providesSpi.sort(RELATION_ORDER);
         loadsService.sort(RELATION_ORDER);
+        reflectsType.sort(RELATION_ORDER);
+        reflectsMethod.sort(RELATION_ORDER);
+        reflectsField.sort(RELATION_ORDER);
+        reflectsConstructor.sort(RELATION_ORDER);
 
         return RelationTable.builder()
                 .calls(List.copyOf(calls))
@@ -217,6 +229,10 @@ final class FactsSectionFactory {
                 .listensEvent(List.copyOf(listensEvent))
                 .providesSpi(List.copyOf(providesSpi))
                 .loadsService(List.copyOf(loadsService))
+                .reflectsType(List.copyOf(reflectsType))
+                .reflectsMethod(List.copyOf(reflectsMethod))
+                .reflectsField(List.copyOf(reflectsField))
+                .reflectsConstructor(List.copyOf(reflectsConstructor))
                 .build();
     }
 
@@ -378,6 +394,10 @@ final class FactsSectionFactory {
         addAll(all, table.listensEvent());
         addAll(all, table.providesSpi());
         addAll(all, table.loadsService());
+        addAll(all, table.reflectsType());
+        addAll(all, table.reflectsMethod());
+        addAll(all, table.reflectsField());
+        addAll(all, table.reflectsConstructor());
         return all;
     }
 

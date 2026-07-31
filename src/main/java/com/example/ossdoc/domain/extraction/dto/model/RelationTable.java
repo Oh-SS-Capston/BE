@@ -49,6 +49,18 @@ public record RelationTable(
         List<RelationFact> providesSpi,
 
         @JsonProperty("loads_service")
-        List<RelationFact> loadsService
+        List<RelationFact> loadsService,
+
+        @JsonProperty("reflects_type")
+        List<RelationFact> reflectsType,
+
+        @JsonProperty("reflects_method")
+        List<RelationFact> reflectsMethod,
+
+        @JsonProperty("reflects_field")
+        List<RelationFact> reflectsField,
+
+        @JsonProperty("reflects_constructor")
+        List<RelationFact> reflectsConstructor
 ) {
 }

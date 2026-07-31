@@ -51,6 +51,10 @@ public class ExtractionSink {
     private final Map<String, RelationFact> listensEvent = new LinkedHashMap<>();
     private final Map<String, RelationFact> providesSpi = new LinkedHashMap<>();
     private final Map<String, RelationFact> loadsService = new LinkedHashMap<>();
+    private final Map<String, RelationFact> reflectsType = new LinkedHashMap<>();
+    private final Map<String, RelationFact> reflectsMethod = new LinkedHashMap<>();
+    private final Map<String, RelationFact> reflectsField = new LinkedHashMap<>();
+    private final Map<String, RelationFact> reflectsConstructor = new LinkedHashMap<>();
 
     private final Map<String, ObservationFact> diInjectionSites = new LinkedHashMap<>();
     private final Map<String, ObservationFact> diProviders = new LinkedHashMap<>();
@@ -195,6 +199,10 @@ public class ExtractionSink {
                 || !listensEvent.isEmpty()
                 || !providesSpi.isEmpty()
                 || !loadsService.isEmpty()
+                || !reflectsType.isEmpty()
+                || !reflectsMethod.isEmpty()
+                || !reflectsField.isEmpty()
+                || !reflectsConstructor.isEmpty()
                 || !diInjectionSites.isEmpty()
                 || !diProviders.isEmpty()
                 || !spiProviders.isEmpty()
@@ -255,6 +263,10 @@ public class ExtractionSink {
                         .listensEvent(List.copyOf(listensEvent.values()))
                         .providesSpi(List.copyOf(providesSpi.values()))
                         .loadsService(List.copyOf(loadsService.values()))
+                        .reflectsType(List.copyOf(reflectsType.values()))
+                        .reflectsMethod(List.copyOf(reflectsMethod.values()))
+                        .reflectsField(List.copyOf(reflectsField.values()))
+                        .reflectsConstructor(List.copyOf(reflectsConstructor.values()))
                         .build(),
                 ObservationTable.builder()
                         .diInjectionSites(List.copyOf(diInjectionSites.values()))
@@ -302,6 +314,10 @@ public class ExtractionSink {
         items.addAll(listensEvent.values());
         items.addAll(providesSpi.values());
         items.addAll(loadsService.values());
+        items.addAll(reflectsType.values());
+        items.addAll(reflectsMethod.values());
+        items.addAll(reflectsField.values());
+        items.addAll(reflectsConstructor.values());
         return List.copyOf(items);
     }
 
@@ -348,6 +364,10 @@ public class ExtractionSink {
             case LISTENS_EVENT -> listensEvent;
             case PROVIDES_SPI -> providesSpi;
             case LOADS_SERVICE -> loadsService;
+            case REFLECTS_TYPE -> reflectsType;
+            case REFLECTS_METHOD -> reflectsMethod;
+            case REFLECTS_FIELD -> reflectsField;
+            case REFLECTS_CONSTRUCTOR -> reflectsConstructor;
         };
     }
 
@@ -385,8 +405,39 @@ public class ExtractionSink {
                 fact.kind().code(),
                 nullSafe(fact.siteSymbol()),
                 nullSafe(fact.targetSymbol()),
-                semanticTypeRefKey(fact.targetTypeRef())
+                semanticTypeRefKey(fact.targetTypeRef()),
+                observationDiscriminator(fact)
         );
+    }
+
+    private String observationDiscriminator(ObservationFact fact) {
+        if (fact == null
+                || fact.kind() != ObservationKind.REFLECTION_SITE
+                || fact.attrs() == null) {
+            return "";
+        }
+
+        return String.join("~",
+                attrValue(fact.attrs(), "reflection_kind"),
+                attrValue(fact.attrs(), "api_method", "method"),
+                attrValue(fact.attrs(), "target_type"),
+                attrValue(fact.attrs(), "member_name"),
+                attrValue(fact.attrs(), "scope"),
+                attrValue(fact.attrs(), "descriptor")
+        );
+    }
+
+    private String attrValue(Map<String, Object> attrs, String... keys) {
+        if (attrs == null || keys == null) {
+            return "";
+        }
+        for (String key : keys) {
+            Object value = attrs.get(key);
+            if (value != null) {
+                return String.valueOf(value);
+            }
+        }
+        return "";
     }
 
     /**

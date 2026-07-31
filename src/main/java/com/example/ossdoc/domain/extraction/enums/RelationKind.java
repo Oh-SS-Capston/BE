@@ -18,7 +18,11 @@ public enum RelationKind {
     PUBLISHES_EVENT("publishes_event"),
     LISTENS_EVENT("listens_event"),
     PROVIDES_SPI("provides_spi"),
-    LOADS_SERVICE("loads_service");
+    LOADS_SERVICE("loads_service"),
+    REFLECTS_TYPE("reflects_type"),
+    REFLECTS_METHOD("reflects_method"),
+    REFLECTS_FIELD("reflects_field"),
+    REFLECTS_CONSTRUCTOR("reflects_constructor");
 
     private final String code;
 

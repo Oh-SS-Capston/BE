@@ -40,7 +40,11 @@ final class FactsStatsCalculator {
                 + size(relations == null ? null : relations.publishesEvent())
                 + size(relations == null ? null : relations.listensEvent())
                 + size(relations == null ? null : relations.providesSpi())
-                + size(relations == null ? null : relations.loadsService());
+                + size(relations == null ? null : relations.loadsService())
+                + size(relations == null ? null : relations.reflectsType())
+                + size(relations == null ? null : relations.reflectsMethod())
+                + size(relations == null ? null : relations.reflectsField())
+                + size(relations == null ? null : relations.reflectsConstructor());
 
         long observationCount = size(observations == null ? null : observations.diInjectionSites())
                 + size(observations == null ? null : observations.diProviders())

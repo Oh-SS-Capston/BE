@@ -2499,44 +2499,17 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                     if (isReflectionCall(call)) {
                         sink.addObservation(
                                 ObservationFact.builder()
-                                        .kind(
-                                                ObservationKind.REFLECTION_SITE
-                                        )
-                                        .siteSymbol(
-                                                methodSymbol
-                                        )
-                                        .evidenceIds(
-                                                List.of(
-                                                        evidenceId
-                                                )
-                                        )
-                                        .origin(
-                                                FactOriginKind.OBSERVED
-                                        )
+                                        .kind(ObservationKind.REFLECTION_SITE)
+                                        .siteSymbol(methodSymbol)
+                                        .evidenceIds(List.of(evidenceId))
+                                        .origin(FactOriginKind.AST)
                                         .confidenceHint(
                                                 ConfidenceHints.observation(
-                                                        List.of(
-                                                                EvidenceType.AST
-                                                        )
+                                                        List.of(EvidenceType.AST)
                                                 )
                                         )
-                                        .note(
-                                                "reflection API usage"
-                                        )
-                                        .attrs(
-                                                Map.of(
-                                                        "method",
-                                                        call.getNameAsString(),
-                                                        "scope",
-                                                        call.getScope()
-                                                                .map(
-                                                                        Expression::toString
-                                                                )
-                                                                .orElse(
-                                                                        ""
-                                                                )
-                                                )
-                                        )
+                                        .note("reflection API usage")
+                                        .attrs(reflectionObservationAttrs(call))
                                         .build()
                         );
                     }
@@ -3530,10 +3503,150 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         return "forName".equals(name)
                 || "getDeclaredMethod".equals(name)
                 || "getMethod".equals(name)
-                || "newInstance".equals(name)
-                || "invoke".equals(name)
                 || "getDeclaredField".equals(name)
-                || "getField".equals(name);
+                || "getField".equals(name)
+                || "getDeclaredConstructor".equals(name)
+                || "getConstructor".equals(name)
+                || "newInstance".equals(name)
+                || "invoke".equals(name);
+    }
+
+    private Map<String, Object> reflectionObservationAttrs(
+            MethodCallExpr call
+    ) {
+        LinkedHashMap<String, Object> attrs = new LinkedHashMap<>();
+        String apiMethod = call.getNameAsString();
+        String scope = call.getScope()
+                .map(Expression::toString)
+                .orElse("");
+        String reflectionKind = reflectionKind(apiMethod, scope);
+        String targetType = reflectionTargetType(call);
+        String memberName = reflectionMemberName(call);
+        List<String> parameterTypes = reflectionParameterTypes(call);
+
+        attrs.put("method", apiMethod);
+        attrs.put("api_method", apiMethod);
+        attrs.put("reflection_kind", reflectionKind);
+        attrs.put("scope", scope);
+        attrs.put("call_expression", call.toString());
+        attrs.put("declared_only", apiMethod.startsWith("getDeclared"));
+
+        if (targetType != null) {
+            attrs.put("target_type", targetType);
+            attrs.put("target_resolution", "static");
+        } else {
+            attrs.put("target_resolution", "unknown");
+        }
+
+        if (memberName != null) {
+            attrs.put("member_name", memberName);
+        }
+        if (!parameterTypes.isEmpty()) {
+            attrs.put("parameter_types", parameterTypes);
+        }
+
+        return Map.copyOf(attrs);
+    }
+
+    private String reflectionKind(String apiMethod, String scope) {
+        if ("forName".equals(apiMethod)) {
+            return "type";
+        }
+        if ("getMethod".equals(apiMethod)
+                || "getDeclaredMethod".equals(apiMethod)
+                || "invoke".equals(apiMethod)) {
+            return "method";
+        }
+        if ("getField".equals(apiMethod)
+                || "getDeclaredField".equals(apiMethod)) {
+            return "field";
+        }
+        if ("getConstructor".equals(apiMethod)
+                || "getDeclaredConstructor".equals(apiMethod)
+                || "newInstance".equals(apiMethod)) {
+            return "constructor";
+        }
+        return "unknown";
+    }
+
+    private String reflectionTargetType(MethodCallExpr call) {
+        if ("forName".equals(call.getNameAsString())) {
+            return firstStringLiteralArgument(call, 0);
+        }
+
+        return call.getScope()
+                .map(this::reflectionTargetTypeFromScope)
+                .orElse(null);
+    }
+
+    private String reflectionTargetTypeFromScope(Expression scope) {
+        if (scope instanceof ClassExpr classExpr) {
+            try {
+                return classExpr.getType().resolve().describe();
+            } catch (Exception ignored) {
+                return classExpr.getType().asString();
+            }
+        }
+
+        if (scope instanceof MethodCallExpr methodCall
+                && "forName".equals(methodCall.getNameAsString())) {
+            return firstStringLiteralArgument(methodCall, 0);
+        }
+
+        return null;
+    }
+
+    private String reflectionMemberName(MethodCallExpr call) {
+        String name = call.getNameAsString();
+        if ("getMethod".equals(name)
+                || "getDeclaredMethod".equals(name)
+                || "getField".equals(name)
+                || "getDeclaredField".equals(name)) {
+            return firstStringLiteralArgument(call, 0);
+        }
+        return null;
+    }
+
+    private String firstStringLiteralArgument(
+            MethodCallExpr call,
+            int index
+    ) {
+        if (call == null || call.getArguments().size() <= index) {
+            return null;
+        }
+        Expression argument = call.getArgument(index);
+        if (!argument.isStringLiteralExpr()) {
+            return null;
+        }
+        String value = argument.asStringLiteralExpr().asString();
+        return value == null || value.isBlank() ? null : value.trim();
+    }
+
+    private List<String> reflectionParameterTypes(MethodCallExpr call) {
+        String name = call.getNameAsString();
+        int startIndex;
+        if ("getMethod".equals(name)
+                || "getDeclaredMethod".equals(name)) {
+            startIndex = 1;
+        } else if ("getConstructor".equals(name)
+                || "getDeclaredConstructor".equals(name)) {
+            startIndex = 0;
+        } else {
+            return List.of();
+        }
+
+        List<String> result = new ArrayList<>();
+        for (int i = startIndex; i < call.getArguments().size(); i++) {
+            Expression argument = call.getArgument(i);
+            if (argument instanceof ClassExpr classExpr) {
+                try {
+                    result.add(classExpr.getType().resolve().describe());
+                } catch (Exception ignored) {
+                    result.add(classExpr.getType().asString());
+                }
+            }
+        }
+        return List.copyOf(result);
     }
 
     private boolean isServiceLoaderLoad(MethodCallExpr call) {

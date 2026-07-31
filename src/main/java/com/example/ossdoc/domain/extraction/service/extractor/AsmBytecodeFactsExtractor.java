@@ -273,7 +273,7 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
                                 .siteSymbol(fieldSymbol)
                                 .targetTypeRef(fieldTypeRef)
                                 .evidenceIds(List.of(evidence.id()))
-                                .origin(FactOriginKind.OBSERVED)
+                                .origin(FactOriginKind.BYTECODE)
                                 .confidenceHint(ConfidenceHints.observation(
                                         List.of(EvidenceType.BYTECODE)
                                 ))
@@ -397,15 +397,19 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
                                 .kind(ObservationKind.REFLECTION_SITE)
                                 .siteSymbol(symbol)
                                 .evidenceIds(List.of(evidence.id()))
-                                .origin(FactOriginKind.OBSERVED)
+                                .origin(FactOriginKind.BYTECODE)
                                 .confidenceHint(ConfidenceHints.observation(
                                         List.of(EvidenceType.BYTECODE)
                                 ))
                                 .note("reflection API usage from bytecode")
                                 .attrs(Map.of(
                                         "owner", internalNameToQualified(owner),
+                                        "api_owner", internalNameToQualified(owner),
                                         "method", methodName,
-                                        "descriptor", methodDescriptor
+                                        "api_method", methodName,
+                                        "reflection_kind", reflectionKind(owner, methodName),
+                                        "descriptor", methodDescriptor,
+                                        "target_resolution", "unknown"
                                 ))
                                 .build());
                     }
@@ -1295,10 +1299,42 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
         return ("java.lang.Class".equals(qualified)
                 && ("forName".equals(methodName)
                 || "getMethod".equals(methodName)
-                || "getDeclaredMethod".equals(methodName)))
+                || "getDeclaredMethod".equals(methodName)
+                || "getField".equals(methodName)
+                || "getDeclaredField".equals(methodName)
+                || "getConstructor".equals(methodName)
+                || "getDeclaredConstructor".equals(methodName)
+                || "newInstance".equals(methodName)))
                 || ("java.lang.reflect.Method".equals(qualified)
                 && "invoke".equals(methodName))
+                || ("java.lang.reflect.Field".equals(qualified)
+                && ("get".equals(methodName)
+                || "set".equals(methodName)))
                 || ("java.lang.reflect.Constructor".equals(qualified)
                 && "newInstance".equals(methodName));
+    }
+
+    private String reflectionKind(String owner, String methodName) {
+        String qualified = internalNameToQualified(owner);
+        if ("forName".equals(methodName)) {
+            return "type";
+        }
+        if ("getMethod".equals(methodName)
+                || "getDeclaredMethod".equals(methodName)
+                || ("java.lang.reflect.Method".equals(qualified)
+                && "invoke".equals(methodName))) {
+            return "method";
+        }
+        if ("getField".equals(methodName)
+                || "getDeclaredField".equals(methodName)
+                || "java.lang.reflect.Field".equals(qualified)) {
+            return "field";
+        }
+        if ("getConstructor".equals(methodName)
+                || "getDeclaredConstructor".equals(methodName)
+                || "newInstance".equals(methodName)) {
+            return "constructor";
+        }
+        return "unknown";
     }
 }
