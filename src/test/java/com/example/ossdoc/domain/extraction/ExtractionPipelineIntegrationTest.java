@@ -608,6 +608,131 @@ class ExtractionPipelineIntegrationTest {
     }
 
     @Test
+    @DisplayName("AST_ONLY 모드 — 메서드 호출 관계와 호출 표현식 Evidence 보존")
+    void extractFacts_astOnly_preservesCallsExpressionEvidence() {
+        FactsExtractRequest request =
+                FactsExtractRequest.builder()
+                        .runId(TEST_RUN_ID)
+                        .mode(ExtractionMode.AST_ONLY)
+                        .includeObservations(false)
+                        .includeTests(false)
+                        .failFast(false)
+                        .build();
+
+        FactsExtractResponse response =
+                factsExtractionFacade.extract(request);
+
+        assertNotNull(response);
+
+        JsonNode factsJson =
+                captureFactsJson();
+
+        JsonNode calls =
+                factsJson.path("relations")
+                        .path("calls");
+
+        assertTrue(
+                calls.isArray(),
+                "relations.calls는 배열이어야 함"
+        );
+
+        assertTrue(
+                calls.size() > 0,
+                "CALLS 관계가 하나 이상 생성되어야 함"
+        );
+
+        JsonNode evidenceSection =
+                factsJson.path("evidence");
+
+        boolean hasTargetNameCallRelation =
+                false;
+
+        boolean hasTargetNameExpressionEvidence =
+                false;
+
+        for (JsonNode relation : calls) {
+            JsonNode expression =
+                    relation.path("attrs")
+                            .path("expression");
+
+            if (expression.isTextual()
+                    && expression.asText()
+                    .contains("target.name()")) {
+                hasTargetNameCallRelation = true;
+            }
+
+            JsonNode evidenceIds =
+                    relation.get("evidence_ids");
+
+            if (evidenceIds == null) {
+                evidenceIds =
+                        relation.get("evidenceIds");
+            }
+
+            if (evidenceIds == null
+                    || !evidenceIds.isArray()) {
+                continue;
+            }
+
+            for (JsonNode evidenceIdNode
+                    : evidenceIds) {
+
+                if (!evidenceIdNode.isTextual()
+                        || evidenceIdNode.asText()
+                        .isBlank()) {
+                    continue;
+                }
+
+                JsonNode evidence =
+                        findEvidence(
+                                evidenceSection,
+                                evidenceIdNode.asText()
+                        );
+
+                if (evidence == null) {
+                    continue;
+                }
+
+                String snippet =
+                        evidence.path("snippet")
+                                .asText("");
+
+                if (!snippet.contains(
+                        "target.name()"
+                )) {
+                    continue;
+                }
+
+                hasTargetNameExpressionEvidence = true;
+
+                assertFalse(
+                        snippet.contains(
+                                "Target target = new Target()"
+                        ),
+                        "CALLS Evidence가 메서드 전체 범위를 포함하면 안 됨"
+                );
+
+                assertFalse(
+                        snippet.contains(
+                                "public String callTarget()"
+                        ),
+                        "CALLS Evidence가 메서드 선언 전체를 가리키면 안 됨"
+                );
+            }
+        }
+
+        assertTrue(
+                hasTargetNameCallRelation,
+                "CALLS 관계의 attrs.expression에 호출 표현식이 저장되어야 함"
+        );
+
+        assertTrue(
+                hasTargetNameExpressionEvidence,
+                "CALLS 관계가 target.name() 호출 구문의 Evidence를 참조해야 함"
+        );
+    }
+
+    @Test
     @DisplayName("AST_PLUS_BYTECODE 모드 — 어노테이션 관계 병합과 양쪽 Evidence 보존")
     void extractFacts_withBytecode_mergesAnnotatedWithOriginsAndEvidence() {
         FactsExtractRequest request =

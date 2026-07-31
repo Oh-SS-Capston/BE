@@ -675,6 +675,8 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                         addMethodCallRelation(
                                 callableSymbol,
                                 methodCallExpr,
+                                relativePath,
+                                sourceLines,
                                 callableEvidenceId,
                                 sink
                         )
@@ -713,10 +715,15 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                 );
     }
 
-    private void addMethodCallRelation(String callerSymbol, MethodCallExpr methodCallExpr, String evidenceId, ExtractionSink sink) {
+    private void addMethodCallRelation(String callerSymbol, MethodCallExpr methodCallExpr, String relativePath, List<String> sourceLines, String callableEvidenceId, ExtractionSink sink) {
         Integer callSiteLine = methodCallExpr.getBegin()
                 .map(pos -> pos.line)
                 .orElse(null);
+
+        String relationEvidenceId = registerExpressionEvidence(relativePath, sourceLines, methodCallExpr, callerSymbol, callableEvidenceId, sink);
+        Map<String, Object> attrs = new LinkedHashMap<>();
+        attrs.put("argument_count", methodCallExpr.getArguments().size());
+        attrs.put("expression", methodCallExpr.toString());
 
         try {
             ResolvedMethodDeclaration resolved = methodCallExpr.resolve();
@@ -725,22 +732,24 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                     .kind(RelationKind.CALLS)
                     .srcSymbol(callerSymbol)
                     .dstSymbol(dstSymbol)
-                    .evidenceIds(List.of(evidenceId))
+                    .evidenceIds(List.of(relationEvidenceId))
                     .resolution(RelationResolutionFactory.resolved())
                     .origin(FactOriginKind.AST)
                     .callSiteLine(callSiteLine)
                     .confidenceHint(ConfidenceHints.relation(ResolutionStatus.RESOLVED, FactOriginKind.AST))
+                    .attrs(attrs)
                     .build());
         } catch (Exception e) {
             sink.addRelation(RelationFact.builder()
                     .kind(RelationKind.CALLS)
                     .srcSymbol(callerSymbol)
                     .dstRawRef(methodCallExpr.getNameAsString() + signatureHint(methodCallExpr.getArguments().size()))
-                    .evidenceIds(List.of(evidenceId))
+                    .evidenceIds(List.of(relationEvidenceId))
                     .resolution(RelationResolutionFactory.unresolved(e.getClass().getSimpleName()))
                     .origin(FactOriginKind.AST)
                     .callSiteLine(callSiteLine)
                     .confidenceHint(ConfidenceHints.relation(ResolutionStatus.UNRESOLVED, FactOriginKind.AST))
+                    .attrs(attrs)
                     .build());
         }
     }
