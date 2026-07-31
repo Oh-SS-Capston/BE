@@ -123,6 +123,13 @@ final class FactsSectionFactory {
     }
 
     RelationTable composeRelations(RelationTable raw) {
+        return composeRelations(raw, List.of());
+    }
+
+    RelationTable composeRelations(
+            RelationTable raw,
+            List<RelationFact> additionalRelations
+    ) {
         LinkedHashMap<String, RelationFact> merged = new LinkedHashMap<>();
 
         for (RelationFact relation : flattenRelations(raw)) {
@@ -133,11 +140,28 @@ final class FactsSectionFactory {
             );
         }
 
+        if (additionalRelations != null) {
+            for (RelationFact relation : additionalRelations) {
+                if (relation == null) {
+                    continue;
+                }
+                merged.merge(
+                        FactsDedupSupport.relationKey(relation),
+                        relation,
+                        FactsDedupSupport::mergeRelation
+                );
+            }
+        }
+
         List<RelationFact> calls = new ArrayList<>();
         List<RelationFact> creates = new ArrayList<>();
         List<RelationFact> overrides = new ArrayList<>();
         List<RelationFact> accessesField = new ArrayList<>();
         List<RelationFact> annotatedWith = new ArrayList<>();
+        List<RelationFact> handlesEndpoint = new ArrayList<>();
+        List<RelationFact> declaresBean = new ArrayList<>();
+        List<RelationFact> configuresBean = new ArrayList<>();
+        List<RelationFact> injects = new ArrayList<>();
 
         for (RelationFact relation : merged.values()) {
             if (relation == null || relation.kind() == null) {
@@ -150,6 +174,10 @@ final class FactsSectionFactory {
                 case OVERRIDES -> overrides.add(relation);
                 case ACCESSES_FIELD -> accessesField.add(relation);
                 case ANNOTATED_WITH -> annotatedWith.add(relation);
+                case HANDLES_ENDPOINT -> handlesEndpoint.add(relation);
+                case DECLARES_BEAN -> declaresBean.add(relation);
+                case CONFIGURES_BEAN -> configuresBean.add(relation);
+                case INJECTS -> injects.add(relation);
             }
         }
 
@@ -158,6 +186,10 @@ final class FactsSectionFactory {
         overrides.sort(RELATION_ORDER);
         accessesField.sort(RELATION_ORDER);
         annotatedWith.sort(RELATION_ORDER);
+        handlesEndpoint.sort(RELATION_ORDER);
+        declaresBean.sort(RELATION_ORDER);
+        configuresBean.sort(RELATION_ORDER);
+        injects.sort(RELATION_ORDER);
 
         return RelationTable.builder()
                 .calls(List.copyOf(calls))
@@ -165,6 +197,10 @@ final class FactsSectionFactory {
                 .overrides(List.copyOf(overrides))
                 .accessesField(List.copyOf(accessesField))
                 .annotatedWith(List.copyOf(annotatedWith))
+                .handlesEndpoint(List.copyOf(handlesEndpoint))
+                .declaresBean(List.copyOf(declaresBean))
+                .configuresBean(List.copyOf(configuresBean))
+                .injects(List.copyOf(injects))
                 .build();
     }
 
@@ -318,6 +354,10 @@ final class FactsSectionFactory {
         addAll(all, table.overrides());
         addAll(all, table.accessesField());
         addAll(all, table.annotatedWith());
+        addAll(all, table.handlesEndpoint());
+        addAll(all, table.declaresBean());
+        addAll(all, table.configuresBean());
+        addAll(all, table.injects());
         return all;
     }
 

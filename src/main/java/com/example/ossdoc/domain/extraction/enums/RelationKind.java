@@ -3,14 +3,18 @@ package com.example.ossdoc.domain.extraction.enums;
 import com.fasterxml.jackson.annotation.JsonValue;
 
 /**
- * Graph Builder가 바로 먹을 수 있는 관계 후보 종류
+ * Graph Builder가 바로 사용할 수 있는 관계 후보 종류.
  */
 public enum RelationKind {
     CALLS("calls"),
     CREATES("creates"),
     OVERRIDES("overrides"),
     ACCESSES_FIELD("accesses_field"),
-    ANNOTATED_WITH("annotated_with");
+    ANNOTATED_WITH("annotated_with"),
+    HANDLES_ENDPOINT("handles_endpoint"),
+    DECLARES_BEAN("declares_bean"),
+    CONFIGURES_BEAN("configures_bean"),
+    INJECTS("injects");
 
     private final String code;
 
@@ -19,4 +23,7 @@ public enum RelationKind {
     }
 
     @JsonValue
-    public String code() { return code; }}
+    public String code() {
+        return code;
+    }
+}

@@ -43,6 +43,10 @@ public class ExtractionSink {
     private final Map<String, RelationFact> overrides = new LinkedHashMap<>();
     private final Map<String, RelationFact> accessesField = new LinkedHashMap<>();
     private final Map<String, RelationFact> annotatedWith = new LinkedHashMap<>();
+    private final Map<String, RelationFact> handlesEndpoint = new LinkedHashMap<>();
+    private final Map<String, RelationFact> declaresBean = new LinkedHashMap<>();
+    private final Map<String, RelationFact> configuresBean = new LinkedHashMap<>();
+    private final Map<String, RelationFact> injects = new LinkedHashMap<>();
 
     private final Map<String, ObservationFact> diInjectionSites = new LinkedHashMap<>();
     private final Map<String, ObservationFact> diProviders = new LinkedHashMap<>();
@@ -179,6 +183,10 @@ public class ExtractionSink {
                 || !overrides.isEmpty()
                 || !accessesField.isEmpty()
                 || !annotatedWith.isEmpty()
+                || !handlesEndpoint.isEmpty()
+                || !declaresBean.isEmpty()
+                || !configuresBean.isEmpty()
+                || !injects.isEmpty()
                 || !diInjectionSites.isEmpty()
                 || !diProviders.isEmpty()
                 || !spiProviders.isEmpty()
@@ -231,6 +239,10 @@ public class ExtractionSink {
                         .overrides(List.copyOf(overrides.values()))
                         .accessesField(List.copyOf(accessesField.values()))
                         .annotatedWith(List.copyOf(annotatedWith.values()))
+                        .handlesEndpoint(List.copyOf(handlesEndpoint.values()))
+                        .declaresBean(List.copyOf(declaresBean.values()))
+                        .configuresBean(List.copyOf(configuresBean.values()))
+                        .injects(List.copyOf(injects.values()))
                         .build(),
                 ObservationTable.builder()
                         .diInjectionSites(List.copyOf(diInjectionSites.values()))
@@ -270,6 +282,10 @@ public class ExtractionSink {
         items.addAll(overrides.values());
         items.addAll(accessesField.values());
         items.addAll(annotatedWith.values());
+        items.addAll(handlesEndpoint.values());
+        items.addAll(declaresBean.values());
+        items.addAll(configuresBean.values());
+        items.addAll(injects.values());
         return List.copyOf(items);
     }
 
@@ -308,6 +324,10 @@ public class ExtractionSink {
             case OVERRIDES -> overrides;
             case ACCESSES_FIELD -> accessesField;
             case ANNOTATED_WITH -> annotatedWith;
+            case HANDLES_ENDPOINT -> handlesEndpoint;
+            case DECLARES_BEAN -> declaresBean;
+            case CONFIGURES_BEAN -> configuresBean;
+            case INJECTS -> injects;
         };
     }
 

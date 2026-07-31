@@ -25,6 +25,18 @@ public record RelationTable(
         List<RelationFact> accessesField,
 
         @JsonProperty("annotated_with")
-        List<RelationFact> annotatedWith
+        List<RelationFact> annotatedWith,
+
+        @JsonProperty("handles_endpoint")
+        List<RelationFact> handlesEndpoint,
+
+        @JsonProperty("declares_bean")
+        List<RelationFact> declaresBean,
+
+        @JsonProperty("configures_bean")
+        List<RelationFact> configuresBean,
+
+        @JsonProperty("injects")
+        List<RelationFact> injects
 ) {
 }
