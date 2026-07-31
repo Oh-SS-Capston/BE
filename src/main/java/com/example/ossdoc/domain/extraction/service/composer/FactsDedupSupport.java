@@ -215,7 +215,10 @@ final class FactsDedupSupport {
                         right.evidenceIds(),
                         Function.identity()
                 ))
-                .origin(firstNonNull(left.origin(), right.origin()))
+                .origin(mergeOrigin(
+                        left.origin(),
+                        right.origin()
+                ))
                 .confidenceHint(max(
                         left.confidenceHint(),
                         right.confidenceHint()
@@ -408,7 +411,35 @@ final class FactsDedupSupport {
                         : observation.kind().code()),
                 safe(observation.siteSymbol()),
                 safe(observation.targetSymbol()),
-                safe(typeRefKey(observation.targetTypeRef()))
+                semanticTypeRefKey(observation.targetTypeRef())
+        );
+    }
+
+    /**
+     * observation의 논리적 동일성 판정용 타입 키.
+     * sourceText와 unresolved 여부는 추출기별 부가정보이므로 key에서 제외한다.
+     */
+    static String semanticTypeRefKey(TypeRef typeRef) {
+        if (typeRef == null) {
+            return "";
+        }
+
+        List<String> argKeys = new ArrayList<>();
+        if (typeRef.args() != null) {
+            for (TypeRef arg : typeRef.args()) {
+                argKeys.add(semanticTypeRefKey(arg));
+            }
+        }
+
+        return String.join("~",
+                safe(typeRef.raw()),
+                String.join(",", argKeys),
+                safe(typeRef.arrayDim() == null
+                        ? null
+                        : String.valueOf(typeRef.arrayDim())),
+                safe(typeRef.wildcard() == null
+                        ? null
+                        : typeRef.wildcard().code())
         );
     }
 
@@ -634,3 +665,5 @@ final class FactsDedupSupport {
         return value == null ? "" : value;
     }
 }
+
+

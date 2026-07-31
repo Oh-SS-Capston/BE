@@ -10,7 +10,9 @@ import com.example.ossdoc.domain.extraction.dto.model.RelationTable;
 import com.example.ossdoc.domain.extraction.dto.model.StatsMeta;
 import com.example.ossdoc.domain.extraction.dto.model.SymbolFact;
 import com.example.ossdoc.domain.extraction.dto.model.SymbolTable;
+import com.example.ossdoc.domain.extraction.dto.model.TypeRef;
 import com.example.ossdoc.domain.extraction.enums.ChunkStatus;
+import com.example.ossdoc.domain.extraction.enums.FactOriginKind;
 import com.example.ossdoc.domain.extraction.enums.ObservationKind;
 import com.example.ossdoc.domain.extraction.enums.RelationKind;
 import com.example.ossdoc.domain.extraction.enums.SymbolKind;
@@ -19,6 +21,7 @@ import com.example.ossdoc.domain.extraction.service.support.util.WarningCollecto
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -104,6 +107,7 @@ public class ExtractionSink {
         if (fact == null || fact.id() == null || fact.id().isBlank()) {
             return;
         }
+
         if (!evidence.containsKey(fact.id())) {
             evidence.put(fact.id(), fact);
             stats.recordEvidence();
@@ -111,7 +115,10 @@ public class ExtractionSink {
     }
 
     public void addSymbol(SymbolFact fact) {
-        if (fact == null || fact.symbol() == null || fact.symbol().isBlank() || fact.kind() == null) {
+        if (fact == null
+                || fact.symbol() == null
+                || fact.symbol().isBlank()
+                || fact.kind() == null) {
             return;
         }
 
@@ -123,7 +130,10 @@ public class ExtractionSink {
     }
 
     public void addRelation(RelationFact fact) {
-        if (fact == null || fact.kind() == null || fact.srcSymbol() == null || fact.srcSymbol().isBlank()) {
+        if (fact == null
+                || fact.kind() == null
+                || fact.srcSymbol() == null
+                || fact.srcSymbol().isBlank()) {
             return;
         }
 
@@ -142,8 +152,15 @@ public class ExtractionSink {
 
         Map<String, ObservationFact> bucket = observationBucket(fact.kind());
         String key = observationKey(fact);
-        if (!bucket.containsKey(key)) {
-            bucket.put(key, fact);
+        boolean isNew = !bucket.containsKey(key);
+
+        bucket.merge(
+                key,
+                fact,
+                ExtractionSink::mergeObservation
+        );
+
+        if (isNew) {
             stats.recordObservation();
         }
     }
@@ -328,9 +345,230 @@ public class ExtractionSink {
                 fact.kind().code(),
                 nullSafe(fact.siteSymbol()),
                 nullSafe(fact.targetSymbol()),
-                nullSafe(fact.targetTypeRef() == null ? null : fact.targetTypeRef().raw()),
-                nullSafe(fact.note())
+                semanticTypeRefKey(fact.targetTypeRef())
         );
+    }
+
+    /**
+     * observation의 동일성에는 타입의 의미 정보만 사용한다.
+     * AST의 sourceText와 ASM의 descriptor 차이 때문에 같은 타입이 분리되는 것을 막는다.
+     */
+    private String semanticTypeRefKey(TypeRef typeRef) {
+        if (typeRef == null) {
+            return "";
+        }
+
+        List<String> argumentKeys = new ArrayList<>();
+        if (typeRef.args() != null) {
+            for (TypeRef argument : typeRef.args()) {
+                argumentKeys.add(semanticTypeRefKey(argument));
+            }
+        }
+
+        return String.join("~",
+                nullSafe(typeRef.raw()),
+                String.join(",", argumentKeys),
+                typeRef.arrayDim() == null
+                        ? ""
+                        : String.valueOf(typeRef.arrayDim()),
+                typeRef.wildcard() == null
+                        ? ""
+                        : typeRef.wildcard().code()
+        );
+    }
+
+    private static ObservationFact mergeObservation(
+            ObservationFact existing,
+            ObservationFact incoming
+    ) {
+        return ObservationFact.builder()
+                .kind(existing.kind() != null
+                        ? existing.kind()
+                        : incoming.kind())
+                .siteSymbol(firstNonBlank(
+                        existing.siteSymbol(),
+                        incoming.siteSymbol()
+                ))
+                .targetSymbol(firstNonBlank(
+                        existing.targetSymbol(),
+                        incoming.targetSymbol()
+                ))
+                .targetTypeRef(mergeTypeRef(
+                        existing.targetTypeRef(),
+                        incoming.targetTypeRef()
+                ))
+                .note(preferLonger(
+                        existing.note(),
+                        incoming.note()
+                ))
+                .evidenceIds(mergeEvidenceIds(
+                        existing.evidenceIds(),
+                        incoming.evidenceIds()
+                ))
+                .origin(mergeOrigin(
+                        existing.origin(),
+                        incoming.origin()
+                ))
+                .confidenceHint(max(
+                        existing.confidenceHint(),
+                        incoming.confidenceHint()
+                ))
+                .attrs(mergeMaps(
+                        existing.attrs(),
+                        incoming.attrs()
+                ))
+                .build();
+    }
+
+    private static TypeRef mergeTypeRef(
+            TypeRef existing,
+            TypeRef incoming
+    ) {
+        if (existing == null) {
+            return incoming;
+        }
+        if (incoming == null) {
+            return existing;
+        }
+
+        return TypeRef.builder()
+                .raw(firstNonBlank(existing.raw(), incoming.raw()))
+                .args(firstNonEmptyList(existing.args(), incoming.args()))
+                .arrayDim(existing.arrayDim() != null
+                        ? existing.arrayDim()
+                        : incoming.arrayDim())
+                .primitive(existing.primitive() != null
+                        ? existing.primitive()
+                        : incoming.primitive())
+                .unresolved(mergeUnresolved(
+                        existing.unresolved(),
+                        incoming.unresolved()
+                ))
+                .sourceText(firstNonBlank(
+                        existing.sourceText(),
+                        incoming.sourceText()
+                ))
+                .wildcard(existing.wildcard() != null
+                        ? existing.wildcard()
+                        : incoming.wildcard())
+                .build();
+    }
+
+    private static Boolean mergeUnresolved(
+            Boolean existing,
+            Boolean incoming
+    ) {
+        if (Boolean.FALSE.equals(existing)
+                || Boolean.FALSE.equals(incoming)) {
+            return Boolean.FALSE;
+        }
+
+        return existing != null ? existing : incoming;
+    }
+
+    private static <T> List<T> firstNonEmptyList(
+            List<T> existing,
+            List<T> incoming
+    ) {
+        if (existing != null && !existing.isEmpty()) {
+            return existing;
+        }
+        if (incoming != null && !incoming.isEmpty()) {
+            return incoming;
+        }
+        return List.of();
+    }
+
+    private static List<String> mergeEvidenceIds(
+            List<String> existing,
+            List<String> incoming
+    ) {
+        LinkedHashSet<String> merged = new LinkedHashSet<>();
+        if (existing != null) {
+            merged.addAll(existing);
+        }
+        if (incoming != null) {
+            merged.addAll(incoming);
+        }
+        return List.copyOf(merged);
+    }
+
+    private static Map<String, Object> mergeMaps(
+            Map<String, Object> existing,
+            Map<String, Object> incoming
+    ) {
+        LinkedHashMap<String, Object> merged = new LinkedHashMap<>();
+        if (existing != null) {
+            merged.putAll(existing);
+        }
+        if (incoming != null) {
+            merged.putAll(incoming);
+        }
+        return Map.copyOf(merged);
+    }
+
+    private static FactOriginKind mergeOrigin(
+            FactOriginKind existing,
+            FactOriginKind incoming
+    ) {
+        if (existing == null) {
+            return incoming;
+        }
+        if (incoming == null || existing == incoming) {
+            return existing;
+        }
+
+        if ((existing == FactOriginKind.AST
+                && incoming == FactOriginKind.BYTECODE)
+                || (existing == FactOriginKind.BYTECODE
+                && incoming == FactOriginKind.AST)
+                || (existing == FactOriginKind.AST_AND_BYTECODE
+                && (incoming == FactOriginKind.AST
+                || incoming == FactOriginKind.BYTECODE))
+                || (incoming == FactOriginKind.AST_AND_BYTECODE
+                && (existing == FactOriginKind.AST
+                || existing == FactOriginKind.BYTECODE))) {
+            return FactOriginKind.AST_AND_BYTECODE;
+        }
+
+        return existing;
+    }
+
+    private static Double max(Double existing, Double incoming) {
+        if (existing == null) {
+            return incoming;
+        }
+        if (incoming == null) {
+            return existing;
+        }
+        return Math.max(existing, incoming);
+    }
+
+    private static String preferLonger(
+            String existing,
+            String incoming
+    ) {
+        if (existing == null || existing.isBlank()) {
+            return incoming;
+        }
+        if (incoming == null || incoming.isBlank()) {
+            return existing;
+        }
+        return incoming.length() > existing.length()
+                ? incoming
+                : existing;
+    }
+
+    private static String firstNonBlank(
+            String existing,
+            String incoming
+    ) {
+        if (existing != null && !existing.isBlank()) {
+            return existing;
+        }
+        return incoming != null && !incoming.isBlank()
+                ? incoming
+                : null;
     }
 
     private String nullSafe(String value) {

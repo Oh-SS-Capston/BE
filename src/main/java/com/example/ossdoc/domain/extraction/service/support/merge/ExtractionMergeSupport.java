@@ -14,6 +14,7 @@ import com.example.ossdoc.domain.extraction.dto.model.SignatureFact;
 import com.example.ossdoc.domain.extraction.dto.model.StatsMeta;
 import com.example.ossdoc.domain.extraction.dto.model.SymbolFact;
 import com.example.ossdoc.domain.extraction.dto.model.SymbolTable;
+import com.example.ossdoc.domain.extraction.dto.model.TypeRef;
 import com.example.ossdoc.domain.extraction.enums.DerivationKind;
 import com.example.ossdoc.domain.extraction.enums.FactOriginKind;
 import com.example.ossdoc.domain.extraction.enums.MergeStage;
@@ -434,6 +435,147 @@ public class ExtractionMergeSupport {
                 .build();
     }
 
+    /**
+     * 동일 observation에서 AST/ASM이 각각 확인한 정보를 하나로 병합한다.
+     *
+     * observation의 논리적 동일성은 kind, site, target, target type으로 판단하며,
+     * note, evidence, origin, confidence, attrs는 병합 대상 메타데이터로 취급한다.
+     */
+    private static ObservationFact mergeObservation(
+            ObservationFact existing,
+            ObservationFact incoming
+    ) {
+        if (existing == null) {
+            return incoming;
+        }
+        if (incoming == null) {
+            return existing;
+        }
+
+        return ObservationFact.builder()
+                .kind(firstNonNull(
+                        existing.kind(),
+                        incoming.kind()
+                ))
+                .siteSymbol(firstNonBlank(
+                        existing.siteSymbol(),
+                        incoming.siteSymbol()
+                ))
+                .targetSymbol(firstNonBlank(
+                        existing.targetSymbol(),
+                        incoming.targetSymbol()
+                ))
+                .targetTypeRef(mergeTypeRef(
+                        existing.targetTypeRef(),
+                        incoming.targetTypeRef()
+                ))
+                .note(preferLonger(
+                        existing.note(),
+                        incoming.note()
+                ))
+                .evidenceIds(mergeEvidenceIds(
+                        existing.evidenceIds(),
+                        incoming.evidenceIds()
+                ))
+                .origin(mergeOrigin(
+                        existing.origin(),
+                        incoming.origin()
+                ))
+                .confidenceHint(max(
+                        existing.confidenceHint(),
+                        incoming.confidenceHint()
+                ))
+                .attrs(mergeMaps(
+                        existing.attrs(),
+                        incoming.attrs()
+                ))
+                .build();
+    }
+
+    private static TypeRef mergeTypeRef(
+            TypeRef existing,
+            TypeRef incoming
+    ) {
+        if (existing == null) {
+            return incoming;
+        }
+        if (incoming == null) {
+            return existing;
+        }
+
+        return TypeRef.builder()
+                .raw(firstNonBlank(
+                        existing.raw(),
+                        incoming.raw()
+                ))
+                .args(firstNonEmptyList(
+                        existing.args(),
+                        incoming.args()
+                ))
+                .arrayDim(firstNonNull(
+                        existing.arrayDim(),
+                        incoming.arrayDim()
+                ))
+                .primitive(firstNonNull(
+                        existing.primitive(),
+                        incoming.primitive()
+                ))
+                .unresolved(mergeUnresolved(
+                        existing.unresolved(),
+                        incoming.unresolved()
+                ))
+                .sourceText(firstNonBlank(
+                        existing.sourceText(),
+                        incoming.sourceText()
+                ))
+                .wildcard(firstNonNull(
+                        existing.wildcard(),
+                        incoming.wildcard()
+                ))
+                .build();
+    }
+
+    private static Boolean mergeUnresolved(
+            Boolean existing,
+            Boolean incoming
+    ) {
+        if (Boolean.FALSE.equals(existing)
+                || Boolean.FALSE.equals(incoming)) {
+            return Boolean.FALSE;
+        }
+
+        return firstNonNull(existing, incoming);
+    }
+
+    private static <T> List<T> firstNonEmptyList(
+            List<T> existing,
+            List<T> incoming
+    ) {
+        if (existing != null && !existing.isEmpty()) {
+            return existing;
+        }
+        if (incoming != null && !incoming.isEmpty()) {
+            return incoming;
+        }
+        return List.of();
+    }
+
+    private static String preferLonger(
+            String existing,
+            String incoming
+    ) {
+        if (existing == null || existing.isBlank()) {
+            return incoming;
+        }
+        if (incoming == null || incoming.isBlank()) {
+            return existing;
+        }
+
+        return incoming.length() > existing.length()
+                ? incoming
+                : existing;
+    }
+
     private static RelationResolution mergeResolution(
             RelationResolution existing,
             RelationResolution incoming
@@ -730,10 +872,15 @@ public class ExtractionMergeSupport {
             }
 
             String key = observationKey(observation);
-            ObservationFact previous =
-                    target.putIfAbsent(key, observation);
+            boolean isNew = !target.containsKey(key);
 
-            if (previous == null && stats != null) {
+            target.merge(
+                    key,
+                    observation,
+                    ExtractionMergeSupport::mergeObservation
+            );
+
+            if (isNew && stats != null) {
                 stats.recordObservation();
             }
         }
@@ -760,15 +907,43 @@ public class ExtractionMergeSupport {
     private String observationKey(ObservationFact observation) {
         return String.join(
                 "|",
-                safeCode(observation.kind()),
+                observation.kind() == null
+                        ? ""
+                        : observation.kind().code(),
                 nullToEmpty(observation.siteSymbol()),
                 nullToEmpty(observation.targetSymbol()),
-                nullToEmpty(observation.note())
+                semanticTypeRefKey(observation.targetTypeRef())
         );
     }
 
-    private String safeCode(Object enumValue) {
-        return enumValue == null ? "" : enumValue.toString();
+    /**
+     * observation identity에서는 AST 전용 sourceText나 unresolved 상태를 제외한다.
+     * 동일한 JVM 타입을 AST와 ASM이 서로 다른 표현으로 수집해도 같은 observation으로
+     * 병합하기 위함이다.
+     */
+    private String semanticTypeRefKey(TypeRef typeRef) {
+        if (typeRef == null) {
+            return "";
+        }
+
+        List<String> argumentKeys = new ArrayList<>();
+        if (typeRef.args() != null) {
+            for (TypeRef argument : typeRef.args()) {
+                argumentKeys.add(semanticTypeRefKey(argument));
+            }
+        }
+
+        return String.join(
+                "~",
+                nullToEmpty(typeRef.raw()),
+                String.join(",", argumentKeys),
+                typeRef.arrayDim() == null
+                        ? ""
+                        : String.valueOf(typeRef.arrayDim()),
+                typeRef.wildcard() == null
+                        ? ""
+                        : typeRef.wildcard().code()
+        );
     }
 
     private String nullToEmpty(String value) {
@@ -1005,9 +1180,16 @@ public class ExtractionMergeSupport {
         }
 
         for (ObservationFact observation : observations) {
-            if (observation != null) {
-                map.put(observationKey(observation), observation);
+            if (observation == null) {
+                continue;
             }
+
+            map.merge(
+                    observationKey(observation),
+                    observation,
+                    ExtractionMergeSupport::mergeObservation
+            );
         }
     }
 }
+

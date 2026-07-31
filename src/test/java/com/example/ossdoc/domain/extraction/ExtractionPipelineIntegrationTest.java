@@ -982,6 +982,287 @@ class ExtractionPipelineIntegrationTest {
         );
     }
 
+
+    @Test
+    @DisplayName("AST_ONLY 모드 — Spring MVC HTTP Endpoint Observation 추출")
+    void extractFacts_astOnly_extractsHttpEndpointObservations()
+            throws IOException {
+        Path packageDirectory =
+                testWorkspaceRoot
+                        .resolve("repo")
+                        .resolve("src/main/java")
+                        .resolve("sample");
+
+        writeEndpointTestJavaSource(
+                packageDirectory
+        );
+
+        FactsExtractRequest request =
+                FactsExtractRequest.builder()
+                        .runId(TEST_RUN_ID)
+                        .mode(ExtractionMode.AST_ONLY)
+                        .includeObservations(true)
+                        .includeTests(false)
+                        .failFast(false)
+                        .build();
+
+        FactsExtractResponse response =
+                factsExtractionFacade.extract(request);
+
+        assertNotNull(response);
+
+        JsonNode factsJson = captureFactsJson();
+
+        JsonNode httpEndpoints =
+                factsJson.path("observations")
+                        .path("http_endpoints");
+
+        assertTrue(
+                httpEndpoints.isArray(),
+                "observations.http_endpoints는 배열이어야 함"
+        );
+
+        assertEquals(
+                5,
+                httpEndpoints.size(),
+                "정상 Endpoint 4건과 HTTP method 충돌 Endpoint 1건이 추출되어야 함"
+        );
+
+        JsonNode findUsers =
+                findObservationByMethodName(
+                        httpEndpoints,
+                        "findUsers"
+                );
+
+        assertNotNull(
+                findUsers,
+                "findUsers Endpoint observation이 존재해야 함"
+        );
+
+        assertEquals(
+                Set.of("GET"),
+                textValues(
+                        findUsers.path("attrs")
+                                .path("http_methods")
+                )
+        );
+
+        assertEquals(
+                Set.of(
+                        "/api/users",
+                        "/api/users/",
+                        "/internal/users",
+                        "/internal/users/"
+                ),
+                textValues(
+                        findUsers.path("attrs")
+                                .path("paths")
+                ),
+                "trailing slash가 있는 경로와 없는 경로를 구분해야 함"
+        );
+
+        assertEquals(
+                "resolved",
+                findUsers.path("attrs")
+                        .path("path_resolution")
+                        .asText()
+        );
+
+        assertEquals(
+                0.9,
+                findUsers.path("confidence_hint")
+                        .asDouble(),
+                0.0001
+        );
+
+        JsonNode findUsersEvidenceIds =
+                findUsers.path("evidence_ids");
+
+        assertTrue(
+                findUsersEvidenceIds.isArray(),
+                "Endpoint observation의 evidence_ids는 배열이어야 함"
+        );
+
+        assertEquals(
+                2,
+                findUsersEvidenceIds.size(),
+                "클래스와 메서드 매핑 Evidence가 모두 연결되어야 함"
+        );
+
+        Set<String> endpointEvidenceSnippets =
+                new HashSet<>();
+
+        JsonNode evidenceSection =
+                factsJson.path("evidence");
+
+        for (JsonNode evidenceIdNode
+                : findUsersEvidenceIds) {
+            JsonNode evidence = findEvidence(
+                    evidenceSection,
+                    evidenceIdNode.asText()
+            );
+
+            assertNotNull(
+                    evidence,
+                    "Endpoint observation이 참조하는 Evidence가 존재해야 함"
+            );
+
+            endpointEvidenceSnippets.add(
+                    evidence.path("snippet")
+                            .asText("")
+            );
+        }
+
+        assertTrue(
+                endpointEvidenceSnippets.stream()
+                        .anyMatch(snippet ->
+                                snippet.contains(
+                                        "@RequestMapping"
+                                )
+                        ),
+                "클래스 수준 RequestMapping Evidence가 있어야 함"
+        );
+
+        assertTrue(
+                endpointEvidenceSnippets.stream()
+                        .anyMatch(snippet ->
+                                snippet.contains(
+                                        "@GetMapping"
+                                )
+                        ),
+                "메서드 수준 GetMapping Evidence가 있어야 함"
+        );
+
+        JsonNode createUser =
+                findObservationByMethodName(
+                        httpEndpoints,
+                        "createUser"
+                );
+
+        assertNotNull(createUser);
+
+        assertEquals(
+                Set.of("POST"),
+                textValues(
+                        createUser.path("attrs")
+                                .path("http_methods")
+                )
+        );
+
+        assertEquals(
+                Set.of("application/json"),
+                textValues(
+                        createUser.path("attrs")
+                                .path("consumes")
+                ),
+                "method-level consumes가 추출되어야 함"
+        );
+
+        assertEquals(
+                Set.of("application/json"),
+                textValues(
+                        createUser.path("attrs")
+                                .path("produces")
+                ),
+                "class-level produces가 상속되어야 함"
+        );
+
+        JsonNode updateUser =
+                findObservationByMethodName(
+                        httpEndpoints,
+                        "updateUser"
+                );
+
+        assertNotNull(updateUser);
+
+        assertEquals(
+                Set.of("PUT", "PATCH"),
+                textValues(
+                        updateUser.path("attrs")
+                                .path("http_methods")
+                ),
+                "RequestMapping의 복수 HTTP method가 추출되어야 함"
+        );
+
+        JsonNode search =
+                findObservationByMethodName(
+                        httpEndpoints,
+                        "search"
+                );
+
+        assertNotNull(search);
+
+        assertEquals(
+                "unresolved",
+                search.path("attrs")
+                        .path("path_resolution")
+                        .asText(),
+                "상수 경로를 빈 경로나 루트 경로로 오인하면 안 됨"
+        );
+
+        assertEquals(
+                0,
+                search.path("attrs")
+                        .path("paths")
+                        .size(),
+                "미해석 상수 경로에는 확정 paths가 없어야 함"
+        );
+
+        assertEquals(
+                "SEARCH",
+                search.path("attrs")
+                        .path("method_mapping_attributes")
+                        .path("value")
+                        .asText(),
+                "미해석 경로의 원래 상수 이름을 보존해야 함"
+        );
+
+        assertEquals(
+                0.6,
+                search.path("confidence_hint")
+                        .asDouble(),
+                0.0001
+        );
+
+        JsonNode conflict =
+                findObservationByMethodName(
+                        httpEndpoints,
+                        "conflict"
+                );
+
+        assertNotNull(conflict);
+
+        assertTrue(
+                conflict.path("attrs")
+                        .path("mapping_conflict")
+                        .asBoolean(),
+                "클래스와 메서드 HTTP method가 충돌하면 표시되어야 함"
+        );
+
+        assertEquals(
+                0,
+                conflict.path("attrs")
+                        .path("http_methods")
+                        .size(),
+                "충돌한 HTTP method의 교집합은 비어 있어야 함"
+        );
+
+        assertEquals(
+                0.4,
+                conflict.path("confidence_hint")
+                        .asDouble(),
+                0.0001
+        );
+
+        assertTrue(
+                findObservationByMethodName(
+                        httpEndpoints,
+                        "helper"
+                ) == null,
+                "매핑 annotation이 없는 일반 메서드는 Endpoint로 추출하면 안 됨"
+        );
+    }
+
     /**
      * 테스트마다 독립적인 임시 워크스페이스를 생성한다.
      *
@@ -1132,6 +1413,120 @@ class ExtractionPipelineIntegrationTest {
         return sourceFile;
     }
 
+
+    private Path writeEndpointTestJavaSource(
+            Path packageDirectory
+    ) throws IOException {
+        Path sourceFile =
+                packageDirectory.resolve(
+                        "EndpointSample.java"
+                );
+
+        Files.writeString(
+                sourceFile,
+                """
+                package sample;
+
+                @RequestMapping(
+                        path = {"/api", "/internal"},
+                        produces = "application/json"
+                )
+                class EndpointSample {
+
+                    @GetMapping({"/users", "/users/"})
+                    public String findUsers() {
+                        return "users";
+                    }
+
+                    @PostMapping(
+                            path = "/users",
+                            consumes = "application/json"
+                    )
+                    public void createUser() {
+                    }
+
+                    @RequestMapping(
+                            path = "/users/{id}",
+                            method = {
+                                    RequestMethod.PUT,
+                                    RequestMethod.PATCH
+                            }
+                    )
+                    public void updateUser() {
+                    }
+
+                    @GetMapping(ApiPaths.SEARCH)
+                    public void search() {
+                    }
+
+                    public void helper() {
+                    }
+                }
+
+                @RequestMapping(
+                        path = "/conflict",
+                        method = RequestMethod.POST
+                )
+                class ConflictingEndpointSample {
+
+                    @GetMapping("/value")
+                    public void conflict() {
+                    }
+                }
+
+                final class ApiPaths {
+                    static final String SEARCH = "/search";
+
+                    private ApiPaths() {
+                    }
+                }
+
+                enum RequestMethod {
+                    GET,
+                    POST,
+                    PUT,
+                    PATCH,
+                    DELETE
+                }
+
+                @interface RequestMapping {
+                    String[] value() default {};
+
+                    String[] path() default {};
+
+                    RequestMethod[] method() default {};
+
+                    String[] consumes() default {};
+
+                    String[] produces() default {};
+                }
+
+                @interface GetMapping {
+                    String[] value() default {};
+
+                    String[] path() default {};
+
+                    String[] consumes() default {};
+
+                    String[] produces() default {};
+                }
+
+                @interface PostMapping {
+                    String[] value() default {};
+
+                    String[] path() default {};
+
+                    String[] consumes() default {};
+
+                    String[] produces() default {};
+                }
+                """,
+                StandardCharsets.UTF_8
+        );
+
+        return sourceFile;
+    }
+
     /**
      * AST_PLUS_BYTECODE 테스트에서 사용할 class 파일을 생성한다.
      */
@@ -1258,6 +1653,51 @@ class ExtractionPipelineIntegrationTest {
         );
 
         return factsJson;
+    }
+
+
+    private JsonNode findObservationByMethodName(
+            JsonNode observations,
+            String methodName
+    ) {
+        if (observations == null
+                || !observations.isArray()
+                || methodName == null
+                || methodName.isBlank()) {
+            return null;
+        }
+
+        for (JsonNode observation : observations) {
+            String siteSymbol = firstNonBlankText(
+                    observation,
+                    "site_symbol",
+                    "siteSymbol"
+            );
+
+            if (siteSymbol != null
+                    && siteSymbol.contains(methodName)) {
+                return observation;
+            }
+        }
+
+        return null;
+    }
+
+    private Set<String> textValues(JsonNode arrayNode) {
+        Set<String> result = new HashSet<>();
+
+        if (arrayNode == null
+                || !arrayNode.isArray()) {
+            return result;
+        }
+
+        for (JsonNode value : arrayNode) {
+            if (value.isTextual()) {
+                result.add(value.asText());
+            }
+        }
+
+        return result;
     }
 
     private Set<String> collectEvidenceIds(

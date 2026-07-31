@@ -33,7 +33,6 @@ import com.github.javaparser.JavaParser;
 import com.github.javaparser.ParseProblemException;
 import com.github.javaparser.ParseResult;
 import com.github.javaparser.ParserConfiguration;
-import com.github.javaparser.Position;
 import com.github.javaparser.Range;
 import com.github.javaparser.ast.CompilationUnit;
 // com.github.javaparser.ast.Modifier is used via FQN to avoid clash with extraction Modifier enum
@@ -130,6 +129,24 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
     private static final Pattern MUTATING_PREFIX = Pattern.compile("^(set|add|remove)[A-Z].*");
 
     private record ThrowAnalysis(List<TypeRef> uncheckedTypes, boolean hasConditional) {}
+    private record HttpMapping(AnnotationExpr annotation, String annotationName, List<String> httpMethods, List<String> paths, List<String> consumes, List<String> produces, Map<String, String> rawAttributes, boolean pathDeclared, boolean pathResolved) {}
+
+    private boolean hasAnnotationAttribute(
+            AnnotationExpr annotation,
+            Set<String> attributeNames
+    ) {
+        if (annotation instanceof SingleMemberAnnotationExpr) {
+            return attributeNames.contains("value");
+        }
+
+        if (annotation instanceof NormalAnnotationExpr normal) {
+            return normal.getPairs().stream()
+                    .map(MemberValuePair::getNameAsString)
+                    .anyMatch(attributeNames::contains);
+        }
+
+        return false;
+    }
 
     @Override
     public ChunkKind supports() {
@@ -374,6 +391,8 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                 context,
                 typeDeclaration,
                 typeSymbol,
+                relativePath,
+                sourceLines,
                 evidence.id(),
                 sink
         );
@@ -384,7 +403,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             } else if (member instanceof ConstructorDeclaration constructorDeclaration) {
                 collectConstructor(context, relativePath, typeSymbol, constructorDeclaration, sourceLines, sink);
             } else if (member instanceof MethodDeclaration methodDeclaration) {
-                collectMethod(context, relativePath, typeSymbol, methodDeclaration, sourceLines, sink);
+                collectMethod(context, relativePath, typeSymbol, typeDeclaration, methodDeclaration, sourceLines, sink);
             } else if (member instanceof TypeDeclaration<?> nestedType) {
                 collectTypeRecursive(context, relativePath, packageSymbol, typeSymbol, nestedType, sourceLines, sink);
             }
@@ -493,6 +512,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             ExtractionContext context,
             String relativePath,
             String ownerTypeSymbol,
+            TypeDeclaration<?> ownerTypeDeclaration,
             MethodDeclaration declaration,
             List<String> sourceLines,
             ExtractionSink sink
@@ -531,7 +551,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
 
         addAnnotationRelations(methodSymbol, declaration.getAnnotations(), annotationRefs, relativePath, sourceLines, evidence.id(), sink);
         addCallableBodyRelations(declaration, methodSymbol, relativePath, sourceLines, evidence.id(), sink);
-        addMethodObservationsIfNeeded(context, declaration, methodSymbol, evidence.id(), sink);
+        addMethodObservationsIfNeeded(context, ownerTypeDeclaration, declaration, methodSymbol, relativePath, sourceLines, evidence.id(), sink);
         addOverridesRelationIfPresent(declaration, methodSymbol, declaration.getNameAsString(), signature, evidence.id(), sink);
 
         if (isExampleFile(relativePath)) {
@@ -886,6 +906,8 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             ExtractionContext context,
             TypeDeclaration<?> typeDeclaration,
             String typeSymbol,
+            String relativePath,
+            List<String> sourceLines,
             String evidenceId,
             ExtractionSink sink
     ) {
@@ -893,30 +915,731 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             return;
         }
 
-        Set<String> annotationNames = nodeAnnotationNames(typeDeclaration, sink);
-        if (annotationNames.stream().anyMatch(this::isDiProviderTypeAnnotation)) {
-            sink.addObservation(ObservationFact.builder()
-                    .kind(ObservationKind.DI_PROVIDER)
-                    .siteSymbol(typeSymbol)
-                    .evidenceIds(List.of(evidenceId))
-                    .origin(FactOriginKind.OBSERVED)
-                    .confidenceHint(ConfidenceHints.observation(List.of(EvidenceType.AST)))
-                    .note("type-level DI provider annotation")
-                    .attrs(Map.of("annotations", annotationNames))
-                    .build());
+        Set<String> annotationNames =
+                nodeAnnotationNames(typeDeclaration, sink);
+
+        List<AnnotationExpr> providerAnnotations =
+                matchingAnnotations(
+                        typeDeclaration,
+                        this::isDiProviderTypeAnnotation
+                );
+
+        if (!providerAnnotations.isEmpty()) {
+            String qualifiedTypeName =
+                    resolveQualifiedTypeName(typeDeclaration);
+
+            TypeRef providedType =
+                    TypeRefFactory.simple(qualifiedTypeName);
+
+            List<String> beanNames =
+                    extractTypeProviderBeanNames(
+                            typeDeclaration,
+                            providerAnnotations
+                    );
+
+            List<String> qualifiers =
+                    extractQualifierValues(
+                            typeDeclaration,
+                            defaultBeanName(
+                                    typeDeclaration.getNameAsString()
+                            )
+                    );
+
+            boolean primary =
+                    hasAnnotationSuffix(
+                            typeDeclaration,
+                            "Primary"
+                    );
+
+            Map<String, Object> attrs =
+                    new LinkedHashMap<>();
+
+            attrs.put(
+                    "provider_kind",
+                    providerKind(
+                            providerAnnotations.get(0)
+                    )
+            );
+            attrs.put("bean_names", beanNames);
+            attrs.put(
+                    "provided_type",
+                    qualifiedTypeName
+            );
+            attrs.put("primary", primary);
+            attrs.put("qualifiers", qualifiers);
+            attrs.put("annotations", annotationNames);
+            attrs.put(
+                    "provider_annotation",
+                    resolveAnnotationQualifiedName(
+                            providerAnnotations.get(0)
+                    )
+            );
+
+            List<String> observationEvidenceIds =
+                    registerAnnotationEvidenceIds(
+                            typeDeclaration,
+                            typeSymbol,
+                            relativePath,
+                            sourceLines,
+                            evidenceId,
+                            sink,
+                            annotationName ->
+                                    isDiProviderTypeAnnotation(
+                                            annotationName
+                                    )
+                                            || annotationName.endsWith(
+                                            "Primary"
+                                    )
+                                            || annotationName.endsWith(
+                                            "Qualifier"
+                                    )
+                                            || annotationName.endsWith(
+                                            "Named"
+                                    )
+                    );
+
+            sink.addObservation(
+                    ObservationFact.builder()
+                            .kind(ObservationKind.DI_PROVIDER)
+                            .siteSymbol(typeSymbol)
+                            .targetTypeRef(providedType)
+                            .evidenceIds(
+                                    observationEvidenceIds
+                            )
+                            .origin(FactOriginKind.AST)
+                            .confidenceHint(0.9)
+                            .note(
+                                    "dependency injection provider"
+                            )
+                            .attrs(attrs)
+                            .build()
+            );
         }
 
-        if (annotationNames.stream().anyMatch(this::isConfigurationAnnotation)) {
-            sink.addObservation(ObservationFact.builder()
-                    .kind(ObservationKind.CONFIG_WIRING)
-                    .siteSymbol(typeSymbol)
-                    .evidenceIds(List.of(evidenceId))
-                    .origin(FactOriginKind.OBSERVED)
-                    .confidenceHint(ConfidenceHints.observation(List.of(EvidenceType.AST)))
-                    .note("configuration class annotation")
-                    .attrs(Map.of("annotations", annotationNames))
-                    .build());
+        List<AnnotationExpr> configurationAnnotations =
+                matchingAnnotations(
+                        typeDeclaration,
+                        this::isConfigurationAnnotation
+                );
+
+        if (configurationAnnotations.isEmpty()) {
+            return;
         }
+
+        List<String> configurationKinds =
+                configurationKinds(
+                        configurationAnnotations
+                );
+
+        List<String> importedTypes =
+                extractImportedTypes(
+                        typeDeclaration,
+                        sink
+                );
+
+        List<String> componentScanBaseClasses =
+                extractComponentScanBaseClasses(
+                        typeDeclaration,
+                        sink
+                );
+
+        List<String> componentScanPackages =
+                extractComponentScanPackages(
+                        typeDeclaration,
+                        componentScanBaseClasses
+                );
+
+        Map<String, Object> attrs =
+                new LinkedHashMap<>();
+
+        attrs.put(
+                "configuration_kind",
+                configurationKinds.get(0)
+        );
+        attrs.put(
+                "configuration_kinds",
+                configurationKinds
+        );
+        attrs.put(
+                "imported_types",
+                importedTypes
+        );
+        attrs.put(
+                "component_scan_packages",
+                componentScanPackages
+        );
+        attrs.put(
+                "component_scan_base_package_classes",
+                componentScanBaseClasses
+        );
+        attrs.put("annotations", annotationNames);
+
+        List<String> observationEvidenceIds =
+                registerAnnotationEvidenceIds(
+                        typeDeclaration,
+                        typeSymbol,
+                        relativePath,
+                        sourceLines,
+                        evidenceId,
+                        sink,
+                        this::isConfigurationAnnotation
+                );
+
+        sink.addObservation(
+                ObservationFact.builder()
+                        .kind(ObservationKind.CONFIG_WIRING)
+                        .siteSymbol(typeSymbol)
+                        .evidenceIds(
+                                observationEvidenceIds
+                        )
+                        .origin(FactOriginKind.AST)
+                        .confidenceHint(0.9)
+                        .note("configuration wiring")
+                        .attrs(attrs)
+                        .build()
+        );
+    }
+
+    private List<AnnotationExpr> matchingAnnotations(
+            NodeWithAnnotations<?> node,
+            java.util.function.Predicate<String> matcher
+    ) {
+        if (node == null
+                || matcher == null
+                || node.getAnnotations().isEmpty()) {
+            return List.of();
+        }
+
+        List<AnnotationExpr> result =
+                new ArrayList<>();
+
+        for (AnnotationExpr annotation
+                : node.getAnnotations()) {
+
+            String annotationName =
+                    resolveAnnotationQualifiedName(annotation);
+
+            if (matcher.test(annotationName)) {
+                result.add(annotation);
+            }
+        }
+
+        return List.copyOf(result);
+    }
+
+    private boolean hasAnnotationSuffix(
+            NodeWithAnnotations<?> node,
+            String suffix
+    ) {
+        if (node == null
+                || suffix == null
+                || suffix.isBlank()) {
+            return false;
+        }
+
+        return node.getAnnotations().stream()
+                .map(this::resolveAnnotationQualifiedName)
+                .anyMatch(name ->
+                        name.endsWith(suffix)
+                );
+    }
+
+    private List<String> registerAnnotationEvidenceIds(
+            NodeWithAnnotations<?> node,
+            String sourceSymbol,
+            String relativePath,
+            List<String> sourceLines,
+            String fallbackEvidenceId,
+            ExtractionSink sink,
+            java.util.function.Predicate<String> matcher
+    ) {
+        LinkedHashSet<String> evidenceIds =
+                new LinkedHashSet<>();
+
+        if (node != null && matcher != null) {
+            for (AnnotationExpr annotation
+                    : node.getAnnotations()) {
+
+                String annotationName =
+                        resolveAnnotationQualifiedName(
+                                annotation
+                        );
+
+                if (!matcher.test(annotationName)) {
+                    continue;
+                }
+
+                evidenceIds.add(
+                        registerExpressionEvidence(
+                                relativePath,
+                                sourceLines,
+                                annotation,
+                                sourceSymbol,
+                                fallbackEvidenceId,
+                                sink
+                        )
+                );
+            }
+        }
+
+        if (evidenceIds.isEmpty()
+                && fallbackEvidenceId != null
+                && !fallbackEvidenceId.isBlank()) {
+            evidenceIds.add(fallbackEvidenceId);
+        }
+
+        return List.copyOf(evidenceIds);
+    }
+
+    private String providerKind(
+            AnnotationExpr annotation
+    ) {
+        String annotationName =
+                resolveAnnotationQualifiedName(annotation);
+
+        if (annotationName.endsWith(
+                "RestController"
+        )) {
+            return "rest_controller_type";
+        }
+        if (annotationName.endsWith(
+                "Controller"
+        )) {
+            return "controller_type";
+        }
+        if (annotationName.endsWith(
+                "Service"
+        )) {
+            return "service_type";
+        }
+        if (annotationName.endsWith(
+                "Repository"
+        )) {
+            return "repository_type";
+        }
+        if (annotationName.endsWith(
+                "Named"
+        )) {
+            return "named_type";
+        }
+
+        return "component_type";
+    }
+
+    private String methodProviderKind(
+            AnnotationExpr annotation
+    ) {
+        String annotationName =
+                resolveAnnotationQualifiedName(annotation);
+
+        return annotationName.endsWith("Produces")
+                ? "producer_method"
+                : "bean_method";
+    }
+
+    private List<String> extractTypeProviderBeanNames(
+            TypeDeclaration<?> typeDeclaration,
+            List<AnnotationExpr> providerAnnotations
+    ) {
+        LinkedHashSet<String> names =
+                new LinkedHashSet<>();
+
+        for (AnnotationExpr annotation
+                : providerAnnotations) {
+            names.addAll(
+                    extractStringAttributes(
+                            annotation,
+                            Set.of("value", "name")
+                    )
+            );
+        }
+
+        if (names.isEmpty()) {
+            names.add(
+                    defaultBeanName(
+                            typeDeclaration.getNameAsString()
+                    )
+            );
+        }
+
+        return List.copyOf(names);
+    }
+
+    private List<String> extractMethodProviderBeanNames(
+            MethodDeclaration declaration,
+            AnnotationExpr providerAnnotation
+    ) {
+        LinkedHashSet<String> names =
+                new LinkedHashSet<>();
+
+        String annotationName =
+                resolveAnnotationQualifiedName(
+                        providerAnnotation
+                );
+
+        if (annotationName.endsWith("Bean")) {
+            names.addAll(
+                    extractStringAttributes(
+                            providerAnnotation,
+                            Set.of("value", "name")
+                    )
+            );
+        }
+
+        for (AnnotationExpr annotation
+                : declaration.getAnnotations()) {
+
+            String currentName =
+                    resolveAnnotationQualifiedName(
+                            annotation
+                    );
+
+            if (currentName.endsWith("Named")) {
+                names.addAll(
+                        extractStringAttributes(
+                                annotation,
+                                Set.of("value")
+                        )
+                );
+            }
+        }
+
+        if (names.isEmpty()) {
+            names.add(
+                    declaration.getNameAsString()
+            );
+        }
+
+        return List.copyOf(names);
+    }
+
+    private List<String> extractQualifierValues(
+            NodeWithAnnotations<?> node,
+            String defaultValue
+    ) {
+        LinkedHashSet<String> qualifiers =
+                new LinkedHashSet<>();
+
+        if (node == null) {
+            return List.of();
+        }
+
+        for (AnnotationExpr annotation
+                : node.getAnnotations()) {
+
+            String annotationName =
+                    resolveAnnotationQualifiedName(
+                            annotation
+                    );
+
+            if (!annotationName.endsWith("Qualifier")
+                    && !annotationName.endsWith("Named")) {
+                continue;
+            }
+
+            List<String> values =
+                    extractStringAttributes(
+                            annotation,
+                            Set.of("value", "name")
+                    );
+
+            if (values.isEmpty()
+                    && annotationName.endsWith("Named")
+                    && defaultValue != null
+                    && !defaultValue.isBlank()) {
+                qualifiers.add(defaultValue);
+            } else {
+                qualifiers.addAll(values);
+            }
+        }
+
+        return List.copyOf(qualifiers);
+    }
+
+    private List<String> extractStringAttributes(
+            AnnotationExpr annotation,
+            Set<String> attributeNames
+    ) {
+        List<Expression> expressions =
+                findAnnotationAttributeExpressions(
+                        annotation,
+                        attributeNames
+                );
+
+        LinkedHashSet<String> values =
+                new LinkedHashSet<>();
+
+        for (Expression expression : expressions) {
+            collectStringValues(
+                    expression,
+                    values
+            );
+        }
+
+        return List.copyOf(values);
+    }
+
+    private List<String> configurationKinds(
+            List<AnnotationExpr> annotations
+    ) {
+        LinkedHashSet<String> kinds =
+                new LinkedHashSet<>();
+
+        for (AnnotationExpr annotation
+                : annotations) {
+
+            String annotationName =
+                    resolveAnnotationQualifiedName(
+                            annotation
+                    );
+
+            if (annotationName.endsWith(
+                    "Configuration"
+            )) {
+                kinds.add(
+                        "spring_configuration"
+                );
+            } else if (annotationName.endsWith(
+                    "Import"
+            )) {
+                kinds.add("spring_import");
+            } else if (annotationName.endsWith(
+                    "ComponentScan"
+            )) {
+                kinds.add(
+                        "spring_component_scan"
+                );
+            }
+        }
+
+        if (kinds.isEmpty()) {
+            kinds.add("configuration");
+        }
+
+        return List.copyOf(kinds);
+    }
+
+    private List<String> extractImportedTypes(
+            NodeWithAnnotations<?> node,
+            ExtractionSink sink
+    ) {
+        LinkedHashSet<String> importedTypes =
+                new LinkedHashSet<>();
+
+        if (node == null) {
+            return List.of();
+        }
+
+        for (AnnotationExpr annotation
+                : node.getAnnotations()) {
+
+            String annotationName =
+                    resolveAnnotationQualifiedName(
+                            annotation
+                    );
+
+            if (!annotationName.endsWith("Import")) {
+                continue;
+            }
+
+            List<Expression> expressions =
+                    findAnnotationAttributeExpressions(
+                            annotation,
+                            Set.of("value")
+                    );
+
+            for (Expression expression
+                    : expressions) {
+                collectClassTypeValues(
+                        expression,
+                        importedTypes,
+                        sink
+                );
+            }
+        }
+
+        return List.copyOf(importedTypes);
+    }
+
+    private List<String> extractComponentScanBaseClasses(
+            NodeWithAnnotations<?> node,
+            ExtractionSink sink
+    ) {
+        LinkedHashSet<String> classes =
+                new LinkedHashSet<>();
+
+        if (node == null) {
+            return List.of();
+        }
+
+        for (AnnotationExpr annotation
+                : node.getAnnotations()) {
+
+            String annotationName =
+                    resolveAnnotationQualifiedName(
+                            annotation
+                    );
+
+            if (!annotationName.endsWith(
+                    "ComponentScan"
+            )) {
+                continue;
+            }
+
+            List<Expression> expressions =
+                    findAnnotationAttributeExpressions(
+                            annotation,
+                            Set.of("basePackageClasses")
+                    );
+
+            for (Expression expression
+                    : expressions) {
+                collectClassTypeValues(
+                        expression,
+                        classes,
+                        sink
+                );
+            }
+        }
+
+        return List.copyOf(classes);
+    }
+
+    private List<String> extractComponentScanPackages(
+            NodeWithAnnotations<?> node,
+            List<String> basePackageClasses
+    ) {
+        LinkedHashSet<String> packages =
+                new LinkedHashSet<>();
+
+        if (node != null) {
+            for (AnnotationExpr annotation
+                    : node.getAnnotations()) {
+
+                String annotationName =
+                        resolveAnnotationQualifiedName(
+                                annotation
+                        );
+
+                if (!annotationName.endsWith(
+                        "ComponentScan"
+                )) {
+                    continue;
+                }
+
+                packages.addAll(
+                        extractStringAttributes(
+                                annotation,
+                                Set.of(
+                                        "value",
+                                        "basePackages"
+                                )
+                        )
+                );
+            }
+        }
+
+        if (basePackageClasses != null) {
+            for (String className
+                    : basePackageClasses) {
+                String packageName =
+                        packageNameOf(className);
+
+                if (!packageName.isBlank()) {
+                    packages.add(packageName);
+                }
+            }
+        }
+
+        return List.copyOf(packages);
+    }
+
+    private void collectClassTypeValues(
+            Expression expression,
+            Set<String> destination,
+            ExtractionSink sink
+    ) {
+        if (expression == null
+                || destination == null) {
+            return;
+        }
+
+        if (expression.isArrayInitializerExpr()) {
+            expression.asArrayInitializerExpr()
+                    .getValues()
+                    .forEach(value ->
+                            collectClassTypeValues(
+                                    value,
+                                    destination,
+                                    sink
+                            )
+                    );
+            return;
+        }
+
+        if (expression.isClassExpr()) {
+            TypeRef typeRef =
+                    toTypeRef(
+                            expression.asClassExpr()
+                                    .getType(),
+                            sink
+                    );
+
+            if (typeRef != null
+                    && typeRef.raw() != null
+                    && !typeRef.raw().isBlank()) {
+                destination.add(typeRef.raw());
+            }
+            return;
+        }
+
+        String rawValue = expression.toString();
+
+        if (!rawValue.isBlank()) {
+            destination.add(rawValue);
+        }
+    }
+
+    private String packageNameOf(
+            String qualifiedTypeName
+    ) {
+        if (qualifiedTypeName == null
+                || qualifiedTypeName.isBlank()) {
+            return "";
+        }
+
+        int lastDot =
+                qualifiedTypeName.lastIndexOf('.');
+
+        return lastDot < 0
+                ? ""
+                : qualifiedTypeName.substring(
+                0,
+                lastDot
+        );
+    }
+
+    private String defaultBeanName(
+            String simpleTypeName
+    ) {
+        if (simpleTypeName == null
+                || simpleTypeName.isBlank()) {
+            return "";
+        }
+
+        if (simpleTypeName.length() > 1
+                && Character.isUpperCase(
+                simpleTypeName.charAt(0)
+        )
+                && Character.isUpperCase(
+                simpleTypeName.charAt(1)
+        )) {
+            return simpleTypeName;
+        }
+
+        return Character.toLowerCase(
+                simpleTypeName.charAt(0)
+        ) + simpleTypeName.substring(1);
     }
 
     private void addFieldObservationsIfNeeded(
@@ -976,10 +1699,575 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         }
     }
 
-    private void addMethodObservationsIfNeeded(
-            ExtractionContext context,
+    private void addHttpEndpointObservationsIfNeeded(
+            TypeDeclaration<?> ownerTypeDeclaration,
             MethodDeclaration declaration,
             String methodSymbol,
+            String relativePath,
+            List<String> sourceLines,
+            String fallbackEvidenceId,
+            ExtractionSink sink
+    ) {
+        List<HttpMapping> methodMappings = extractHttpMappings(declaration);
+        if (methodMappings.isEmpty()) {
+            return;
+        }
+
+        List<HttpMapping> classMappings = extractHttpMappings(ownerTypeDeclaration);
+        if (classMappings.isEmpty()) {
+            classMappings = List.of(emptyHttpMapping());
+        }
+
+        String ownerTypeSymbol = SymbolIdFactory.type(
+                resolveQualifiedTypeName(ownerTypeDeclaration)
+        );
+
+        for (HttpMapping methodMapping : methodMappings) {
+            for (HttpMapping classMapping : classMappings) {
+                List<String> httpMethods = effectiveHttpMethods(
+                        classMapping.httpMethods(),
+                        methodMapping.httpMethods()
+                );
+
+                boolean pathResolved = classMapping.pathResolved()
+                        && methodMapping.pathResolved();
+
+                List<String> combinedPaths = pathResolved
+                        ? combineHttpPaths(
+                        classMapping.paths(),
+                        methodMapping.paths()
+                )
+                        : List.of();
+
+                List<String> consumes = effectiveMappingCondition(
+                        classMapping.consumes(),
+                        methodMapping.consumes()
+                );
+
+                List<String> produces = effectiveMappingCondition(
+                        classMapping.produces(),
+                        methodMapping.produces()
+                );
+
+                List<String> evidenceIds = new ArrayList<>();
+
+                String methodEvidenceId = registerExpressionEvidence(
+                        relativePath,
+                        sourceLines,
+                        methodMapping.annotation(),
+                        methodSymbol,
+                        fallbackEvidenceId,
+                        sink
+                );
+                evidenceIds.add(methodEvidenceId);
+
+                if (classMapping.annotation() != null) {
+                    String classEvidenceId = registerExpressionEvidence(
+                            relativePath,
+                            sourceLines,
+                            classMapping.annotation(),
+                            ownerTypeSymbol,
+                            fallbackEvidenceId,
+                            sink
+                    );
+
+                    if (!evidenceIds.contains(classEvidenceId)) {
+                        evidenceIds.add(classEvidenceId);
+                    }
+                }
+
+                boolean methodConflict = httpMethods.isEmpty();
+
+                Map<String, Object> attrs = new LinkedHashMap<>();
+                attrs.put("framework", "spring_mvc");
+                attrs.put("annotation", methodMapping.annotationName());
+                attrs.put("http_methods", httpMethods);
+                attrs.put("class_paths", classMapping.paths());
+                attrs.put("method_paths", methodMapping.paths());
+                attrs.put("paths", combinedPaths);
+                attrs.put("class_path_declared", classMapping.pathDeclared());
+                attrs.put("method_path_declared", methodMapping.pathDeclared());
+                attrs.put(
+                        "path_resolution",
+                        pathResolved ? "resolved" : "unresolved"
+                );
+
+                if (methodConflict) {
+                    attrs.put("mapping_conflict", true);
+                    attrs.put(
+                            "mapping_conflict_reason",
+                            "class-level and method-level HTTP methods do not intersect"
+                    );
+                }
+
+                if (!consumes.isEmpty()) {
+                    attrs.put("consumes", consumes);
+                }
+
+                if (!produces.isEmpty()) {
+                    attrs.put("produces", produces);
+                }
+
+                if (!methodMapping.rawAttributes().isEmpty()) {
+                    attrs.put(
+                            "method_mapping_attributes",
+                            methodMapping.rawAttributes()
+                    );
+                }
+
+                if (!classMapping.rawAttributes().isEmpty()) {
+                    attrs.put(
+                            "class_mapping_attributes",
+                            classMapping.rawAttributes()
+                    );
+                }
+
+                if (classMapping.annotationName() != null) {
+                    attrs.put(
+                            "class_annotation",
+                            classMapping.annotationName()
+                    );
+                }
+
+                double confidence;
+                if (methodConflict) {
+                    confidence = 0.4;
+                } else if (!pathResolved) {
+                    confidence = 0.6;
+                } else {
+                    confidence = 0.9;
+                }
+
+                sink.addObservation(
+                        ObservationFact.builder()
+                                .kind(ObservationKind.HTTP_ENDPOINT)
+                                .siteSymbol(methodSymbol)
+                                .evidenceIds(List.copyOf(evidenceIds))
+                                .origin(FactOriginKind.OBSERVED)
+                                .confidenceHint(confidence)
+                                .note("spring mvc endpoint mapping")
+                                .attrs(attrs)
+                                .build()
+                );
+            }
+        }
+    }
+
+    private List<HttpMapping> extractHttpMappings(
+            NodeWithAnnotations<?> node
+    ) {
+        if (node == null || node.getAnnotations().isEmpty()) {
+            return List.of();
+        }
+
+        List<HttpMapping> mappings = new ArrayList<>();
+
+        for (AnnotationExpr annotation : node.getAnnotations()) {
+            String simpleName = annotation.getNameAsString();
+
+            if (!isHttpMappingAnnotation(simpleName)) {
+                continue;
+            }
+
+            String annotationName = resolveAnnotationQualifiedName(annotation);
+
+            List<Expression> pathExpressions = findAnnotationAttributeExpressions(
+                    annotation,
+                    Set.of("value", "path")
+            );
+            boolean pathDeclared = !pathExpressions.isEmpty();
+
+            List<String> paths = extractHttpPaths(annotation);
+            boolean explicitEmptyArray = pathDeclared
+                    && pathExpressions.stream().allMatch(this::isEmptyArrayInitializer);
+            boolean pathResolved = !pathDeclared
+                    || !paths.isEmpty()
+                    || explicitEmptyArray;
+
+            List<String> effectivePaths;
+            if (!pathDeclared || explicitEmptyArray) {
+                effectivePaths = List.of("");
+            } else if (pathResolved) {
+                effectivePaths = paths;
+            } else {
+                effectivePaths = List.of();
+            }
+
+            List<String> methods = extractHttpMethods(annotation, simpleName);
+            List<String> consumes = extractStringAttribute(annotation, "consumes");
+            List<String> produces = extractStringAttribute(annotation, "produces");
+
+            mappings.add(
+                    new HttpMapping(
+                            annotation,
+                            annotationName,
+                            methods,
+                            effectivePaths,
+                            consumes,
+                            produces,
+                            annotationAttributes(annotation),
+                            pathDeclared,
+                            pathResolved
+                    )
+            );
+        }
+
+        return List.copyOf(mappings);
+    }
+
+    private boolean isEmptyArrayInitializer(Expression expression) {
+        return expression != null
+                && expression.isArrayInitializerExpr()
+                && expression.asArrayInitializerExpr().getValues().isEmpty();
+    }
+
+    private HttpMapping emptyHttpMapping() {
+        return new HttpMapping(
+                null,
+                null,
+                List.of("ANY"),
+                List.of(""),
+                List.of(),
+                List.of(),
+                Map.of(),
+                false,
+                true
+        );
+    }
+
+    private boolean isHttpMappingAnnotation(String annotationName) {
+        return annotationName.endsWith("RequestMapping")
+                || annotationName.endsWith("GetMapping")
+                || annotationName.endsWith("PostMapping")
+                || annotationName.endsWith("PutMapping")
+                || annotationName.endsWith("DeleteMapping")
+                || annotationName.endsWith("PatchMapping");
+    }
+
+    private String resolveAnnotationQualifiedName(
+            AnnotationExpr annotation
+    ) {
+        try {
+            return annotation.resolve().getQualifiedName();
+        } catch (Exception ignored) {
+            return annotation.getNameAsString();
+        }
+    }
+
+    private List<String> extractHttpMethods(
+            AnnotationExpr annotation,
+            String annotationName
+    ) {
+        if (annotationName.endsWith("GetMapping")) {
+            return List.of("GET");
+        }
+        if (annotationName.endsWith("PostMapping")) {
+            return List.of("POST");
+        }
+        if (annotationName.endsWith("PutMapping")) {
+            return List.of("PUT");
+        }
+        if (annotationName.endsWith("DeleteMapping")) {
+            return List.of("DELETE");
+        }
+        if (annotationName.endsWith("PatchMapping")) {
+            return List.of("PATCH");
+        }
+
+        List<String> methods = extractEnumAttribute(
+                annotation,
+                "method"
+        );
+
+        return methods.isEmpty()
+                ? List.of("ANY")
+                : methods;
+    }
+
+    private List<String> extractEnumAttribute(
+            AnnotationExpr annotation,
+            String attributeName
+    ) {
+        List<Expression> expressions =
+                findAnnotationAttributeExpressions(
+                        annotation,
+                        Set.of(attributeName)
+                );
+
+        LinkedHashSet<String> values =
+                new LinkedHashSet<>();
+
+        for (Expression expression : expressions) {
+            collectEnumValues(expression, values);
+        }
+
+        return List.copyOf(values);
+    }
+
+    private void collectEnumValues(
+            Expression expression,
+            Set<String> destination
+    ) {
+        if (expression == null) {
+            return;
+        }
+
+        if (expression.isArrayInitializerExpr()) {
+            expression.asArrayInitializerExpr()
+                    .getValues()
+                    .forEach(value ->
+                            collectEnumValues(value, destination)
+                    );
+            return;
+        }
+
+        if (expression.isFieldAccessExpr()) {
+            destination.add(
+                    expression.asFieldAccessExpr()
+                            .getNameAsString()
+                            .toUpperCase(java.util.Locale.ROOT)
+            );
+            return;
+        }
+
+        if (expression.isNameExpr()) {
+            destination.add(
+                    expression.asNameExpr()
+                            .getNameAsString()
+                            .toUpperCase(java.util.Locale.ROOT)
+            );
+        }
+    }
+
+    private List<String> extractHttpPaths(
+            AnnotationExpr annotation
+    ) {
+        List<Expression> expressions =
+                findAnnotationAttributeExpressions(
+                        annotation,
+                        Set.of("value", "path")
+                );
+
+        LinkedHashSet<String> paths =
+                new LinkedHashSet<>();
+
+        for (Expression expression : expressions) {
+            collectStringValues(expression, paths);
+        }
+
+        return List.copyOf(paths);
+    }
+
+    private List<String> extractStringAttribute(
+            AnnotationExpr annotation,
+            String attributeName
+    ) {
+        List<Expression> expressions =
+                findAnnotationAttributeExpressions(
+                        annotation,
+                        Set.of(attributeName)
+                );
+
+        LinkedHashSet<String> values =
+                new LinkedHashSet<>();
+
+        for (Expression expression : expressions) {
+            collectStringValues(expression, values);
+        }
+
+        return List.copyOf(values);
+    }
+
+    private List<Expression> findAnnotationAttributeExpressions(
+            AnnotationExpr annotation,
+            Set<String> attributeNames
+    ) {
+        if (annotation instanceof SingleMemberAnnotationExpr single) {
+            return attributeNames.contains("value")
+                    ? List.of(single.getMemberValue())
+                    : List.of();
+        }
+
+        if (annotation instanceof NormalAnnotationExpr normal) {
+            return normal.getPairs().stream()
+                    .filter(pair ->
+                            attributeNames.contains(
+                                    pair.getNameAsString()
+                            )
+                    )
+                    .map(MemberValuePair::getValue)
+                    .toList();
+        }
+
+        return List.of();
+    }
+
+    private void collectStringValues(
+            Expression expression,
+            Set<String> destination
+    ) {
+        if (expression == null) {
+            return;
+        }
+
+        if (expression.isStringLiteralExpr()) {
+            destination.add(
+                    expression.asStringLiteralExpr().asString()
+            );
+            return;
+        }
+
+        if (expression.isArrayInitializerExpr()) {
+            expression.asArrayInitializerExpr()
+                    .getValues()
+                    .forEach(value ->
+                            collectStringValues(value, destination)
+                    );
+        }
+    }
+
+    private List<String> combineHttpPaths(
+            List<String> classPaths,
+            List<String> methodPaths
+    ) {
+        List<String> safeClassPaths =
+                classPaths == null || classPaths.isEmpty()
+                        ? List.of("")
+                        : classPaths;
+
+        List<String> safeMethodPaths =
+                methodPaths == null || methodPaths.isEmpty()
+                        ? List.of("")
+                        : methodPaths;
+
+        LinkedHashSet<String> combined =
+                new LinkedHashSet<>();
+
+        for (String classPath : safeClassPaths) {
+            for (String methodPath : safeMethodPaths) {
+                combined.add(
+                        joinHttpPaths(classPath, methodPath)
+                );
+            }
+        }
+
+        return List.copyOf(combined);
+    }
+
+    private String joinHttpPaths(
+            String classPath,
+            String methodPath
+    ) {
+        String left = normalizeHttpPath(classPath);
+        String right = normalizeHttpPath(methodPath);
+
+        if (left.isEmpty() && right.isEmpty()) {
+            return "/";
+        }
+
+        if (left.isEmpty()) {
+            return right;
+        }
+
+        if (right.isEmpty()) {
+            return left;
+        }
+
+        boolean leftEndsWithSlash = left.endsWith("/");
+        boolean rightStartsWithSlash = right.startsWith("/");
+
+        if (leftEndsWithSlash && rightStartsWithSlash) {
+            return left + right.substring(1);
+        }
+
+        if (!leftEndsWithSlash && !rightStartsWithSlash) {
+            return left + "/" + right;
+        }
+
+        return left + right;
+    }
+
+    private String normalizeHttpPath(String path) {
+        if (path == null || path.isBlank()) {
+            return "";
+        }
+
+        String normalized = path.trim();
+
+        if (!normalized.startsWith("/")) {
+            normalized = "/" + normalized;
+        }
+
+        return normalized;
+    }
+
+    private List<String> effectiveHttpMethods(
+            List<String> classMethods,
+            List<String> methodMethods
+    ) {
+        LinkedHashSet<String> classSet = normalizeHttpMethods(classMethods);
+        LinkedHashSet<String> methodSet = normalizeHttpMethods(methodMethods);
+
+        if (classSet.contains("ANY")) {
+            return List.copyOf(methodSet);
+        }
+
+        if (methodSet.contains("ANY")) {
+            return List.copyOf(classSet);
+        }
+
+        LinkedHashSet<String> intersection = new LinkedHashSet<>(classSet);
+        intersection.retainAll(methodSet);
+        return List.copyOf(intersection);
+    }
+
+    private LinkedHashSet<String> normalizeHttpMethods(
+            List<String> methods
+    ) {
+        LinkedHashSet<String> normalized = new LinkedHashSet<>();
+
+        if (methods == null || methods.isEmpty()) {
+            normalized.add("ANY");
+            return normalized;
+        }
+
+        for (String method : methods) {
+            if (method != null && !method.isBlank()) {
+                normalized.add(
+                        method.toUpperCase(java.util.Locale.ROOT)
+                );
+            }
+        }
+
+        if (normalized.isEmpty()) {
+            normalized.add("ANY");
+        }
+
+        return normalized;
+    }
+
+    private List<String> effectiveMappingCondition(
+            List<String> classValues,
+            List<String> methodValues
+    ) {
+        if (methodValues != null && !methodValues.isEmpty()) {
+            return methodValues;
+        }
+
+        if (classValues != null && !classValues.isEmpty()) {
+            return classValues;
+        }
+
+        return List.of();
+    }
+
+    private void addMethodObservationsIfNeeded(
+            ExtractionContext context,
+            TypeDeclaration<?> ownerTypeDeclaration,
+            MethodDeclaration declaration,
+            String methodSymbol,
+            String relativePath,
+            List<String> sourceLines,
             String evidenceId,
             ExtractionSink sink
     ) {
@@ -987,78 +2275,322 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             return;
         }
 
-        Set<String> annotationNames = nodeAnnotationNames(declaration, sink);
-        if (annotationNames.stream().anyMatch(this::isBeanAnnotation)) {
-            sink.addObservation(ObservationFact.builder()
-                    .kind(ObservationKind.DI_PROVIDER)
-                    .siteSymbol(methodSymbol)
-                    .targetTypeRef(declaration.getType().isVoidType() ? null : toTypeRef(declaration.getType(), sink))
-                    .evidenceIds(List.of(evidenceId))
-                    .origin(FactOriginKind.OBSERVED)
-                    .confidenceHint(ConfidenceHints.observation(List.of(EvidenceType.AST)))
-                    .note("@Bean style provider method")
-                    .attrs(Map.of("annotations", annotationNames))
-                    .build());
+        addHttpEndpointObservationsIfNeeded(
+                ownerTypeDeclaration,
+                declaration,
+                methodSymbol,
+                relativePath,
+                sourceLines,
+                evidenceId,
+                sink
+        );
+
+        Set<String> annotationNames =
+                nodeAnnotationNames(declaration, sink);
+
+        List<AnnotationExpr> providerAnnotations =
+                matchingAnnotations(
+                        declaration,
+                        this::isBeanAnnotation
+                );
+
+        if (!providerAnnotations.isEmpty()) {
+            AnnotationExpr providerAnnotation =
+                    providerAnnotations.get(0);
+
+            TypeRef providedType =
+                    declaration.getType().isVoidType()
+                            ? null
+                            : toTypeRef(
+                            declaration.getType(),
+                            sink
+                    );
+
+            List<String> beanNames =
+                    extractMethodProviderBeanNames(
+                            declaration,
+                            providerAnnotation
+                    );
+
+            List<String> qualifiers =
+                    extractQualifierValues(
+                            declaration,
+                            declaration.getNameAsString()
+                    );
+
+            boolean primary =
+                    hasAnnotationSuffix(
+                            declaration,
+                            "Primary"
+                    );
+
+            String ownerConfigSymbol =
+                    SymbolIdFactory.type(
+                            resolveQualifiedTypeName(
+                                    ownerTypeDeclaration
+                            )
+                    );
+
+            Map<String, Object> attrs =
+                    new LinkedHashMap<>();
+
+            attrs.put(
+                    "provider_kind",
+                    methodProviderKind(
+                            providerAnnotation
+                    )
+            );
+            attrs.put("bean_names", beanNames);
+            attrs.put(
+                    "provided_type",
+                    providedType == null
+                            ? null
+                            : providedType.raw()
+            );
+            attrs.put("primary", primary);
+            attrs.put("qualifiers", qualifiers);
+            attrs.put(
+                    "owner_config_symbol",
+                    ownerConfigSymbol
+            );
+            attrs.put(
+                    "owner_is_configuration",
+                    hasAnnotationSuffix(
+                            ownerTypeDeclaration,
+                            "Configuration"
+                    )
+            );
+            attrs.put("annotations", annotationNames);
+            attrs.put(
+                    "provider_annotation",
+                    resolveAnnotationQualifiedName(
+                            providerAnnotation
+                    )
+            );
+
+            List<String> observationEvidenceIds =
+                    registerAnnotationEvidenceIds(
+                            declaration,
+                            methodSymbol,
+                            relativePath,
+                            sourceLines,
+                            evidenceId,
+                            sink,
+                            annotationName ->
+                                    isBeanAnnotation(
+                                            annotationName
+                                    )
+                                            || annotationName.endsWith(
+                                            "Primary"
+                                    )
+                                            || annotationName.endsWith(
+                                            "Qualifier"
+                                    )
+                                            || annotationName.endsWith(
+                                            "Named"
+                                    )
+                    );
+
+            sink.addObservation(
+                    ObservationFact.builder()
+                            .kind(ObservationKind.DI_PROVIDER)
+                            .siteSymbol(methodSymbol)
+                            .targetTypeRef(providedType)
+                            .evidenceIds(
+                                    observationEvidenceIds
+                            )
+                            .origin(FactOriginKind.AST)
+                            .confidenceHint(0.9)
+                            .note(
+                                    "dependency injection provider"
+                            )
+                            .attrs(attrs)
+                            .build()
+            );
         }
 
-        if (annotationNames.stream().anyMatch(this::isEventSubscriberAnnotation)) {
-            sink.addObservation(ObservationFact.builder()
-                    .kind(ObservationKind.EVENT_SUBSCRIPTION)
-                    .siteSymbol(methodSymbol)
-                    .targetTypeRef(firstParameterType(declaration, sink))
-                    .evidenceIds(List.of(evidenceId))
-                    .origin(FactOriginKind.OBSERVED)
-                    .confidenceHint(ConfidenceHints.observation(List.of(EvidenceType.AST)))
-                    .note("event subscriber method")
-                    .attrs(Map.of("annotations", annotationNames))
-                    .build());
+        if (annotationNames.stream()
+                .anyMatch(
+                        this::isEventSubscriberAnnotation
+                )) {
+            sink.addObservation(
+                    ObservationFact.builder()
+                            .kind(
+                                    ObservationKind.EVENT_SUBSCRIPTION
+                            )
+                            .siteSymbol(methodSymbol)
+                            .targetTypeRef(
+                                    firstParameterType(
+                                            declaration,
+                                            sink
+                                    )
+                            )
+                            .evidenceIds(
+                                    List.of(evidenceId)
+                            )
+                            .origin(
+                                    FactOriginKind.OBSERVED
+                            )
+                            .confidenceHint(
+                                    ConfidenceHints.observation(
+                                            List.of(
+                                                    EvidenceType.AST
+                                            )
+                                    )
+                            )
+                            .note(
+                                    "event subscriber method"
+                            )
+                            .attrs(
+                                    Map.of(
+                                            "annotations",
+                                            annotationNames
+                                    )
+                            )
+                            .build()
+            );
         }
 
-        declaration.findAll(MethodCallExpr.class).forEach(call -> {
-            if (isPublishEventCall(call)) {
-                sink.addObservation(ObservationFact.builder()
-                        .kind(ObservationKind.EVENT_PUBLICATION)
-                        .siteSymbol(methodSymbol)
-                        .targetTypeRef(firstArgumentType(call, sink))
-                        .evidenceIds(List.of(evidenceId))
-                        .origin(FactOriginKind.OBSERVED)
-                        .confidenceHint(ConfidenceHints.observation(List.of(EvidenceType.AST)))
-                        .note("event publish candidate")
-                        .attrs(Map.of("method", call.getNameAsString()))
-                        .build());
-            }
+        declaration.findAll(MethodCallExpr.class)
+                .forEach(call -> {
+                    if (isPublishEventCall(call)) {
+                        sink.addObservation(
+                                ObservationFact.builder()
+                                        .kind(
+                                                ObservationKind.EVENT_PUBLICATION
+                                        )
+                                        .siteSymbol(
+                                                methodSymbol
+                                        )
+                                        .targetTypeRef(
+                                                firstArgumentType(
+                                                        call,
+                                                        sink
+                                                )
+                                        )
+                                        .evidenceIds(
+                                                List.of(
+                                                        evidenceId
+                                                )
+                                        )
+                                        .origin(
+                                                FactOriginKind.OBSERVED
+                                        )
+                                        .confidenceHint(
+                                                ConfidenceHints.observation(
+                                                        List.of(
+                                                                EvidenceType.AST
+                                                        )
+                                                )
+                                        )
+                                        .note(
+                                                "event publish candidate"
+                                        )
+                                        .attrs(
+                                                Map.of(
+                                                        "method",
+                                                        call.getNameAsString()
+                                                )
+                                        )
+                                        .build()
+                        );
+                    }
 
-            if (isReflectionCall(call)) {
-                sink.addObservation(ObservationFact.builder()
-                        .kind(ObservationKind.REFLECTION_SITE)
-                        .siteSymbol(methodSymbol)
-                        .evidenceIds(List.of(evidenceId))
-                        .origin(FactOriginKind.OBSERVED)
-                        .confidenceHint(ConfidenceHints.observation(List.of(EvidenceType.AST)))
-                        .note("reflection API usage")
-                        .attrs(Map.of(
-                                "method", call.getNameAsString(),
-                                "scope", call.getScope().map(Expression::toString).orElse("")
-                        ))
-                        .build());
-            }
+                    if (isReflectionCall(call)) {
+                        sink.addObservation(
+                                ObservationFact.builder()
+                                        .kind(
+                                                ObservationKind.REFLECTION_SITE
+                                        )
+                                        .siteSymbol(
+                                                methodSymbol
+                                        )
+                                        .evidenceIds(
+                                                List.of(
+                                                        evidenceId
+                                                )
+                                        )
+                                        .origin(
+                                                FactOriginKind.OBSERVED
+                                        )
+                                        .confidenceHint(
+                                                ConfidenceHints.observation(
+                                                        List.of(
+                                                                EvidenceType.AST
+                                                        )
+                                                )
+                                        )
+                                        .note(
+                                                "reflection API usage"
+                                        )
+                                        .attrs(
+                                                Map.of(
+                                                        "method",
+                                                        call.getNameAsString(),
+                                                        "scope",
+                                                        call.getScope()
+                                                                .map(
+                                                                        Expression::toString
+                                                                )
+                                                                .orElse(
+                                                                        ""
+                                                                )
+                                                )
+                                        )
+                                        .build()
+                        );
+                    }
 
-            if (isServiceLoaderLoad(call)) {
-                TypeRef serviceType = resolveServiceLoaderArg(call, sink);
-                ObservationFact.ObservationFactBuilder builder = ObservationFact.builder()
-                        .kind(ObservationKind.SPI_PROVIDER)
-                        .siteSymbol(methodSymbol)
-                        .evidenceIds(List.of(evidenceId))
-                        .origin(FactOriginKind.AST)
-                        .confidenceHint(ConfidenceHints.observation(List.of(EvidenceType.AST)));
-                if (serviceType != null && !Boolean.TRUE.equals(serviceType.unresolved())) {
-                    builder.targetSymbol(serviceType.raw());
-                } else if (serviceType != null) {
-                    builder.targetTypeRef(serviceType);
-                }
-                sink.addObservation(builder.build());
-            }
-        });
+                    if (isServiceLoaderLoad(call)) {
+                        TypeRef serviceType =
+                                resolveServiceLoaderArg(
+                                        call,
+                                        sink
+                                );
+
+                        ObservationFact
+                                .ObservationFactBuilder builder =
+                                ObservationFact.builder()
+                                        .kind(
+                                                ObservationKind.SPI_PROVIDER
+                                        )
+                                        .siteSymbol(
+                                                methodSymbol
+                                        )
+                                        .evidenceIds(
+                                                List.of(
+                                                        evidenceId
+                                                )
+                                        )
+                                        .origin(
+                                                FactOriginKind.AST
+                                        )
+                                        .confidenceHint(
+                                                ConfidenceHints.observation(
+                                                        List.of(
+                                                                EvidenceType.AST
+                                                        )
+                                                )
+                                        );
+
+                        if (serviceType != null
+                                && !Boolean.TRUE.equals(
+                                serviceType.unresolved()
+                        )) {
+                            builder.targetSymbol(
+                                    serviceType.raw()
+                            );
+                        } else if (serviceType != null) {
+                            builder.targetTypeRef(
+                                    serviceType
+                            );
+                        }
+
+                        sink.addObservation(
+                                builder.build()
+                        );
+                    }
+                });
     }
 
     /**
@@ -1566,7 +3098,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             return new ThrowAnalysis(null, false);
         }
         int bodyLines = method.getEnd().map(e -> e.line).orElse(0)
-                      - method.getBegin().map(b -> b.line).orElse(0);
+                - method.getBegin().map(b -> b.line).orElse(0);
         if (bodyLines > maxBodyLines) {
             return new ThrowAnalysis(List.of(), false);
         }
@@ -1594,7 +3126,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             return null;
         }
         int bodyLines = method.getEnd().map(e -> e.line).orElse(0)
-                      - method.getBegin().map(b -> b.line).orElse(0);
+                - method.getBegin().map(b -> b.line).orElse(0);
         if (bodyLines > maxBodyLines) {
             return List.of();
         }
@@ -1979,7 +3511,9 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
     }
 
     private boolean isConfigurationAnnotation(String annotationName) {
-        return annotationName.endsWith("Configuration") || annotationName.endsWith("Import");
+        return annotationName.endsWith("Configuration")
+                || annotationName.endsWith("Import")
+                || annotationName.endsWith("ComponentScan");
     }
 
     private boolean isEventSubscriberAnnotation(String annotationName) {
