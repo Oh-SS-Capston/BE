@@ -70,6 +70,7 @@ public class AnalysisCachePublishService {
      * symbol_source_index는 점진 도입 중이므로 없어도 READY 발행을 막지 않습니다.
      */
     private static final List<ArtifactKind> OPTIONAL_ARTIFACT_KINDS = List.of(
+            ArtifactKind.LICENSE_ANALYSIS_JSON,
             ArtifactKind.SYMBOL_SOURCE_INDEX_JSON
     );
 

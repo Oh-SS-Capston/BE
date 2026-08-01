@@ -19,6 +19,7 @@ import com.example.ossdoc.domain.publicapi.service.EntryPointBuildService;
 import com.example.ossdoc.domain.extraction.facade.FactsExtractionFacade;
 import com.example.ossdoc.domain.graphstore.dto.request.GraphStoreIngestRequest;
 import com.example.ossdoc.domain.graphstore.service.GraphStoreIngestService;
+import com.example.ossdoc.domain.license.service.LicenseAnalysisPipelineService;
 import com.example.ossdoc.domain.rule.dto.request.RuleCandidateMineRequest;
 import com.example.ossdoc.domain.rule.service.RuleCandidateMiningService;
 import com.example.ossdoc.domain.run.cache.service.AnalysisCacheLockService;
@@ -64,6 +65,7 @@ public class RunPipelineExecutor {
     private final RunPipelineStepService stepService;
 
     private final RunSnapshotService runSnapshotService;
+    private final LicenseAnalysisPipelineService licenseAnalysisPipelineService;
     private final BuildResolveService buildResolveService;
     private final FactsExtractionFacade factsExtractionFacade;
     private final GraphStoreIngestService graphStoreIngestService;
@@ -103,6 +105,19 @@ public class RunPipelineExecutor {
                     RunStage.SNAPSHOT,
                     "레포지토리 스냅샷을 준비 중입니다.",
                     () -> runSnapshotService.prepareSnapshot(runId)
+            );
+
+            /*
+             * 대표 라이선스 분석은 빌드 결과가 아니라 루트 파일(LICENSE/README/pom/gradle)에만 의존합니다.
+             * 따라서 저장소 스냅샷이 준비된 직후 실행하면 빌드 실패 프로젝트에서도 라이선스 결과를 남길 수 있습니다.
+             */
+            executeOptional(
+                    jobId,
+                    RunStage.LICENSE,
+                    "대표 라이선스 정보를 분석 중입니다.",
+                    "대표 라이선스 분석에 실패했습니다.",
+                    optionalFailures,
+                    () -> licenseAnalysisPipelineService.analyzeAndPublish(runId)
             );
 
             executeRequired(
