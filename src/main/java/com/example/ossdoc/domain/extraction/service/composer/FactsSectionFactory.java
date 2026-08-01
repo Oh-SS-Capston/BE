@@ -123,34 +123,116 @@ final class FactsSectionFactory {
     }
 
     RelationTable composeRelations(RelationTable raw) {
+        return composeRelations(raw, List.of());
+    }
+
+    RelationTable composeRelations(
+            RelationTable raw,
+            List<RelationFact> additionalRelations
+    ) {
         LinkedHashMap<String, RelationFact> merged = new LinkedHashMap<>();
+
         for (RelationFact relation : flattenRelations(raw)) {
-            merged.merge(FactsDedupSupport.relationKey(relation), relation, FactsDedupSupport::mergeRelation);
+            merged.merge(
+                    FactsDedupSupport.relationKey(relation),
+                    relation,
+                    FactsDedupSupport::mergeRelation
+            );
+        }
+
+        if (additionalRelations != null) {
+            for (RelationFact relation : additionalRelations) {
+                if (relation == null) {
+                    continue;
+                }
+                merged.merge(
+                        FactsDedupSupport.relationKey(relation),
+                        relation,
+                        FactsDedupSupport::mergeRelation
+                );
+            }
         }
 
         List<RelationFact> calls = new ArrayList<>();
+        List<RelationFact> creates = new ArrayList<>();
         List<RelationFact> overrides = new ArrayList<>();
         List<RelationFact> accessesField = new ArrayList<>();
+        List<RelationFact> annotatedWith = new ArrayList<>();
+        List<RelationFact> handlesEndpoint = new ArrayList<>();
+        List<RelationFact> declaresBean = new ArrayList<>();
+        List<RelationFact> configuresBean = new ArrayList<>();
+        List<RelationFact> injects = new ArrayList<>();
+        List<RelationFact> publishesEvent = new ArrayList<>();
+        List<RelationFact> listensEvent = new ArrayList<>();
+        List<RelationFact> providesSpi = new ArrayList<>();
+        List<RelationFact> loadsService = new ArrayList<>();
+        List<RelationFact> reflectsType = new ArrayList<>();
+        List<RelationFact> reflectsMethod = new ArrayList<>();
+        List<RelationFact> reflectsField = new ArrayList<>();
+        List<RelationFact> reflectsConstructor = new ArrayList<>();
 
         for (RelationFact relation : merged.values()) {
             if (relation == null || relation.kind() == null) {
                 continue;
             }
+
             switch (relation.kind()) {
                 case CALLS -> calls.add(relation);
+                case CREATES -> creates.add(relation);
                 case OVERRIDES -> overrides.add(relation);
                 case ACCESSES_FIELD -> accessesField.add(relation);
+                case ANNOTATED_WITH -> annotatedWith.add(relation);
+                case HANDLES_ENDPOINT -> handlesEndpoint.add(relation);
+                case DECLARES_BEAN -> declaresBean.add(relation);
+                case CONFIGURES_BEAN -> configuresBean.add(relation);
+                case INJECTS -> injects.add(relation);
+                case PUBLISHES_EVENT -> publishesEvent.add(relation);
+                case LISTENS_EVENT -> listensEvent.add(relation);
+                case PROVIDES_SPI -> providesSpi.add(relation);
+                case LOADS_SERVICE -> loadsService.add(relation);
+                case REFLECTS_TYPE -> reflectsType.add(relation);
+                case REFLECTS_METHOD -> reflectsMethod.add(relation);
+                case REFLECTS_FIELD -> reflectsField.add(relation);
+                case REFLECTS_CONSTRUCTOR -> reflectsConstructor.add(relation);
             }
         }
 
         calls.sort(RELATION_ORDER);
+        creates.sort(RELATION_ORDER);
         overrides.sort(RELATION_ORDER);
         accessesField.sort(RELATION_ORDER);
+        annotatedWith.sort(RELATION_ORDER);
+        handlesEndpoint.sort(RELATION_ORDER);
+        declaresBean.sort(RELATION_ORDER);
+        configuresBean.sort(RELATION_ORDER);
+        injects.sort(RELATION_ORDER);
+        publishesEvent.sort(RELATION_ORDER);
+        listensEvent.sort(RELATION_ORDER);
+        providesSpi.sort(RELATION_ORDER);
+        loadsService.sort(RELATION_ORDER);
+        reflectsType.sort(RELATION_ORDER);
+        reflectsMethod.sort(RELATION_ORDER);
+        reflectsField.sort(RELATION_ORDER);
+        reflectsConstructor.sort(RELATION_ORDER);
 
         return RelationTable.builder()
                 .calls(List.copyOf(calls))
+                .creates(List.copyOf(creates))
                 .overrides(List.copyOf(overrides))
                 .accessesField(List.copyOf(accessesField))
+                .annotatedWith(List.copyOf(annotatedWith))
+                .handlesEndpoint(List.copyOf(handlesEndpoint))
+                .declaresBean(List.copyOf(declaresBean))
+                .configuresBean(List.copyOf(configuresBean))
+                .injects(List.copyOf(injects))
+                .publishesEvent(List.copyOf(publishesEvent))
+                .listensEvent(List.copyOf(listensEvent))
+                .providesSpi(List.copyOf(providesSpi))
+                .loadsService(List.copyOf(loadsService))
+                .reflectsType(List.copyOf(reflectsType))
+                .reflectsMethod(List.copyOf(reflectsMethod))
+                .reflectsField(List.copyOf(reflectsField))
+                .reflectsConstructor(List.copyOf(reflectsConstructor))
                 .build();
     }
 
@@ -300,8 +382,22 @@ final class FactsSectionFactory {
         }
         List<RelationFact> all = new ArrayList<>();
         addAll(all, table.calls());
+        addAll(all, table.creates());
         addAll(all, table.overrides());
         addAll(all, table.accessesField());
+        addAll(all, table.annotatedWith());
+        addAll(all, table.handlesEndpoint());
+        addAll(all, table.declaresBean());
+        addAll(all, table.configuresBean());
+        addAll(all, table.injects());
+        addAll(all, table.publishesEvent());
+        addAll(all, table.listensEvent());
+        addAll(all, table.providesSpi());
+        addAll(all, table.loadsService());
+        addAll(all, table.reflectsType());
+        addAll(all, table.reflectsMethod());
+        addAll(all, table.reflectsField());
+        addAll(all, table.reflectsConstructor());
         return all;
     }
 
