@@ -67,6 +67,9 @@ public class Edge extends BaseAuditedEntity {
     @Column(name = "resolution_reason", columnDefinition = "text")
     private String resolutionReason;
 
+    @Column(name = "call_site_line")
+    private Integer callSiteLine;
+
     @Column(name = "confidence", precision = 5, scale = 4)
     private BigDecimal confidence;
 
@@ -74,3 +77,4 @@ public class Edge extends BaseAuditedEntity {
     @Column(name = "attrs", columnDefinition = "jsonb")
     private JsonNode attrs;
 }
+

@@ -107,7 +107,8 @@ public class GraphStoreFactsNormalizer {
                             dto.getEndCol(),
                             dto.getSymbol(),
                             dto.getSnippet(),
-                            dto.getHash()
+                            dto.getHash(),
+                            dto.getAttrs()
                     )
             );
         }
@@ -758,6 +759,7 @@ public class GraphStoreFactsNormalizer {
                     dto.getTargetSymbol(),
                     dto.getTargetTypeRef(),
                     dto.getNote(),
+                    dto.getOrigin(),
                     confidenceHint,
                     dto.getAttrs(),
                     dto.getEvidenceIds() == null
@@ -767,3 +769,4 @@ public class GraphStoreFactsNormalizer {
         }
     }
 }
+

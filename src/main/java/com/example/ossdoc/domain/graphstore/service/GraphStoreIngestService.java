@@ -14,6 +14,7 @@ import com.example.ossdoc.domain.graphstore.entity.EdgeEvidence;
 import com.example.ossdoc.domain.graphstore.entity.EdgeEvidenceId;
 import com.example.ossdoc.domain.graphstore.entity.Evidence;
 import com.example.ossdoc.domain.graphstore.entity.Observation;
+import com.example.ossdoc.domain.graphstore.entity.ObservationEvidence;
 import com.example.ossdoc.domain.graphstore.entity.SymbolEntity;
 import com.example.ossdoc.domain.graphstore.entity.SymbolEvidence;
 import com.example.ossdoc.domain.graphstore.entity.SymbolEvidenceId;
@@ -27,9 +28,29 @@ import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedFactsDocu
 import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedObservationFact;
 import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedRelationFact;
 import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedSymbolFact;
+import com.example.ossdoc.domain.graphstore.model.promotion.ObservationPromotionCandidateGenerationResult;
+import com.example.ossdoc.domain.graphstore.model.promotion.ObservationPromotionCandidateParityIssue;
+import com.example.ossdoc.domain.graphstore.model.promotion.ObservationPromotionCandidateParityReport;
+import com.example.ossdoc.domain.graphstore.model.promotion.ObservationPromotionShadowIssue;
+import com.example.ossdoc.domain.graphstore.model.promotion.ObservationPromotionShadowReport;
+import com.example.ossdoc.domain.graphstore.model.promotion.SemanticPromotionShadowIntegratedReport;
+import com.example.ossdoc.domain.graphstore.model.promotion.SemanticPromotionShadowIntegratedReportFactory;
+import com.example.ossdoc.domain.graphstore.model.promotion.gate.SemanticPromotionGateDecision;
+import com.example.ossdoc.domain.graphstore.service.promotion.BeanConfigurationShadowCandidateGenerator;
+import com.example.ossdoc.domain.graphstore.service.promotion.BeanConfigurationShadowParityAnalyzer;
+import com.example.ossdoc.domain.graphstore.service.promotion.DiShadowCandidateGenerator;
+import com.example.ossdoc.domain.graphstore.service.promotion.DiShadowParityAnalyzer;
+import com.example.ossdoc.domain.graphstore.service.promotion.EndpointEventSpiShadowCandidateGenerator;
+import com.example.ossdoc.domain.graphstore.service.promotion.EndpointEventSpiShadowParityAnalyzer;
+import com.example.ossdoc.domain.graphstore.service.promotion.ObservationPromotionShadowAnalyzer;
+import com.example.ossdoc.domain.graphstore.service.promotion.ReflectionShadowCandidateGenerator;
+import com.example.ossdoc.domain.graphstore.service.promotion.ReflectionShadowParityAnalyzer;
+import com.example.ossdoc.domain.graphstore.service.promotion.gate.SemanticPromotionGateProperties;
+import com.example.ossdoc.domain.graphstore.service.promotion.gate.SemanticPromotionResponsibilityGate;
 import com.example.ossdoc.domain.graphstore.repository.EdgeEvidenceRepository;
 import com.example.ossdoc.domain.graphstore.repository.EdgeRepository;
 import com.example.ossdoc.domain.graphstore.repository.EvidenceRepository;
+import com.example.ossdoc.domain.graphstore.repository.ObservationEvidenceRepository;
 import com.example.ossdoc.domain.graphstore.repository.ObservationRepository;
 import com.example.ossdoc.domain.graphstore.repository.SymbolEvidenceRepository;
 import com.example.ossdoc.domain.graphstore.repository.SymbolRepository;
@@ -44,8 +65,8 @@ import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -65,7 +86,6 @@ import java.util.stream.Collectors;
 
 @Service
 @Slf4j
-@RequiredArgsConstructor
 public class GraphStoreIngestService {
 
     private static final int BATCH_SIZE = 500;
@@ -78,6 +98,7 @@ public class GraphStoreIngestService {
     private final EvidenceRepository evidenceRepository;
     private final EdgeEvidenceRepository edgeEvidenceRepository;
     private final ObservationRepository observationRepository;
+    private final ObservationEvidenceRepository observationEvidenceRepository;
     private final SymbolEvidenceRepository symbolEvidenceRepository;
     private final FileIndexRepository fileIndexRepository;
     private final ModuleRepository moduleRepository;
@@ -88,7 +109,122 @@ public class GraphStoreIngestService {
     private final SymbolIdGenerator symbolIdGenerator;
     private final GraphStoreFactsNormalizer graphStoreFactsNormalizer;
 
+    private final SemanticPromotionResponsibilityGate
+            semanticPromotionResponsibilityGate;
+
     private final ObjectMapper objectMapper;
+
+    /**
+     * Spring이 사용하는 전체 의존성 생성자.
+     */
+    @Autowired
+    public GraphStoreIngestService(
+            RepoRunRepository repoRunRepository,
+            ArtifactRepository artifactRepository,
+            SymbolRepository symbolRepository,
+            EdgeRepository edgeRepository,
+            EvidenceRepository evidenceRepository,
+            EdgeEvidenceRepository edgeEvidenceRepository,
+            ObservationRepository observationRepository,
+            ObservationEvidenceRepository observationEvidenceRepository,
+            SymbolEvidenceRepository symbolEvidenceRepository,
+            FileIndexRepository fileIndexRepository,
+            ModuleRepository moduleRepository,
+            FactsEvidenceConverter factsEvidenceConverter,
+            FactsSymbolConverter factsSymbolConverter,
+            FactsEdgeConverter factsEdgeConverter,
+            SymbolIdGenerator symbolIdGenerator,
+            GraphStoreFactsNormalizer graphStoreFactsNormalizer,
+            SemanticPromotionResponsibilityGate
+                    semanticPromotionResponsibilityGate,
+            ObjectMapper objectMapper
+    ) {
+        this.repoRunRepository = repoRunRepository;
+        this.artifactRepository = artifactRepository;
+        this.symbolRepository = symbolRepository;
+        this.edgeRepository = edgeRepository;
+        this.evidenceRepository = evidenceRepository;
+        this.edgeEvidenceRepository = edgeEvidenceRepository;
+        this.observationRepository = observationRepository;
+        this.observationEvidenceRepository =
+                observationEvidenceRepository;
+        this.symbolEvidenceRepository =
+                symbolEvidenceRepository;
+        this.fileIndexRepository = fileIndexRepository;
+        this.moduleRepository = moduleRepository;
+        this.factsEvidenceConverter = factsEvidenceConverter;
+        this.factsSymbolConverter = factsSymbolConverter;
+        this.factsEdgeConverter = factsEdgeConverter;
+        this.symbolIdGenerator = symbolIdGenerator;
+        this.graphStoreFactsNormalizer =
+                graphStoreFactsNormalizer;
+        this.semanticPromotionResponsibilityGate =
+                semanticPromotionResponsibilityGate;
+        this.objectMapper = objectMapper;
+    }
+
+    /**
+     * 10-3-4A 이전 테스트와 수동 생성 코드의 source compatibility를
+     * 유지하기 위한 생성자.
+     *
+     * Spring Bean 생성에는 위의 @Autowired 생성자가 사용된다.
+     */
+    public GraphStoreIngestService(
+            RepoRunRepository repoRunRepository,
+            ArtifactRepository artifactRepository,
+            SymbolRepository symbolRepository,
+            EdgeRepository edgeRepository,
+            EvidenceRepository evidenceRepository,
+            EdgeEvidenceRepository edgeEvidenceRepository,
+            ObservationRepository observationRepository,
+            ObservationEvidenceRepository observationEvidenceRepository,
+            SymbolEvidenceRepository symbolEvidenceRepository,
+            FileIndexRepository fileIndexRepository,
+            ModuleRepository moduleRepository,
+            FactsEvidenceConverter factsEvidenceConverter,
+            FactsSymbolConverter factsSymbolConverter,
+            FactsEdgeConverter factsEdgeConverter,
+            SymbolIdGenerator symbolIdGenerator,
+            GraphStoreFactsNormalizer graphStoreFactsNormalizer,
+            ObjectMapper objectMapper
+    ) {
+        this(
+                repoRunRepository,
+                artifactRepository,
+                symbolRepository,
+                edgeRepository,
+                evidenceRepository,
+                edgeEvidenceRepository,
+                observationRepository,
+                observationEvidenceRepository,
+                symbolEvidenceRepository,
+                fileIndexRepository,
+                moduleRepository,
+                factsEvidenceConverter,
+                factsSymbolConverter,
+                factsEdgeConverter,
+                symbolIdGenerator,
+                graphStoreFactsNormalizer,
+                defaultSemanticPromotionResponsibilityGate(),
+                objectMapper
+        );
+    }
+
+    private static SemanticPromotionResponsibilityGate
+    defaultSemanticPromotionResponsibilityGate() {
+        SemanticPromotionGateProperties properties =
+                new SemanticPromotionGateProperties();
+
+        /*
+         * 단위 테스트에서 이전 생성자를 사용할 때 Gate가 테스트 대상의
+         * 저장·검증 동작에 영향을 주지 않도록 평가를 비활성화한다.
+         */
+        properties.setEnabled(false);
+
+        return new SemanticPromotionResponsibilityGate(
+                properties
+        );
+    }
 
     @Transactional
     public GraphStoreIngestResponse ingest(GraphStoreIngestRequest request, Long userId) {
@@ -120,10 +256,146 @@ public class GraphStoreIngestService {
         NormalizedFactsDocument facts = graphStoreFactsNormalizer.normalize(rawFacts);
         validateFacts(facts);
 
+        ObservationPromotionShadowReport shadowReport =
+                ObservationPromotionShadowAnalyzer.analyze(facts);
+
+        logObservationPromotionShadow(
+                run.getRunId(),
+                shadowReport
+        );
+
+        ObservationPromotionCandidateGenerationResult
+                candidateGeneration =
+                EndpointEventSpiShadowCandidateGenerator
+                        .generate(
+                                facts,
+                                objectMapper
+                        );
+
+        ObservationPromotionCandidateParityReport
+                candidateParity =
+                EndpointEventSpiShadowParityAnalyzer
+                        .compare(
+                                facts,
+                                candidateGeneration,
+                                objectMapper
+                        );
+
+        logEndpointEventSpiShadowParity(
+                run.getRunId(),
+                candidateGeneration,
+                candidateParity
+        );
+
+        ObservationPromotionCandidateGenerationResult
+                beanConfigurationGeneration =
+                BeanConfigurationShadowCandidateGenerator
+                        .generate(
+                                facts,
+                                objectMapper
+                        );
+
+        ObservationPromotionCandidateParityReport
+                beanConfigurationParity =
+                BeanConfigurationShadowParityAnalyzer
+                        .compare(
+                                facts,
+                                beanConfigurationGeneration,
+                                objectMapper
+                        );
+
+        logBeanConfigurationShadowParity(
+                run.getRunId(),
+                beanConfigurationGeneration,
+                beanConfigurationParity
+        );
+
+        ObservationPromotionCandidateGenerationResult
+                reflectionGeneration =
+                ReflectionShadowCandidateGenerator
+                        .generate(
+                                facts,
+                                objectMapper
+                        );
+
+        ObservationPromotionCandidateParityReport
+                reflectionParity =
+                ReflectionShadowParityAnalyzer
+                        .compare(
+                                facts,
+                                reflectionGeneration,
+                                objectMapper
+                        );
+
+        logReflectionShadowParity(
+                run.getRunId(),
+                reflectionGeneration,
+                reflectionParity
+        );
+
+        ObservationPromotionCandidateGenerationResult
+                diGeneration =
+                DiShadowCandidateGenerator
+                        .generate(
+                                facts,
+                                objectMapper
+                        );
+
+        ObservationPromotionCandidateParityReport
+                diParity =
+                DiShadowParityAnalyzer
+                        .compare(
+                                facts,
+                                diGeneration,
+                                objectMapper
+                        );
+
+        logDiShadowParity(
+                run.getRunId(),
+                diGeneration,
+                diParity
+        );
+
+        SemanticPromotionShadowIntegratedReport
+                integratedShadowReport =
+                SemanticPromotionShadowIntegratedReportFactory
+                        .create(
+                                shadowReport,
+                                candidateGeneration,
+                                candidateParity,
+                                beanConfigurationGeneration,
+                                beanConfigurationParity,
+                                reflectionGeneration,
+                                reflectionParity,
+                                diGeneration,
+                                diParity
+                        );
+
+        logIntegratedSemanticShadowReport(
+                run.getRunId(),
+                integratedShadowReport
+        );
+
+        SemanticPromotionGateDecision gateDecision =
+                semanticPromotionResponsibilityGate
+                        .evaluate(
+                                run.getRunId(),
+                                run.getRepoUrl(),
+                                integratedShadowReport
+                        );
+
+        logSemanticPromotionGateDecision(
+                gateDecision
+        );
+
         EvidenceSaveResult evidenceSaveResult = saveEvidence(run, facts);
         SymbolSaveResult symbolSaveResult = saveSymbols(run, facts, evidenceSaveResult.evidenceMap(), moduleCache);
         EdgeSaveResult edgeSaveResult = saveEdges(run, facts, symbolSaveResult.symbolMap(), evidenceSaveResult.evidenceMap());
-        int observationsSaved = saveObservations(run, facts);
+        int observationsSaved = saveObservations(
+                run,
+                facts,
+                evidenceSaveResult.evidenceMap()
+        );
 
         return GraphStoreIngestResponse.builder()
                 .runId(run.getRunId())
@@ -232,6 +504,504 @@ public class GraphStoreIngestService {
     }
 
     /**
+     * Observation → semantic relation 승격 계약을 shadow mode로 검증한다.
+     *
+     * 이 단계에서는 Edge를 추가·변경하지 않고 비교 결과만 기록한다.
+     */
+    private void logObservationPromotionShadow(
+            String runId,
+            ObservationPromotionShadowReport report
+    ) {
+        if (report == null || report.totalObservations() == 0) {
+            log.debug(
+                    "[GRAPHSTORE-SHADOW] no observations available. runId={}",
+                    runId
+            );
+            return;
+        }
+
+        if (report.promotableObservations() == 0) {
+            log.debug(
+                    "[GRAPHSTORE-SHADOW] no promotable observations. "
+                            + "runId={}, total={}, counts={}",
+                    runId,
+                    report.totalObservations(),
+                    report.counts()
+            );
+            return;
+        }
+
+        if (!report.hasMismatches()) {
+            log.info(
+                    "[GRAPHSTORE-SHADOW] promotion contract matched. "
+                            + "runId={}, promotable={}, matched={}, counts={}",
+                    runId,
+                    report.promotableObservations(),
+                    report.matchedCount(),
+                    report.counts()
+            );
+            return;
+        }
+
+        List<String> samples = report.issues()
+                .stream()
+                .filter(ObservationPromotionShadowIssue::isMismatch)
+                .limit(10)
+                .map(ObservationPromotionShadowIssue::summary)
+                .toList();
+
+        log.warn(
+                "[GRAPHSTORE-SHADOW] promotion contract mismatch. "
+                        + "runId={}, promotable={}, matched={}, "
+                        + "mismatches={}, counts={}, samples={}",
+                runId,
+                report.promotableObservations(),
+                report.matchedCount(),
+                report.mismatchCount(),
+                report.counts(),
+                samples
+        );
+    }
+
+
+    /**
+     * Endpoint·Event·SPI shadow 후보의 exact parity 결과를 기록한다.
+     *
+     * 이 단계에서도 Relation/Edge 저장 내용은 변경하지 않는다.
+     */
+    private void logEndpointEventSpiShadowParity(
+            String runId,
+            ObservationPromotionCandidateGenerationResult generation,
+            ObservationPromotionCandidateParityReport report
+    ) {
+        if (generation == null
+                || generation.eligibleObservationCount() == 0) {
+            log.debug(
+                    "[GRAPHSTORE-SHADOW-CANDIDATE] "
+                            + "no endpoint/event/spi observations. runId={}",
+                    runId
+            );
+            return;
+        }
+
+        if (report == null) {
+            log.warn(
+                    "[GRAPHSTORE-SHADOW-CANDIDATE] "
+                            + "parity report is missing. runId={}",
+                    runId
+            );
+            return;
+        }
+
+        if (!report.hasMismatches()
+                && generation.warnings().isEmpty()) {
+            log.info(
+                    "[GRAPHSTORE-SHADOW-CANDIDATE] exact parity matched. "
+                            + "runId={}, eligibleObservations={}, "
+                            + "generated={}, extraction={}, counts={}",
+                    runId,
+                    generation.eligibleObservationCount(),
+                    report.generatedCandidateCount(),
+                    report.extractionRelationCount(),
+                    report.counts()
+            );
+            return;
+        }
+
+        List<String> samples =
+                report.issues().stream()
+                        .filter(
+                                ObservationPromotionCandidateParityIssue
+                                        ::isMismatch
+                        )
+                        .limit(10)
+                        .map(
+                                ObservationPromotionCandidateParityIssue
+                                        ::summary
+                        )
+                        .toList();
+
+        log.warn(
+                "[GRAPHSTORE-SHADOW-CANDIDATE] exact parity mismatch. "
+                        + "runId={}, eligibleObservations={}, "
+                        + "generated={}, extraction={}, mismatches={}, "
+                        + "counts={}, generationWarnings={}, samples={}",
+                runId,
+                generation.eligibleObservationCount(),
+                report.generatedCandidateCount(),
+                report.extractionRelationCount(),
+                report.mismatchCount(),
+                report.counts(),
+                generation.warnings(),
+                samples
+        );
+    }
+
+
+/**
+ * Bean·Configuration shadow 후보의 exact parity 결과를 기록한다.
+ *
+ * Relation/Edge 저장 결과는 기존 Extraction Relation 기준으로 유지한다.
+ */
+private void logBeanConfigurationShadowParity(
+        String runId,
+        ObservationPromotionCandidateGenerationResult generation,
+        ObservationPromotionCandidateParityReport report
+) {
+    if (generation == null
+            || generation.eligibleObservationCount() == 0) {
+        log.debug(
+                "[GRAPHSTORE-SHADOW-BEAN-CONFIG] "
+                        + "no bean/configuration observations. runId={}",
+                runId
+        );
+        return;
+    }
+
+    if (report == null) {
+        log.warn(
+                "[GRAPHSTORE-SHADOW-BEAN-CONFIG] "
+                        + "parity report is missing. runId={}",
+                runId
+        );
+        return;
+    }
+
+    if (!report.hasMismatches()
+            && generation.warnings().isEmpty()) {
+        log.info(
+                "[GRAPHSTORE-SHADOW-BEAN-CONFIG] exact parity matched. "
+                        + "runId={}, eligibleObservations={}, "
+                        + "generated={}, extraction={}, counts={}",
+                runId,
+                generation.eligibleObservationCount(),
+                report.generatedCandidateCount(),
+                report.extractionRelationCount(),
+                report.counts()
+        );
+        return;
+    }
+
+    List<String> samples =
+            report.issues().stream()
+                    .filter(
+                            ObservationPromotionCandidateParityIssue
+                                    ::isMismatch
+                    )
+                    .limit(10)
+                    .map(
+                            ObservationPromotionCandidateParityIssue
+                                    ::summary
+                    )
+                    .toList();
+
+    log.warn(
+            "[GRAPHSTORE-SHADOW-BEAN-CONFIG] exact parity mismatch. "
+                    + "runId={}, eligibleObservations={}, "
+                    + "generated={}, extraction={}, mismatches={}, "
+                    + "counts={}, generationWarnings={}, samples={}",
+            runId,
+            generation.eligibleObservationCount(),
+            report.generatedCandidateCount(),
+            report.extractionRelationCount(),
+            report.mismatchCount(),
+            report.counts(),
+            generation.warnings(),
+            samples
+    );
+}
+
+
+/**
+ * Reflection shadow 후보의 exact parity 결과를 기록한다.
+ *
+ * Relation/Edge 저장 결과는 기존 Extraction Relation 기준으로 유지한다.
+ */
+private void logReflectionShadowParity(
+        String runId,
+        ObservationPromotionCandidateGenerationResult generation,
+        ObservationPromotionCandidateParityReport report
+) {
+    if (generation == null
+            || generation.eligibleObservationCount() == 0) {
+        log.debug(
+                "[GRAPHSTORE-SHADOW-REFLECTION] "
+                        + "no reflection observations. runId={}",
+                runId
+        );
+        return;
+    }
+
+    if (report == null) {
+        log.warn(
+                "[GRAPHSTORE-SHADOW-REFLECTION] "
+                        + "parity report is missing. runId={}",
+                runId
+        );
+        return;
+    }
+
+    if (!report.hasMismatches()
+            && generation.warnings().isEmpty()) {
+        log.info(
+                "[GRAPHSTORE-SHADOW-REFLECTION] exact parity matched. "
+                        + "runId={}, eligibleObservations={}, "
+                        + "generated={}, extraction={}, counts={}",
+                runId,
+                generation.eligibleObservationCount(),
+                report.generatedCandidateCount(),
+                report.extractionRelationCount(),
+                report.counts()
+        );
+        return;
+    }
+
+    List<String> samples =
+            report.issues().stream()
+                    .filter(
+                            ObservationPromotionCandidateParityIssue
+                                    ::isMismatch
+                    )
+                    .limit(10)
+                    .map(
+                            ObservationPromotionCandidateParityIssue
+                                    ::summary
+                    )
+                    .toList();
+
+    log.warn(
+            "[GRAPHSTORE-SHADOW-REFLECTION] exact parity mismatch. "
+                    + "runId={}, eligibleObservations={}, "
+                    + "generated={}, extraction={}, mismatches={}, "
+                    + "counts={}, generationWarnings={}, samples={}",
+            runId,
+            generation.eligibleObservationCount(),
+            report.generatedCandidateCount(),
+            report.extractionRelationCount(),
+            report.mismatchCount(),
+            report.counts(),
+            generation.warnings(),
+            samples
+    );
+}
+
+
+/**
+ * DI shadow 후보의 exact parity 결과를 기록한다.
+ *
+ * Relation/Edge 저장 결과는 기존 Extraction INJECTS Relation 기준으로 유지한다.
+ */
+private void logDiShadowParity(
+        String runId,
+        ObservationPromotionCandidateGenerationResult generation,
+        ObservationPromotionCandidateParityReport report
+) {
+    if (generation == null
+            || generation.eligibleObservationCount() == 0) {
+        log.debug(
+                "[GRAPHSTORE-SHADOW-DI] "
+                        + "no DI injection observations. runId={}",
+                runId
+        );
+        return;
+    }
+
+    if (report == null) {
+        log.warn(
+                "[GRAPHSTORE-SHADOW-DI] "
+                        + "parity report is missing. runId={}",
+                runId
+        );
+        return;
+    }
+
+    if (!report.hasMismatches()
+            && generation.warnings().isEmpty()) {
+        log.info(
+                "[GRAPHSTORE-SHADOW-DI] exact parity matched. "
+                        + "runId={}, eligibleObservations={}, "
+                        + "generated={}, extraction={}, counts={}",
+                runId,
+                generation.eligibleObservationCount(),
+                report.generatedCandidateCount(),
+                report.extractionRelationCount(),
+                report.counts()
+        );
+        return;
+    }
+
+    List<String> samples =
+            report.issues().stream()
+                    .filter(
+                            ObservationPromotionCandidateParityIssue
+                                    ::isMismatch
+                    )
+                    .limit(10)
+                    .map(
+                            ObservationPromotionCandidateParityIssue
+                                    ::summary
+                    )
+                    .toList();
+
+    log.warn(
+            "[GRAPHSTORE-SHADOW-DI] exact parity mismatch. "
+                    + "runId={}, eligibleObservations={}, "
+                    + "generated={}, extraction={}, mismatches={}, "
+                    + "counts={}, generationWarnings={}, samples={}",
+            runId,
+            generation.eligibleObservationCount(),
+            report.generatedCandidateCount(),
+            report.extractionRelationCount(),
+            report.mismatchCount(),
+            report.counts(),
+            generation.warnings(),
+            samples
+    );
+}
+
+
+/**
+ * 전체 의미 Relation shadow 계약과 exact parity를 통합해서 기록한다.
+ *
+ * persistencePromotionReady는 저장 책임 전환의 자동 실행 조건이 아니라,
+ * 다음 단계에서 판단할 수 있도록 제공하는 검증 지표다.
+ */
+private void logIntegratedSemanticShadowReport(
+        String runId,
+        SemanticPromotionShadowIntegratedReport report
+) {
+    if (report == null) {
+        log.warn(
+                "[GRAPHSTORE-SHADOW-INTEGRATED] "
+                        + "integrated report is missing. runId={}",
+                runId
+        );
+        return;
+    }
+
+    if (report.totalObservations() == 0
+            && report.eligibleObservationCount() == 0) {
+        log.debug(
+                "[GRAPHSTORE-SHADOW-INTEGRATED] "
+                        + "no observations available. runId={}",
+                runId
+        );
+        return;
+    }
+
+    if (report.isPersistencePromotionReady()) {
+        log.info(
+                "[GRAPHSTORE-SHADOW-INTEGRATED] "
+                        + "semantic promotion shadow verified. "
+                        + "runId={}, totalObservations={}, "
+                        + "promotableObservations={}, eligible={}, "
+                        + "generated={}, extraction={}, matched={}, "
+                        + "contractCounts={}, candidateCounts={}, "
+                        + "persistencePromotionReady=true, stages={}",
+                runId,
+                report.totalObservations(),
+                report.promotableObservations(),
+                report.eligibleObservationCount(),
+                report.generatedCandidateCount(),
+                report.extractionRelationCount(),
+                report.exactMatchedCount(),
+                report.contractCounts(),
+                report.candidateCounts(),
+                report.stageSummaries()
+        );
+        return;
+    }
+
+    log.warn(
+            "[GRAPHSTORE-SHADOW-INTEGRATED] "
+                    + "semantic promotion shadow not ready. "
+                    + "runId={}, totalObservations={}, "
+                    + "promotableObservations={}, eligible={}, "
+                    + "generated={}, extraction={}, matched={}, "
+                    + "contractMismatches={}, exactMismatches={}, "
+                    + "generationWarnings={}, mismatchedStages={}, "
+                    + "contractCounts={}, candidateCounts={}, "
+                    + "persistencePromotionReady=false, "
+                    + "mismatchSamples={}, warningSamples={}, stages={}",
+            runId,
+            report.totalObservations(),
+            report.promotableObservations(),
+            report.eligibleObservationCount(),
+            report.generatedCandidateCount(),
+            report.extractionRelationCount(),
+            report.exactMatchedCount(),
+            report.contractMismatchCount(),
+            report.exactMismatchCount(),
+            report.generationWarningCount(),
+            report.mismatchedStageCount(),
+            report.contractCounts(),
+            report.candidateCounts(),
+            report.mismatchSamples(20),
+            report.warningSamples(20),
+            report.stageSummaries()
+    );
+}
+
+
+/**
+ * 실제 OSS ingest 결과에 기반한 의미 Relation 책임 전환 Gate를 기록한다.
+ *
+ * candidatePersistencePermitted가 true여도 현재 단계에서는
+ * 후보 Relation을 저장하지 않는다. 후속 writer 연결을 위한 판정값이다.
+ */
+private void logSemanticPromotionGateDecision(
+        SemanticPromotionGateDecision decision
+) {
+    if (decision == null) {
+        log.warn(
+                "[GRAPHSTORE-SEMANTIC-GATE] "
+                        + "gate decision is missing"
+        );
+        return;
+    }
+
+    switch (decision.status()) {
+        case DISABLED,
+             DUPLICATE_RUN_IGNORED ->
+                log.debug(
+                        "[GRAPHSTORE-SEMANTIC-GATE] {}",
+                        decision.summary()
+                );
+
+        case BLOCKED ->
+                log.warn(
+                        "[GRAPHSTORE-SEMANTIC-GATE] "
+                                + "validation window reset. {}",
+                        decision.summary()
+                );
+
+        case WARMING_UP ->
+                log.info(
+                        "[GRAPHSTORE-SEMANTIC-GATE] "
+                                + "validation window warming up. {}",
+                        decision.summary()
+                );
+
+        case READY_BUT_PERSISTENCE_DISABLED ->
+                log.info(
+                        "[GRAPHSTORE-SEMANTIC-GATE] "
+                                + "validation ready; candidate persistence "
+                                + "remains disabled. {}",
+                        decision.summary()
+                );
+
+        case READY ->
+                log.warn(
+                        "[GRAPHSTORE-SEMANTIC-GATE] "
+                                + "candidate persistence is permitted by "
+                                + "configuration, but no candidate writer "
+                                + "is connected in this stage. {}",
+                        decision.summary()
+                );
+    }
+}
+
+    /**
      * Evidence를 저장한다.
      * run 단위 선조회 인덱스를 사용해 건별 중복 조회(N+1)를 줄인다.
      */
@@ -272,15 +1042,31 @@ public class GraphStoreIngestService {
     /**
      * run 범위 기존 evidence를 한 번에 읽어 중복 판별용 인덱스를 만든다.
      */
-    private EvidenceLookupIndexes buildEvidenceLookupIndexes(RepoRun run) {
-        Map<String, Evidence> hashLookup = new HashMap<>();
-        Map<EvidenceSignature, Evidence> fileSignatureLookup = new HashMap<>();
-        Map<EvidenceSignature, Evidence> lineSignatureLookup = new HashMap<>();
-        EvidenceLookupIndexes indexes = new EvidenceLookupIndexes(hashLookup, fileSignatureLookup, lineSignatureLookup);
+    private EvidenceLookupIndexes buildEvidenceLookupIndexes(
+            RepoRun run
+    ) {
+        Map<String, Evidence> rawIdLookup =
+                new HashMap<>();
 
-        List<Evidence> existing = evidenceRepository.findAllByRun_RunId(run.getRunId());
+        Map<EvidenceIdentitySupport.Signature, Evidence>
+                signatureLookup = new HashMap<>();
+
+        EvidenceLookupIndexes indexes =
+                new EvidenceLookupIndexes(
+                        rawIdLookup,
+                        signatureLookup
+                );
+
+        List<Evidence> existing =
+                evidenceRepository.findAllByRun_RunId(
+                        run.getRunId()
+                );
+
         for (Evidence evidence : existing) {
-            registerEvidenceLookup(indexes, evidence);
+            registerEvidenceLookup(
+                    indexes,
+                    evidence
+            );
         }
 
         return indexes;
@@ -289,70 +1075,29 @@ public class GraphStoreIngestService {
     /**
      * 신규 evidence 후보를 인덱스에서 조회해 기존 데이터와 중복 여부를 확인한다.
      */
-    private Evidence findEvidenceInLookup(EvidenceLookupIndexes indexes, Evidence candidate) {
-        String hash = normalizeBlank(candidate.getHash());
-        if (hash != null) {
-            return indexes.hashLookup().get(hash);
-        }
-
-        EvidenceSignature signature = toEvidenceSignature(candidate);
-        if (signature == null) {
-            return null;
-        }
-
-        if (signature.fileId() != null) {
-            return indexes.fileSignatureLookup().get(signature);
-        }
-        return indexes.lineSignatureLookup().get(signature);
+    private Evidence findEvidenceInLookup(
+            EvidenceLookupIndexes indexes,
+            Evidence candidate
+    ) {
+        return EvidenceIdentitySupport.findExisting(
+                indexes.rawIdLookup(),
+                indexes.signatureLookup(),
+                candidate
+        );
     }
 
     /**
      * 저장 완료된 evidence를 중복 판별 인덱스에 등록한다.
      */
-    private void registerEvidenceLookup(EvidenceLookupIndexes indexes, Evidence evidence) {
-        if (evidence == null) {
-            return;
-        }
-
-        String hash = normalizeBlank(evidence.getHash());
-        if (hash != null) {
-            indexes.hashLookup().putIfAbsent(hash, evidence);
-            return;
-        }
-
-        EvidenceSignature signature = toEvidenceSignature(evidence);
-        if (signature == null) {
-            return;
-        }
-
-        if (signature.fileId() != null) {
-            indexes.fileSignatureLookup().putIfAbsent(signature, evidence);
-        } else {
-            indexes.lineSignatureLookup().putIfAbsent(signature, evidence);
-        }
-    }
-
-    private EvidenceSignature toEvidenceSignature(Evidence evidence) {
-        if (evidence == null || evidence.getEvidenceType() == null) {
-            return null;
-        }
-
-        Long fileId = evidence.getFile() == null ? null : evidence.getFile().getFileId();
-        return new EvidenceSignature(
-                evidence.getEvidenceType(),
-                fileId,
-                evidence.getStartLine(),
-                evidence.getEndLine(),
-                evidence.getSnippet()
+    private void registerEvidenceLookup(
+            EvidenceLookupIndexes indexes,
+            Evidence evidence
+    ) {
+        EvidenceIdentitySupport.register(
+                indexes.rawIdLookup(),
+                indexes.signatureLookup(),
+                evidence
         );
-    }
-
-    private String normalizeBlank(String value) {
-        if (value == null) {
-            return null;
-        }
-        String trimmed = value.trim();
-        return trimmed.isEmpty() ? null : trimmed;
     }
 
     /**
@@ -861,18 +1606,40 @@ public class GraphStoreIngestService {
     }
 
     /**
-     * Observation을 저장한다.
-     * 동일 run에 대한 재적재 시 기존 데이터를 삭제 후 재삽입한다.
+     * Observation과 ObservationEvidence를 저장한다.
+     *
+     * 동일 run 재적재 시 FK 제약을 고려해 연결 테이블을 먼저 삭제하고,
+     * 그 다음 Observation을 삭제한 뒤 새 데이터를 삽입한다.
+     *
+     * observations가 비어 있더라도 기존 데이터는 삭제하여
+     * 이전 적재 결과가 stale 상태로 남지 않게 한다.
      */
-    private int saveObservations(RepoRun run, NormalizedFactsDocument facts) {
-        List<NormalizedObservationFact> observations = facts.observations();
+    private int saveObservations(
+            RepoRun run,
+            NormalizedFactsDocument facts,
+            Map<String, Evidence> evidenceMap
+    ) {
+        String runId = run.getRunId();
+
+        observationEvidenceRepository.deleteAllByRunId(
+                runId
+        );
+        observationRepository.deleteAllByRunId(runId);
+
+        List<NormalizedObservationFact> observations =
+                facts.observations();
+
         if (observations == null || observations.isEmpty()) {
+            log.info(
+                    "[GRAPHSTORE] observations cleared. runId={}, count=0",
+                    runId
+            );
             return 0;
         }
 
-        observationRepository.deleteAllByRunId(run.getRunId());
+        List<Observation> toSave =
+                new ArrayList<>(observations.size());
 
-        List<Observation> toSave = new ArrayList<>(observations.size());
         for (NormalizedObservationFact dto : observations) {
             toSave.add(new Observation(
                     null,
@@ -887,12 +1654,37 @@ public class GraphStoreIngestService {
             ));
         }
 
-        saveAllInBatches(toSave, BATCH_SIZE, observationRepository::saveAll);
+        saveAllInBatches(
+                toSave,
+                BATCH_SIZE,
+                observationRepository::saveAll
+        );
+
+        ObservationEvidenceLinkSupport.LinkBuildResult
+                linkResult =
+                ObservationEvidenceLinkSupport.build(
+                        toSave,
+                        observations,
+                        evidenceMap
+                );
+
+        saveAllInBatches(
+                linkResult.links(),
+                BATCH_SIZE,
+                observationEvidenceRepository::saveAll
+        );
 
         log.info(
-                "[GRAPHSTORE] observations saved. runId={}, count={}",
-                run.getRunId(),
-                toSave.size()
+                "[GRAPHSTORE] observations saved. "
+                        + "runId={}, observations={}, "
+                        + "observationEvidence={}, "
+                        + "missingEvidenceRefs={}, "
+                        + "duplicateEvidenceRefs={}",
+                runId,
+                toSave.size(),
+                linkResult.links().size(),
+                linkResult.missingEvidenceReferences(),
+                linkResult.duplicateEvidenceReferences()
         );
 
         return toSave.size();
@@ -1168,18 +1960,9 @@ public class GraphStoreIngestService {
     }
 
     private record EvidenceLookupIndexes(
-            Map<String, Evidence> hashLookup,
-            Map<EvidenceSignature, Evidence> fileSignatureLookup,
-            Map<EvidenceSignature, Evidence> lineSignatureLookup
-    ) {
-    }
-
-    private record EvidenceSignature(
-            EvidenceType evidenceType,
-            Long fileId,
-            Integer startLine,
-            Integer endLine,
-            String snippet
+            Map<String, Evidence> rawIdLookup,
+            Map<EvidenceIdentitySupport.Signature, Evidence>
+                    signatureLookup
     ) {
     }
 

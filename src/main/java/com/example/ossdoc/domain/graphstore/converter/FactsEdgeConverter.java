@@ -48,6 +48,7 @@ public class FactsEdgeConverter {
                 toDerivationKind(dto.derivation()),
                 resolutionStatus,
                 dto.resolutionReason(),
+                dto.callSiteLine(),
                 dto.confidenceHint(),
                 attrs
         );
@@ -128,6 +129,19 @@ public class FactsEdgeConverter {
             case "RETURNS", "RETURN_TYPE" -> EdgeType.RETURNS;
             case "THROWS", "THROWS_TYPE" -> EdgeType.THROWS;
             case "ANNOTATED_WITH", "ANNOTATED_BY" -> EdgeType.ANNOTATED_WITH;
+
+            case "HANDLES_ENDPOINT" -> EdgeType.HANDLES_ENDPOINT;
+            case "DECLARES_BEAN" -> EdgeType.DECLARES_BEAN;
+            case "CONFIGURES_BEAN" -> EdgeType.CONFIGURES_BEAN;
+            case "INJECTS" -> EdgeType.INJECTS;
+            case "PUBLISHES_EVENT" -> EdgeType.PUBLISHES_EVENT;
+            case "LISTENS_EVENT" -> EdgeType.LISTENS_EVENT;
+            case "PROVIDES_SPI" -> EdgeType.PROVIDES_SPI;
+            case "LOADS_SERVICE" -> EdgeType.LOADS_SERVICE;
+            case "REFLECTS_TYPE" -> EdgeType.REFLECTS_TYPE;
+            case "REFLECTS_METHOD" -> EdgeType.REFLECTS_METHOD;
+            case "REFLECTS_FIELD" -> EdgeType.REFLECTS_FIELD;
+            case "REFLECTS_CONSTRUCTOR" -> EdgeType.REFLECTS_CONSTRUCTOR;
 
             default -> throw new IllegalArgumentException(
                     "Unsupported relation kind: " + value
