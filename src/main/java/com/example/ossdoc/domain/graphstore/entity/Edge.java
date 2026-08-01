@@ -25,7 +25,10 @@ public class Edge extends BaseAuditedEntity {
             sequenceName = "edge_edge_id_seq",
             allocationSize = 50
     )
-    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "edge_id_seq_gen")
+    @GeneratedValue(
+            strategy = GenerationType.SEQUENCE,
+            generator = "edge_id_seq_gen"
+    )
     @Column(name = "edge_id")
     private Long edgeId;
 
@@ -54,10 +57,24 @@ public class Edge extends BaseAuditedEntity {
     private OriginKind origin = OriginKind.AST;
 
     @Enumerated(EnumType.STRING)
+    @Column(name = "derivation_kind")
+    private DerivationKind derivationKind = DerivationKind.DIRECT;
+
+    @Enumerated(EnumType.STRING)
     @Column(name = "resolution", nullable = false)
     private ResolutionStatus resolution = ResolutionStatus.RESOLVED;
+
+    @Column(name = "resolution_reason", columnDefinition = "text")
+    private String resolutionReason;
+
+    @Column(name = "call_site_line")
+    private Integer callSiteLine;
 
     @Column(name = "confidence", precision = 5, scale = 4)
     private BigDecimal confidence;
 
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "attrs", columnDefinition = "jsonb")
+    private JsonNode attrs;
 }
+

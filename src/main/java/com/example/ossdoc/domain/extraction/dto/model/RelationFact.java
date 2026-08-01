@@ -1,5 +1,6 @@
 package com.example.ossdoc.domain.extraction.dto.model;
 
+import com.example.ossdoc.domain.extraction.enums.DerivationKind;
 import com.example.ossdoc.domain.extraction.enums.FactOriginKind;
 import com.example.ossdoc.domain.extraction.enums.RelationKind;
 import com.fasterxml.jackson.annotation.JsonInclude;
@@ -36,6 +37,9 @@ public record RelationFact(
         @JsonProperty("origin")
         FactOriginKind origin,
 
+        @JsonProperty("derivation")
+        DerivationKind derivation,
+
         @JsonProperty("call_site_line")
         Integer callSiteLine,
 
@@ -51,6 +55,9 @@ public record RelationFact(
 
         if (!hasDstSymbol && !hasDstRaw) {
             throw new IllegalArgumentException("Either dstSymbol or dstRawRef must be provided.");
+        }
+        if (derivation == null) {
+            derivation = DerivationKind.DIRECT;
         }
         // PARTIAL resolution은 둘 다 가질 수 있음 (§11-5)
     }

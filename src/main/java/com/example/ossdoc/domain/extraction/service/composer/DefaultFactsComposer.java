@@ -9,7 +9,11 @@ import com.example.ossdoc.domain.extraction.dto.model.ObservationTable;
 import com.example.ossdoc.domain.extraction.dto.model.RelationTable;
 import com.example.ossdoc.domain.extraction.dto.model.StatsMeta;
 import com.example.ossdoc.domain.extraction.dto.model.SymbolTable;
+import com.example.ossdoc.domain.extraction.service.support.resolve.ObservationRelationResolutionService;
+import com.example.ossdoc.domain.extraction.service.support.resolve.ObservationResolutionResult;
 import com.example.ossdoc.domain.extraction.service.support.util.FactsSchema;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -31,14 +35,47 @@ public class DefaultFactsComposer implements FactsComposer {
 
     private final FactsSectionFactory sectionFactory;
     private final FactsStatsCalculator statsCalculator;
+    private final ObservationRelationResolutionService observationResolutionService;
 
     public DefaultFactsComposer() {
-        this(new FactsSectionFactory(), new FactsStatsCalculator());
+        this(new FactsSectionFactory(), new FactsStatsCalculator(), null);
     }
 
-    public DefaultFactsComposer(FactsSectionFactory sectionFactory, FactsStatsCalculator statsCalculator) {
+    /**
+     * 기존 단위 테스트와 수동 생성 코드의 호환성을 유지한다.
+     */
+    public DefaultFactsComposer(
+            FactsSectionFactory sectionFactory,
+            FactsStatsCalculator statsCalculator
+    ) {
+        this(sectionFactory, statsCalculator, null);
+    }
+
+    /**
+     * Spring 환경에서는 resolver service가 존재할 때만 의미 관계 승격을 활성화한다.
+     * 기존 테스트처럼 DefaultFactsComposer만 단독 import한 컨텍스트도 계속 동작한다.
+     */
+    @Autowired
+    public DefaultFactsComposer(
+            ObjectProvider<ObservationRelationResolutionService> resolverProvider
+    ) {
+        this(
+                new FactsSectionFactory(),
+                new FactsStatsCalculator(),
+                resolverProvider == null
+                        ? null
+                        : resolverProvider.getIfAvailable()
+        );
+    }
+
+    DefaultFactsComposer(
+            FactsSectionFactory sectionFactory,
+            FactsStatsCalculator statsCalculator,
+            ObservationRelationResolutionService observationResolutionService
+    ) {
         this.sectionFactory = Objects.requireNonNull(sectionFactory);
         this.statsCalculator = Objects.requireNonNull(statsCalculator);
+        this.observationResolutionService = observationResolutionService;
     }
 
     @Override
@@ -47,14 +84,25 @@ public class DefaultFactsComposer implements FactsComposer {
 
         ExtractionAggregate aggregate = context.aggregate();
 
+        ObservationResolutionResult resolutionResult = resolveObservations(
+                aggregate
+        );
+
         Map<String, EvidenceFact> evidence = sectionFactory.composeEvidence(aggregate.evidence());
         SymbolTable symbols = sectionFactory.composeSymbols(aggregate.symbols(), evidence);
-        RelationTable relations = sectionFactory.composeRelations(aggregate.relations());
+        RelationTable relations = sectionFactory.composeRelations(
+                aggregate.relations(),
+                resolutionResult.relations()
+        );
         ObservationTable observations = context.includeObservations()
                 ? sectionFactory.composeObservations(aggregate.observations())
                 : sectionFactory.emptyObservationTable();
 
-        List<String> warnings = mergeWarnings(context.warnings(), aggregate.warnings());
+        List<String> warnings = mergeWarnings(
+                context.warnings(),
+                aggregate.warnings(),
+                resolutionResult.warnings()
+        );
 
         ExtractionMeta extractionMeta = ExtractionMeta.builder()
                 .mode(context.mode() == null ? null : context.mode().outputCode())
@@ -91,10 +139,28 @@ public class DefaultFactsComposer implements FactsComposer {
         return schemaVersion;
     }
 
-    private List<String> mergeWarnings(List<String> left, List<String> right) {
+    /**
+     * includeObservations는 원시 observation의 JSON 노출 여부만 제어한다.
+     * 의미 관계 생성은 원시 observation 노출 여부와 무관하게 수행해야 한다.
+     */
+    private ObservationResolutionResult resolveObservations(
+            ExtractionAggregate aggregate
+    ) {
+        if (observationResolutionService == null) {
+            return ObservationResolutionResult.empty();
+        }
+
+        return observationResolutionService.resolve(aggregate);
+    }
+
+    @SafeVarargs
+    private final List<String> mergeWarnings(List<String>... sources) {
         LinkedHashSet<String> merged = new LinkedHashSet<>();
-        addWarnings(merged, left);
-        addWarnings(merged, right);
+        if (sources != null) {
+            for (List<String> source : sources) {
+                addWarnings(merged, source);
+            }
+        }
         return List.copyOf(new ArrayList<>(merged));
     }
 

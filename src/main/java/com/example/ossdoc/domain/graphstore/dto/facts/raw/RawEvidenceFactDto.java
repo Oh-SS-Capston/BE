@@ -6,6 +6,9 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
+
 @Getter
 @Setter
 @NoArgsConstructor
@@ -30,4 +33,8 @@ public class RawEvidenceFactDto {
 
     @JsonProperty("end_col")
     private Integer endCol;
+
+    private Map<String, Object> attrs =
+            new LinkedHashMap<>();
 }
+
