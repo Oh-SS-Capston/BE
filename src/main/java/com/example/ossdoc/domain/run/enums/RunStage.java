@@ -18,6 +18,12 @@ public enum RunStage {
             "레포지토리 스냅샷을 준비 중입니다."
     ),
 
+    LICENSE(
+            15,
+            false,
+            "대표 라이선스 정보를 분석 중입니다."
+    ),
+
     BUILD(
             25,
             true,

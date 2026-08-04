@@ -6,6 +6,7 @@ public enum ArtifactKind {
     BUILD_MANIFEST,
     FACTS_JSON,
     GRAPH_STATS,
+    LICENSE_ANALYSIS_JSON,
 
     // Rule Candidate Mining 결과물
     RULE_CANDIDATES_JSON,
