@@ -8,7 +8,10 @@ import com.example.ossdoc.domain.extraction.dto.model.RelationResolution;
 import com.example.ossdoc.domain.extraction.dto.model.SignatureFact;
 import com.example.ossdoc.domain.extraction.dto.model.SymbolFact;
 import com.example.ossdoc.domain.extraction.dto.model.TypeRef;
+import com.example.ossdoc.domain.extraction.enums.DerivationKind;
+import com.example.ossdoc.domain.extraction.enums.FactOriginKind;
 import com.example.ossdoc.domain.extraction.enums.ResolutionStatus;
+import com.example.ossdoc.domain.extraction.service.support.evidence.EvidenceMergePolicy;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -21,34 +24,19 @@ import java.util.Set;
 import java.util.function.Function;
 
 /**
- * AST/ASM에서 중복으로 들어올 수 있는 fact를 composer 단계에서 병합하기 위한 유틸.
+ * AST/ASM에서 중복으로 들어올 수 있는 fact를
+ * composer 단계에서 병합하기 위한 유틸.
  */
 final class FactsDedupSupport {
 
     private FactsDedupSupport() {
     }
 
-    static EvidenceFact mergeEvidence(EvidenceFact left, EvidenceFact right) {
-        if (left == null) {
-            return right;
-        }
-        if (right == null) {
-            return left;
-        }
-
-        return EvidenceFact.builder()
-                .id(firstNonBlank(left.id(), right.id()))
-                .type(firstNonNull(left.type(), right.type()))
-                .path(firstNonBlank(left.path(), right.path()))
-                .startLine(firstNonNull(left.startLine(), right.startLine()))
-                .endLine(firstNonNull(left.endLine(), right.endLine()))
-                .startCol(firstNonNull(left.startCol(), right.startCol()))
-                .endCol(firstNonNull(left.endCol(), right.endCol()))
-                .symbol(firstNonBlank(left.symbol(), right.symbol()))
-                .snippet(preferLonger(left.snippet(), right.snippet()))
-                .hash(firstNonBlank(left.hash(), right.hash()))
-                .attrs(mergeMaps(left.attrs(), right.attrs()))
-                .build();
+    static EvidenceFact mergeEvidence(
+            EvidenceFact left,
+            EvidenceFact right
+    ) {
+        return EvidenceMergePolicy.merge(left, right);
     }
 
     static SymbolFact mergeSymbol(SymbolFact left, SymbolFact right) {
@@ -74,22 +62,59 @@ final class FactsDedupSupport {
                 .access(firstNonNull(left.access(), right.access()))
                 .modifiers(mergeSets(left.modifiers(), right.modifiers()))
                 .origin(firstNonNull(left.origin(), right.origin()))
-                .annotations(mergeDistinct(left.annotations(), right.annotations(), FactsDedupSupport::typeRefKey))
-                .evidenceIds(mergeDistinct(left.evidenceIds(), right.evidenceIds(), Function.identity()))
+                .annotations(mergeDistinct(
+                        left.annotations(),
+                        right.annotations(),
+                        FactsDedupSupport::typeRefKey
+                ))
+                .evidenceIds(mergeDistinct(
+                        left.evidenceIds(),
+                        right.evidenceIds(),
+                        Function.identity()
+                ))
                 .attrs(mergeMaps(left.attrs(), right.attrs()))
                 .signature(mergeSignature(left.signature(), right.signature()))
-                .superTypeRef(mergeTypeRef(left.superTypeRef(), right.superTypeRef()))
-                .interfaceTypeRefs(mergeDistinct(left.interfaceTypeRefs(), right.interfaceTypeRefs(), FactsDedupSupport::typeRefKey))
+                .superTypeRef(mergeTypeRef(
+                        left.superTypeRef(),
+                        right.superTypeRef()
+                ))
+                .interfaceTypeRefs(mergeDistinct(
+                        left.interfaceTypeRefs(),
+                        right.interfaceTypeRefs(),
+                        FactsDedupSupport::typeRefKey
+                ))
                 .sourceFile(firstNonBlank(left.sourceFile(), right.sourceFile()))
                 .docComment(firstNonBlank(left.docComment(), right.docComment()))
                 .typeParams(firstNonNull(left.typeParams(), right.typeParams()))
-                .testCoverageHint(firstNonNull(left.testCoverageHint(), right.testCoverageHint()))
-                .throwsUnchecked(firstNonNull(left.throwsUnchecked(), right.throwsUnchecked()))
-                .hasConditionalThrow(firstNonNull(left.hasConditionalThrow(), right.hasConditionalThrow()))
-                .stateMutations(firstNonNull(left.stateMutations(), right.stateMutations()))
+                .testCoverageHint(firstNonNull(
+                        left.testCoverageHint(),
+                        right.testCoverageHint()
+                ))
+                .throwsUnchecked(firstNonNull(
+                        left.throwsUnchecked(),
+                        right.throwsUnchecked()
+                ))
+                .hasConditionalThrow(firstNonNull(
+                        left.hasConditionalThrow(),
+                        right.hasConditionalThrow()
+                ))
+                .stateMutations(firstNonNull(
+                        left.stateMutations(),
+                        right.stateMutations()
+                ))
                 .build();
     }
 
+    /**
+     * 동일 relation에서 확인된 정보를 하나로 병합한다.
+     *
+     * 주요 정책:
+     * - evidence ID는 중복 없이 합친다.
+     * - resolution은 더 높은 해석 상태를 우선한다.
+     * - AST와 BYTECODE 출처가 함께 확인되면 AST_AND_BYTECODE로 승격한다.
+     * - derivation은 직접 확인된 관계를 우선한다.
+     * - confidence는 더 높은 값을 사용한다.
+     */
     static RelationFact mergeRelation(RelationFact left, RelationFact right) {
         if (left == null) {
             return right;
@@ -100,19 +125,54 @@ final class FactsDedupSupport {
 
         return RelationFact.builder()
                 .kind(firstNonNull(left.kind(), right.kind()))
-                .srcSymbol(firstNonBlank(left.srcSymbol(), right.srcSymbol()))
-                .dstSymbol(firstNonBlank(left.dstSymbol(), right.dstSymbol()))
-                .dstRawRef(firstNonBlank(left.dstRawRef(), right.dstRawRef()))
-                .evidenceIds(mergeDistinct(left.evidenceIds(), right.evidenceIds(), Function.identity()))
-                .resolution(mergeResolution(left.resolution(), right.resolution()))
-                .origin(firstNonNull(left.origin(), right.origin()))
-                .callSiteLine(firstNonNull(left.callSiteLine(), right.callSiteLine()))
-                .confidenceHint(max(left.confidenceHint(), right.confidenceHint()))
-                .attrs(mergeMaps(left.attrs(), right.attrs()))
+                .srcSymbol(firstNonBlank(
+                        left.srcSymbol(),
+                        right.srcSymbol()
+                ))
+                .dstSymbol(firstNonBlank(
+                        left.dstSymbol(),
+                        right.dstSymbol()
+                ))
+                .dstRawRef(firstNonBlank(
+                        left.dstRawRef(),
+                        right.dstRawRef()
+                ))
+                .evidenceIds(mergeDistinct(
+                        left.evidenceIds(),
+                        right.evidenceIds(),
+                        Function.identity()
+                ))
+                .resolution(mergeResolution(
+                        left.resolution(),
+                        right.resolution()
+                ))
+                .origin(mergeOrigin(
+                        left.origin(),
+                        right.origin()
+                ))
+                .derivation(mergeDerivation(
+                        left.derivation(),
+                        right.derivation()
+                ))
+                .callSiteLine(firstNonNull(
+                        left.callSiteLine(),
+                        right.callSiteLine()
+                ))
+                .confidenceHint(max(
+                        left.confidenceHint(),
+                        right.confidenceHint()
+                ))
+                .attrs(mergeMaps(
+                        left.attrs(),
+                        right.attrs()
+                ))
                 .build();
     }
 
-    static ObservationFact mergeObservation(ObservationFact left, ObservationFact right) {
+    static ObservationFact mergeObservation(
+            ObservationFact left,
+            ObservationFact right
+    ) {
         if (left == null) {
             return right;
         }
@@ -122,18 +182,40 @@ final class FactsDedupSupport {
 
         return ObservationFact.builder()
                 .kind(firstNonNull(left.kind(), right.kind()))
-                .siteSymbol(firstNonBlank(left.siteSymbol(), right.siteSymbol()))
-                .targetSymbol(firstNonBlank(left.targetSymbol(), right.targetSymbol()))
-                .targetTypeRef(mergeTypeRef(left.targetTypeRef(), right.targetTypeRef()))
+                .siteSymbol(firstNonBlank(
+                        left.siteSymbol(),
+                        right.siteSymbol()
+                ))
+                .targetSymbol(firstNonBlank(
+                        left.targetSymbol(),
+                        right.targetSymbol()
+                ))
+                .targetTypeRef(mergeTypeRef(
+                        left.targetTypeRef(),
+                        right.targetTypeRef()
+                ))
                 .note(preferLonger(left.note(), right.note()))
-                .evidenceIds(mergeDistinct(left.evidenceIds(), right.evidenceIds(), Function.identity()))
-                .origin(firstNonNull(left.origin(), right.origin()))
-                .confidenceHint(max(left.confidenceHint(), right.confidenceHint()))
+                .evidenceIds(mergeDistinct(
+                        left.evidenceIds(),
+                        right.evidenceIds(),
+                        Function.identity()
+                ))
+                .origin(mergeOrigin(
+                        left.origin(),
+                        right.origin()
+                ))
+                .confidenceHint(max(
+                        left.confidenceHint(),
+                        right.confidenceHint()
+                ))
                 .attrs(mergeMaps(left.attrs(), right.attrs()))
                 .build();
     }
 
-    static RelationResolution mergeResolution(RelationResolution left, RelationResolution right) {
+    static RelationResolution mergeResolution(
+            RelationResolution left,
+            RelationResolution right
+    ) {
         if (left == null) {
             return right;
         }
@@ -143,16 +225,26 @@ final class FactsDedupSupport {
 
         int leftRank = resolutionRank(left.status());
         int rightRank = resolutionRank(right.status());
+
         RelationResolution winner = leftRank >= rightRank ? left : right;
         RelationResolution loser = leftRank >= rightRank ? right : left;
 
         return RelationResolution.builder()
-                .status(firstNonNull(winner.status(), loser.status()))
-                .reason(firstNonBlank(winner.reason(), loser.reason()))
+                .status(firstNonNull(
+                        winner.status(),
+                        loser.status()
+                ))
+                .reason(firstNonBlank(
+                        winner.reason(),
+                        loser.reason()
+                ))
                 .build();
     }
 
-    static SignatureFact mergeSignature(SignatureFact left, SignatureFact right) {
+    static SignatureFact mergeSignature(
+            SignatureFact left,
+            SignatureFact right
+    ) {
         if (left == null) {
             return right;
         }
@@ -161,12 +253,32 @@ final class FactsDedupSupport {
         }
 
         return SignatureFact.builder()
-                .params(mergeDistinct(left.params(), right.params(), FactsDedupSupport::paramFactKey))
-                .returns(mergeTypeRef(left.returns(), right.returns()))
-                .throwsTypes(mergeDistinct(left.throwsTypes(), right.throwsTypes(), FactsDedupSupport::typeRefKey))
-                .fieldType(mergeTypeRef(left.fieldType(), right.fieldType()))
-                .javadoc(firstNonBlank(left.javadoc(), right.javadoc()))
-                .sealed(firstNonNull(left.sealed(), right.sealed()))
+                .params(mergeDistinct(
+                        left.params(),
+                        right.params(),
+                        FactsDedupSupport::paramFactKey
+                ))
+                .returns(mergeTypeRef(
+                        left.returns(),
+                        right.returns()
+                ))
+                .throwsTypes(mergeDistinct(
+                        left.throwsTypes(),
+                        right.throwsTypes(),
+                        FactsDedupSupport::typeRefKey
+                ))
+                .fieldType(mergeTypeRef(
+                        left.fieldType(),
+                        right.fieldType()
+                ))
+                .javadoc(firstNonBlank(
+                        left.javadoc(),
+                        right.javadoc()
+                ))
+                .sealed(firstNonNull(
+                        left.sealed(),
+                        right.sealed()
+                ))
                 .build();
     }
 
@@ -180,16 +292,39 @@ final class FactsDedupSupport {
 
         return TypeRef.builder()
                 .raw(firstNonBlank(left.raw(), right.raw()))
-                .args(mergeDistinct(left.args(), right.args(), FactsDedupSupport::typeRefKey))
-                .arrayDim(firstNonNull(left.arrayDim(), right.arrayDim()))
-                .primitive(firstNonNull(left.primitive(), right.primitive()))
-                .unresolved(firstNonNull(left.unresolved(), right.unresolved()))
-                .sourceText(firstNonBlank(left.sourceText(), right.sourceText()))
-                .wildcard(firstNonNull(left.wildcard(), right.wildcard()))
+                .args(mergeDistinct(
+                        left.args(),
+                        right.args(),
+                        FactsDedupSupport::typeRefKey
+                ))
+                .arrayDim(firstNonNull(
+                        left.arrayDim(),
+                        right.arrayDim()
+                ))
+                .primitive(firstNonNull(
+                        left.primitive(),
+                        right.primitive()
+                ))
+                .unresolved(firstNonNull(
+                        left.unresolved(),
+                        right.unresolved()
+                ))
+                .sourceText(firstNonBlank(
+                        left.sourceText(),
+                        right.sourceText()
+                ))
+                .wildcard(firstNonNull(
+                        left.wildcard(),
+                        right.wildcard()
+                ))
                 .build();
     }
 
-    static <T> List<T> mergeDistinct(List<T> left, List<T> right, Function<T, String> keyFn) {
+    static <T> List<T> mergeDistinct(
+            List<T> left,
+            List<T> right,
+            Function<T, String> keyFn
+    ) {
         LinkedHashMap<String, T> merged = new LinkedHashMap<>();
         addDistinct(merged, left, keyFn);
         addDistinct(merged, right, keyFn);
@@ -198,35 +333,56 @@ final class FactsDedupSupport {
 
     static <T> Set<T> mergeSets(Set<T> left, Set<T> right) {
         LinkedHashSet<T> merged = new LinkedHashSet<>();
+
         if (left != null) {
             merged.addAll(left);
         }
         if (right != null) {
             merged.addAll(right);
         }
+
         if (merged.isEmpty()) {
             return Set.of();
         }
-        return Collections.unmodifiableSet(new LinkedHashSet<>(merged));
+
+        return Collections.unmodifiableSet(
+                new LinkedHashSet<>(merged)
+        );
     }
 
-    static <K, V> Map<K, V> mergeMaps(Map<K, V> left, Map<K, V> right) {
+    static <K, V> Map<K, V> mergeMaps(
+            Map<K, V> left,
+            Map<K, V> right
+    ) {
         LinkedHashMap<K, V> merged = new LinkedHashMap<>();
+
         if (left != null) {
             merged.putAll(left);
         }
         if (right != null) {
             merged.putAll(right);
         }
+
         if (merged.isEmpty()) {
             return Map.of();
         }
-        return Collections.unmodifiableMap(new LinkedHashMap<>(merged));
+
+        return Collections.unmodifiableMap(
+                new LinkedHashMap<>(merged)
+        );
     }
 
+    /**
+     * relation의 논리적 동일성을 판단하기 위한 키.
+     *
+     * origin과 derivation은 동일 관계의 출처 및 생성 방식이므로
+     * relation identity에는 포함하지 않는다.
+     */
     static String relationKey(RelationFact relation) {
         return String.join("|",
-                safe(relation.kind() == null ? null : relation.kind().code()),
+                safe(relation.kind() == null
+                        ? null
+                        : relation.kind().code()),
                 safe(relation.srcSymbol()),
                 safe(relation.dstSymbol()),
                 safe(relation.dstRawRef())
@@ -235,10 +391,40 @@ final class FactsDedupSupport {
 
     static String observationKey(ObservationFact observation) {
         return String.join("|",
-                safe(observation.kind() == null ? null : observation.kind().code()),
+                safe(observation.kind() == null
+                        ? null
+                        : observation.kind().code()),
                 safe(observation.siteSymbol()),
                 safe(observation.targetSymbol()),
-                safe(typeRefKey(observation.targetTypeRef()))
+                semanticTypeRefKey(observation.targetTypeRef())
+        );
+    }
+
+    /**
+     * observation의 논리적 동일성 판정용 타입 키.
+     * sourceText와 unresolved 여부는 추출기별 부가정보이므로 key에서 제외한다.
+     */
+    static String semanticTypeRefKey(TypeRef typeRef) {
+        if (typeRef == null) {
+            return "";
+        }
+
+        List<String> argKeys = new ArrayList<>();
+        if (typeRef.args() != null) {
+            for (TypeRef arg : typeRef.args()) {
+                argKeys.add(semanticTypeRefKey(arg));
+            }
+        }
+
+        return String.join("~",
+                safe(typeRef.raw()),
+                String.join(",", argKeys),
+                safe(typeRef.arrayDim() == null
+                        ? null
+                        : String.valueOf(typeRef.arrayDim())),
+                safe(typeRef.wildcard() == null
+                        ? null
+                        : typeRef.wildcard().code())
         );
     }
 
@@ -247,11 +433,15 @@ final class FactsDedupSupport {
     }
 
     static String symbolKey(SymbolFact symbolFact) {
-        if (symbolFact.symbol() != null && !symbolFact.symbol().isBlank()) {
+        if (symbolFact.symbol() != null
+                && !symbolFact.symbol().isBlank()) {
             return symbolFact.symbol();
         }
+
         return String.join("|",
-                safe(symbolFact.kind() == null ? null : symbolFact.kind().code()),
+                safe(symbolFact.kind() == null
+                        ? null
+                        : symbolFact.kind().code()),
                 safe(symbolFact.qualifiedName()),
                 safe(symbolFact.ownerSymbol()),
                 safe(symbolFact.name())
@@ -273,11 +463,19 @@ final class FactsDedupSupport {
         return String.join("|",
                 safe(typeRef.raw()),
                 String.join(",", argKeys),
-                safe(typeRef.arrayDim() == null ? null : String.valueOf(typeRef.arrayDim())),
-                safe(typeRef.primitive() == null ? null : String.valueOf(typeRef.primitive())),
-                safe(typeRef.unresolved() == null ? null : String.valueOf(typeRef.unresolved())),
+                safe(typeRef.arrayDim() == null
+                        ? null
+                        : String.valueOf(typeRef.arrayDim())),
+                safe(typeRef.primitive() == null
+                        ? null
+                        : String.valueOf(typeRef.primitive())),
+                safe(typeRef.unresolved() == null
+                        ? null
+                        : String.valueOf(typeRef.unresolved())),
                 safe(typeRef.sourceText()),
-                safe(typeRef.wildcard() == null ? null : typeRef.wildcard().code())
+                safe(typeRef.wildcard() == null
+                        ? null
+                        : typeRef.wildcard().code())
         );
     }
 
@@ -285,6 +483,7 @@ final class FactsDedupSupport {
         if (paramFact == null) {
             return "";
         }
+
         return String.join("|",
                 safe(paramFact.name()),
                 typeRefKey(paramFact.typeRef())
@@ -298,6 +497,7 @@ final class FactsDedupSupport {
         if (right == null || right.isBlank()) {
             return left;
         }
+
         return right.length() > left.length() ? right : left;
     }
 
@@ -309,7 +509,10 @@ final class FactsDedupSupport {
         if (left != null && !left.isBlank()) {
             return left;
         }
-        return (right != null && !right.isBlank()) ? right : null;
+
+        return right != null && !right.isBlank()
+                ? right
+                : null;
     }
 
     static Double max(Double left, Double right) {
@@ -319,13 +522,102 @@ final class FactsDedupSupport {
         if (right == null) {
             return left;
         }
+
         return Math.max(left, right);
+    }
+
+    /**
+     * relation의 수집 출처를 병합한다.
+     *
+     * AST와 BYTECODE에서 동일 관계가 발견되면
+     * AST_AND_BYTECODE로 승격한다.
+     */
+    private static FactOriginKind mergeOrigin(
+            FactOriginKind left,
+            FactOriginKind right
+    ) {
+        if (left == null) {
+            return right;
+        }
+        if (right == null) {
+            return left;
+        }
+        if (left == right) {
+            return left;
+        }
+
+        if (isAstAndBytecodeCombination(left, right)) {
+            return FactOriginKind.AST_AND_BYTECODE;
+        }
+
+        /*
+         * RESOURCE, OBSERVED 등 서로 다른 종류의 출처를
+         * 하나의 enum 값으로 정확히 표현할 수 없는 경우에는
+         * 기존 우선순위를 변경하지 않고 먼저 병합된 값을 유지한다.
+         */
+        return left;
+    }
+
+    private static boolean isAstAndBytecodeCombination(
+            FactOriginKind left,
+            FactOriginKind right
+    ) {
+        if (left == FactOriginKind.AST_AND_BYTECODE) {
+            return right == FactOriginKind.AST
+                    || right == FactOriginKind.BYTECODE
+                    || right == FactOriginKind.AST_AND_BYTECODE;
+        }
+
+        if (right == FactOriginKind.AST_AND_BYTECODE) {
+            return left == FactOriginKind.AST
+                    || left == FactOriginKind.BYTECODE
+                    || left == FactOriginKind.AST_AND_BYTECODE;
+        }
+
+        return (left == FactOriginKind.AST
+                && right == FactOriginKind.BYTECODE)
+                || (left == FactOriginKind.BYTECODE
+                && right == FactOriginKind.AST);
+    }
+
+    /**
+     * 같은 관계가 여러 방식으로 생성된 경우
+     * 더 확정적인 생성 방식을 유지한다.
+     */
+    private static DerivationKind mergeDerivation(
+            DerivationKind left,
+            DerivationKind right
+    ) {
+        if (left == null) {
+            return right;
+        }
+        if (right == null) {
+            return left;
+        }
+
+        return derivationRank(left) >= derivationRank(right)
+                ? left
+                : right;
+    }
+
+    private static int derivationRank(DerivationKind derivation) {
+        if (derivation == null) {
+            return -1;
+        }
+
+        return switch (derivation) {
+            case DIRECT -> 4;
+            case DERIVED -> 3;
+            case INFERRED -> 2;
+            case HEURISTIC -> 1;
+        };
     }
 
     private static int resolutionRank(ResolutionStatus status) {
         if (status == null) {
             return -1;
         }
+
         return switch (status) {
             case RESOLVED -> 3;
             case PARTIAL -> 2;
@@ -333,14 +625,20 @@ final class FactsDedupSupport {
         };
     }
 
-    private static <T> void addDistinct(Map<String, T> target, Collection<T> values, Function<T, String> keyFn) {
+    private static <T> void addDistinct(
+            Map<String, T> target,
+            Collection<T> values,
+            Function<T, String> keyFn
+    ) {
         if (values == null || values.isEmpty()) {
             return;
         }
+
         for (T value : values) {
             if (value == null) {
                 continue;
             }
+
             String key = safe(keyFn.apply(value));
             if (!target.containsKey(key)) {
                 target.put(key, value);
@@ -352,3 +650,5 @@ final class FactsDedupSupport {
         return value == null ? "" : value;
     }
 }
+
+

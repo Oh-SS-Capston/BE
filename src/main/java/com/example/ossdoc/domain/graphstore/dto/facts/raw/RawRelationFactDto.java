@@ -9,7 +9,9 @@ import lombok.Setter;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 @Getter
 @Setter
@@ -19,11 +21,11 @@ public class RawRelationFactDto {
 
     private String kind;
 
-    @JsonAlias({"src_symbol", "from_symbol"})
+    @JsonAlias({"from_symbol", "src", "from"})
     @JsonProperty("src_symbol")
     private String srcSymbol;
 
-    @JsonAlias({"dst_symbol", "to_symbol"})
+    @JsonAlias({"to_symbol", "dst", "to"})
     @JsonProperty("dst_symbol")
     private String dstSymbol;
 
@@ -32,11 +34,18 @@ public class RawRelationFactDto {
 
     private String origin;
 
+    private String derivation;
+
     private RawRelationResolutionDto resolution;
+
+    @JsonProperty("call_site_line")
+    private Integer callSiteLine;
 
     @JsonProperty("confidence_hint")
     private BigDecimal confidenceHint;
 
     @JsonProperty("evidence_ids")
     private List<String> evidenceIds = new ArrayList<>();
+
+    private Map<String, Object> attrs = new LinkedHashMap<>();
 }

@@ -67,6 +67,9 @@ public class RunProgressQueryService {
                 .buildManifestArtifactId(latestArtifactId(runId, ArtifactKind.BUILD_MANIFEST))
                 .factsArtifactId(latestArtifactId(runId, ArtifactKind.FACTS_JSON))
                 .graphStatsArtifactId(latestArtifactId(runId, ArtifactKind.GRAPH_STATS))
+                .licenseAnalysisArtifactId(
+                        latestArtifactId(runId, ArtifactKind.LICENSE_ANALYSIS_JSON)
+                )
                 .rankingsArtifactId(latestArtifactId(runId, ArtifactKind.RANKINGS_JSON))
                 .subsystemsArtifactId(latestArtifactId(runId, ArtifactKind.SUBSYSTEMS_JSON))
                 .classDiagramArtifactId(latestArtifactId(runId, ArtifactKind.CLASS_DIAGRAM_JSON))

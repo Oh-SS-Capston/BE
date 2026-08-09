@@ -22,7 +22,6 @@ import com.example.ossdoc.domain.run.support.WorkspaceManager;
 import com.example.ossdoc.domain.user.entity.User;
 import com.example.ossdoc.domain.user.enums.AuthProvider;
 import com.example.ossdoc.domain.user.enums.UserRole;
-import com.example.ossdoc.domain.membership.service.MembershipAccessService;
 import com.example.ossdoc.domain.user.repository.UserRepository;
 import com.example.ossdoc.global.properties.AnalysisCacheProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -33,6 +32,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
+import com.example.ossdoc.domain.token.service.TokenService;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -70,7 +70,7 @@ class RepoRunServiceTest {
     @Mock
     private ArtifactRepository artifactRepository;
     @Mock
-    private MembershipAccessService membershipAccessService;
+    private TokenService tokenService;
 
     private RepoRunService repoRunService;
 
@@ -96,7 +96,7 @@ class RepoRunServiceTest {
                 runPipelineJobRepository,
                 runPipelineStepExecutionRepository,
                 artifactRepository,
-                membershipAccessService
+                tokenService
         );
 
         lenient().when(analysisCacheLookupService.lookupFailedCooldown(any(), any(), any()))
