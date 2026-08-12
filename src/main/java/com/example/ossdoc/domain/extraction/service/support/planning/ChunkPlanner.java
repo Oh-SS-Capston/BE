@@ -1,6 +1,7 @@
 package com.example.ossdoc.domain.extraction.service.support.planning;
 import com.example.ossdoc.domain.extraction.service.support.util.HashSupport;
 import com.example.ossdoc.domain.extraction.service.support.util.RepoPathUtils;
+import com.example.ossdoc.domain.extraction.service.support.preflight.BytecodeAvailabilityChecker;
 import com.example.ossdoc.domain.extraction.service.support.preflight.ExtractionPreflightResult;
 
 import com.example.ossdoc.domain.extraction.dto.model.ChunkDescriptor;
@@ -17,6 +18,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Stream;
@@ -47,7 +49,7 @@ public class ChunkPlanner {
             chunks.addAll(planAstChunks(request, repoRoot, effectivePolicy, includeMatcher, excludeMatcher, module));
 
             if (supportsAsm(preflightResult)) {
-                chunks.addAll(planAsmChunks(repoRoot, effectivePolicy, includeMatcher, excludeMatcher, module));
+                chunks.addAll(planAsmChunks(preflightResult, repoRoot, effectivePolicy, includeMatcher, excludeMatcher, module));
             }
         }
 
@@ -106,6 +108,7 @@ public class ChunkPlanner {
     }
 
     private List<ChunkDescriptor> planAsmChunks(
+            ExtractionPreflightResult preflightResult,
             Path repoRoot,
             ChunkingPolicy policy,
             IncludeGlobMatcher includeMatcher,
@@ -121,7 +124,8 @@ public class ChunkPlanner {
                 policy.asmMaxFiles(),
                 policy.asmMaxBytes(),
                 includeMatcher,
-                excludeMatcher
+                excludeMatcher,
+                preflightClassFilesByRoot(preflightResult)
         );
     }
 
@@ -136,13 +140,39 @@ public class ChunkPlanner {
             IncludeGlobMatcher includeMatcher,
             IncludeGlobMatcher excludeMatcher
     ) {
+        return planChunksForRoots(
+                repoRoot,
+                moduleName,
+                roots,
+                kind,
+                fileSuffix,
+                maxFiles,
+                maxBytes,
+                includeMatcher,
+                excludeMatcher,
+                Map.of()
+        );
+    }
+
+    private List<ChunkDescriptor> planChunksForRoots(
+            Path repoRoot,
+            String moduleName,
+            List<Path> roots,
+            ChunkKind kind,
+            String fileSuffix,
+            int maxFiles,
+            long maxBytes,
+            IncludeGlobMatcher includeMatcher,
+            IncludeGlobMatcher excludeMatcher,
+            Map<Path, List<Path>> precollectedFilesByRoot
+    ) {
         List<ChunkDescriptor> chunks = new ArrayList<>();
         if (roots == null || roots.isEmpty()) {
             return chunks;
         }
 
         for (Path root : roots) {
-            List<Path> files = collectFiles(root, fileSuffix);
+            List<Path> files = collectOrReuseFiles(root, fileSuffix, precollectedFilesByRoot);
             if (files.isEmpty()) {
                 continue;
             }
@@ -174,6 +204,15 @@ public class ChunkPlanner {
         }
 
         return chunks;
+    }
+
+    private Map<Path, List<Path>> preflightClassFilesByRoot(ExtractionPreflightResult preflightResult) {
+        BytecodeAvailabilityChecker.BytecodeAvailabilityResult bytecodeAvailability =
+                preflightResult == null ? null : preflightResult.bytecodeAvailability();
+        if (bytecodeAvailability == null) {
+            return Map.of();
+        }
+        return bytecodeAvailability.classFilesByRoot();
     }
 
     private List<ChunkDescriptor> sliceRootIntoChunks(
@@ -256,6 +295,28 @@ public class ChunkPlanner {
         } catch (IOException e) {
             return List.of();
         }
+    }
+
+    private List<Path> collectOrReuseFiles(
+            Path root,
+            String suffix,
+            Map<Path, List<Path>> precollectedFilesByRoot
+    ) {
+        if (root == null) {
+            return List.of();
+        }
+
+        if (precollectedFilesByRoot != null) {
+            List<Path> precollected = precollectedFilesByRoot.get(root);
+            if (precollected == null) {
+                precollected = precollectedFilesByRoot.get(root.normalize());
+            }
+            if (precollected != null) {
+                return precollected;
+            }
+        }
+
+        return collectFiles(root, suffix);
     }
 
     private record FileEntry(Path path, String repoRelative, long size) {
