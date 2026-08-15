@@ -6,10 +6,14 @@ import com.example.ossdoc.domain.extraction.enums.BytecodeAvailability;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -106,13 +110,20 @@ public class BytecodeAvailabilityChecker {
     }
 
     private List<Path> collectClassFiles(Path root) throws IOException {
-        try (var stream = Files.walk(root)) {
-            return stream
-                    .filter(Files::isRegularFile)
-                    .filter(path -> path.toString().endsWith(".class"))
-                    .sorted()
-                    .toList();
-        }
+        List<Path> classFiles = new ArrayList<>();
+        Files.walkFileTree(root, new SimpleFileVisitor<>() {
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                if (attrs.isRegularFile() && file.toString().endsWith(".class")) {
+                    // preflight는 class 파일 존재 여부와 목록만 필요하므로
+                    // Files.walk stream 필터 체인 대신 방문 시점에 바로 수집해 순회 비용을 줄인다.
+                    classFiles.add(file);
+                }
+                return FileVisitResult.CONTINUE;
+            }
+        });
+        classFiles.sort(Comparator.naturalOrder());
+        return List.copyOf(classFiles);
     }
 
     private Path normalizePath(Path repoRoot, String rawPath) {
