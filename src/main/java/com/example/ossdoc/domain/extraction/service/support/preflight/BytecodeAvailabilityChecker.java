@@ -60,7 +60,7 @@ public class BytecodeAvailabilityChecker {
 
                 declaredRoots.add(resolvedRoot);
 
-                if (!Files.exists(resolvedRoot) || !Files.isDirectory(resolvedRoot)) {
+                if (!Files.isDirectory(resolvedRoot)) {
                     missingRoots.add(resolvedRoot);
                     warnings.add("classesDirs path does not exist: " + resolvedRoot);
                     continue;

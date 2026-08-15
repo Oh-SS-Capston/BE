@@ -279,7 +279,7 @@ public class ChunkPlanner {
     }
 
     private List<FileEntry> collectFileEntries(Path repoRoot, Path root, String suffix) {
-        if (root == null || !Files.exists(root) || !Files.isDirectory(root)) {
+        if (root == null || !Files.isDirectory(root)) {
             return List.of();
         }
 

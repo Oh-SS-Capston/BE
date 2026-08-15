@@ -151,8 +151,16 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
                 warnings
         );
 
-        long successCount = chunkResults.stream().filter(r -> r.status() == ChunkStatus.SUCCEEDED).count();
-        long failedCount = chunkResults.stream().filter(r -> r.status() == ChunkStatus.FAILED).count();
+        long successCount = 0L;
+        long failedCount = 0L;
+        // chunk 수가 많을 때 상태 집계를 위해 같은 결과 목록을 두 번 순회하지 않는다.
+        for (ChunkResult chunkResult : chunkResults) {
+            if (chunkResult.status() == ChunkStatus.SUCCEEDED) {
+                successCount++;
+            } else if (chunkResult.status() == ChunkStatus.FAILED) {
+                failedCount++;
+            }
+        }
         log.info("[EXTRACTION] Phase 4 완료 — 병렬 추출 (total={}, success={}, failed={})",
                 chunkResults.size(), successCount, failedCount);
 
@@ -241,7 +249,7 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
                 .orElseThrow(() -> new ExtractionException(ExtractionErrorCode.RUN_NOT_FOUND));
 
         Path workspaceRoot = Path.of(run.getWorkspaceRoot()).normalize();
-        if (!Files.exists(workspaceRoot) || !Files.isDirectory(workspaceRoot)) {
+        if (!Files.isDirectory(workspaceRoot)) {
             throw new ExtractionException(ExtractionErrorCode.WORKSPACE_NOT_FOUND,
                     "workspace root does not exist: " + workspaceRoot);
         }
