@@ -1015,6 +1015,14 @@ private void logSemanticPromotionGateDecision(
 
         Map<String, FileIndex> fileIndexCache = loadFileIndexCache(run);
         EvidenceLookupIndexes lookupIndexes = buildEvidenceLookupIndexes(run);
+        ensureFileIndexes(
+                run,
+                facts.evidence().values().stream()
+                        .map(NormalizedEvidenceFact::path)
+                        .toList(),
+                fileIndexCache
+        );
+        List<Evidence> newEvidence = new ArrayList<>();
 
         for (Map.Entry<String, NormalizedEvidenceFact> entry : facts.evidence().entrySet()) {
             String factEvidenceId = entry.getKey();
@@ -1028,13 +1036,18 @@ private void logSemanticPromotionGateDecision(
             if (existing != null) {
                 resolved = existing;
             } else {
-                resolved = evidenceRepository.save(candidate);
+                resolved = candidate;
+                newEvidence.add(candidate);
+                // 같은 facts 안에서 중복 evidence가 이어져도 추가 save 후보로 쌓이지 않도록
+                // 저장 예정 엔티티를 먼저 lookup에 등록한다. 실제 DB 저장은 아래 batch에서 한 번에 처리한다.
                 registerEvidenceLookup(lookupIndexes, resolved);
                 savedCount++;
             }
 
             evidenceMap.put(factEvidenceId, resolved);
         }
+
+        saveAllInBatches(newEvidence, BATCH_SIZE, evidenceRepository::saveAll);
 
         return new EvidenceSaveResult(evidenceMap, savedCount);
     }
@@ -1115,6 +1128,41 @@ private void logSemanticPromotionGateDecision(
     }
 
     /**
+     * evidence/symbol에서 필요한 신규 file_index를 먼저 모아 batch 저장한다.
+     * 이후 evidence signature와 source_file FK가 같은 캐시 객체를 참조해 개별 save를 피한다.
+     */
+    private void ensureFileIndexes(RepoRun run, List<String> rawPaths, Map<String, FileIndex> cache) {
+        if (rawPaths == null || rawPaths.isEmpty()) {
+            return;
+        }
+
+        Map<String, FileIndex> newFilesByPath = new LinkedHashMap<>();
+        for (String rawPath : rawPaths) {
+            String normalizedPath = normalizeEvidencePath(rawPath);
+            if (normalizedPath == null
+                    || cache.containsKey(normalizedPath)
+                    || newFilesByPath.containsKey(normalizedPath)) {
+                continue;
+            }
+
+            FileIndex created = new FileIndex(
+                    null,
+                    run,
+                    null,
+                    normalizedPath,
+                    detectFileType(normalizedPath),
+                    null,
+                    null
+            );
+            newFilesByPath.put(normalizedPath, created);
+            cache.put(normalizedPath, created);
+        }
+
+        // Evidence/Symbol 저장 전에 file_id를 확정해야 evidence signature와 source_file FK가 안정적으로 연결된다.
+        saveAllInBatches(new ArrayList<>(newFilesByPath.values()), BATCH_SIZE, fileIndexRepository::saveAll);
+    }
+
+    /**
      * 경로 기준 file_index 조회/생성을 수행한다.
      * 캐시를 우선 사용해 반복 DB 조회를 줄인다.
      */
@@ -1174,6 +1222,14 @@ private void logSemanticPromotionGateDecision(
         Map<String, SymbolEntity> symbolMap = new LinkedHashMap<>();
         Map<String, SymbolEntity> existingSymbolsByQualifiedName = loadExistingSymbolsByQualifiedName(run);
         Map<String, FileIndex> sourceFileCache = loadFileIndexCache(run);
+        ensureFileIndexes(
+                run,
+                facts.symbols().stream()
+                        .map(NormalizedSymbolFact::sourceFile)
+                        .toList(),
+                sourceFileCache
+        );
+        List<SymbolEntity> newSymbols = new ArrayList<>();
         int savedCount = 0;
         int sourceFileLinkedCount = 0;
         int moduleLinkedCount = 0;
@@ -1187,8 +1243,8 @@ private void logSemanticPromotionGateDecision(
             if (symbol == null) {
                 String symbolId = symbolIdGenerator.generate(run.getRunId(), dto.symbol());
                 // FactsSymbolConverter:23 — module은 여전히 null, 연결은 아래에서 서비스가 담당
-                SymbolEntity entity = factsSymbolConverter.toEntity(symbolId, run, dto);
-                symbol = symbolRepository.save(entity);
+                symbol = factsSymbolConverter.toEntity(symbolId, run, dto);
+                newSymbols.add(symbol);
                 existingSymbolsByQualifiedName.put(dto.symbol(), symbol);
                 savedCount++;
             }
@@ -1210,6 +1266,9 @@ private void logSemanticPromotionGateDecision(
 
             symbolMap.put(dto.symbol(), symbol);
         }
+
+        // 신규 symbol은 한 번에 저장한다. owner/source span/link 계산은 아래에서 같은 엔티티 인스턴스를 이어서 사용한다.
+        saveAllInBatches(newSymbols, BATCH_SIZE, symbolRepository::saveAll);
 
         Set<String> existingSymbolEvidenceKeys = loadExistingSymbolEvidenceKeys(run.getRunId());
         Set<String> newSymbolEvidenceKeys = new HashSet<>();
