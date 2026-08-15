@@ -264,7 +264,9 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         JavaParser parser = new JavaParser(parserConfiguration);
 
         for (Path javaFile : context.files()) {
-            if (javaFile == null || !Files.exists(javaFile) || !Files.isRegularFile(javaFile)) {
+            if (javaFile == null || !Files.isRegularFile(javaFile)) {
+                // Files.isRegularFile은 존재하지 않는 파일도 false로 처리하므로
+                // exists + isRegularFile 중복 stat 호출 없이 기존 skip 정책을 유지한다.
                 sink.addWarning("source file does not exist or is not a regular file: " + javaFile);
                 sink.recordFileSkipped();
                 continue;
@@ -324,14 +326,14 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         }
 
         for (Path classpathEntry : context.classpathEntries()) {
-            if (classpathEntry == null || !Files.exists(classpathEntry)) {
+            if (!isJarPath(classpathEntry)) {
                 continue;
             }
 
             try {
-                if (Files.isRegularFile(classpathEntry)
-                        && classpathEntry.getFileName() != null
-                        && classpathEntry.getFileName().toString().endsWith(".jar")) {
+                // classpath에는 디렉터리/비 JAR 항목도 섞일 수 있으므로
+                // 문자열 suffix로 먼저 거른 뒤 실제 파일 여부만 확인해 불필요한 파일시스템 조회를 줄인다.
+                if (Files.isRegularFile(classpathEntry)) {
                     solver.add(new JarTypeSolver(classpathEntry.toString()));
                 }
             } catch (Exception e) {
@@ -342,6 +344,12 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         }
 
         return solver;
+    }
+
+    private boolean isJarPath(Path path) {
+        return path != null
+                && path.getFileName() != null
+                && path.getFileName().toString().endsWith(".jar");
     }
 
     private void parseFile(ExtractionContext context, JavaParser parser, Path javaFile, ExtractionSink sink) {
