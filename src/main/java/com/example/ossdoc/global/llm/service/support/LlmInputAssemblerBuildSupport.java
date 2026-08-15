@@ -1193,8 +1193,25 @@ public class LlmInputAssemblerBuildSupport {
                         item.path("simple_name").asText(""),
                         extractSimpleName(node.path("fqn").asText(""))
                 ));
-                node.put("reason", firstNonBlank(item.path("reason").asText(""), "확장 가능 지점"));
-                node.put("confidenceSource", firstNonBlank(item.path("confidenceSource").asText(""), "문서"));
+                JsonNode semanticRelations = firstArray(item, "semantic_relations", "semanticRelations");
+                JsonNode signals = firstArray(item, "signals");
+                String semanticReason = extensionSemanticReason(semanticRelations, signals);
+                node.put("reason", firstNonBlank(
+                        item.path("reason").asText(""),
+                        semanticReason,
+                        "확장 가능 지점"
+                ));
+                node.put("confidenceSource", firstNonBlank(
+                        item.path("confidenceSource").asText(""),
+                        semanticRelations.isArray() && !semanticRelations.isEmpty() ? "의미그래프" : "구조"
+                ));
+                putIfText(node, "confidence", item.path("confidence").asText(""));
+                if (signals.isArray() && !signals.isEmpty()) {
+                    node.set("signals", signals);
+                }
+                if (semanticRelations.isArray() && !semanticRelations.isEmpty()) {
+                    node.set("semanticRelations", semanticRelations);
+                }
                 putIfText(node, "filePath", firstNonBlank(item.path("filePath").asText(""), item.path("file_path").asText("")));
             }
         }
@@ -1240,6 +1257,32 @@ public class LlmInputAssemblerBuildSupport {
         }
 
         return out;
+    }
+
+    private String extensionSemanticReason(JsonNode semanticRelations, JsonNode signals) {
+        if (semanticRelations != null && semanticRelations.isArray()) {
+            for (JsonNode relation : semanticRelations) {
+                String edgeType = firstNonBlank(
+                        relation.path("edge_type").asText(""),
+                        relation.path("edgeType").asText("")
+                ).toUpperCase(Locale.ROOT);
+                if ("PROVIDES_SPI".equals(edgeType)) {
+                    return "SPI provider 등록으로 확인된 확장 지점";
+                }
+                if ("LOADS_SERVICE".equals(edgeType)) {
+                    return "ServiceLoader 사용으로 확인된 확장 지점";
+                }
+            }
+        }
+        if (signals != null && signals.isArray()) {
+            for (JsonNode signal : signals) {
+                String value = signal.asText("").toUpperCase(Locale.ROOT);
+                if (value.startsWith("SPI_RELATION")) {
+                    return "SPI 의미 관계로 확인된 확장 지점";
+                }
+            }
+        }
+        return "";
     }
 
     private String resolveExtensionReasonByName(String className) {
@@ -1506,6 +1549,32 @@ public class LlmInputAssemblerBuildSupport {
                             || "BYTECODE".equalsIgnoreCase(evidence.path("evidenceType").asText(""));
                     if (!isBytecodeEvidence) {
                         putIfText(node, "snippet", trimSnippet(evidence.path("snippet").asText("")));
+                    }
+
+                    // semantic graph relation metadata를 최종 LLM evidenceIndex까지 전달한다.
+                    // rule_candidates 1.4 이전 artifact에는 필드가 없으므로 모두 선택적으로 복사한다.
+                    putIfText(node, "edgeType", evidence.path("edgeType").asText(""));
+                    putIfText(node, "edgeOrigin", evidence.path("edgeOrigin").asText(""));
+                    putIfText(node, "edgeDerivationKind", evidence.path("edgeDerivationKind").asText(""));
+                    putIfText(node, "edgeResolution", evidence.path("edgeResolution").asText(""));
+                    putIfText(node, "edgeResolutionReason", evidence.path("edgeResolutionReason").asText(""));
+                    if (evidence.path("edgeConfidence").isNumber()) {
+                        node.set("edgeConfidence", evidence.path("edgeConfidence"));
+                    }
+                    if (evidence.path("edgeCallSiteLine").canConvertToInt()) {
+                        node.put("edgeCallSiteLine", evidence.path("edgeCallSiteLine").asInt());
+                    }
+                    if (evidence.path("edgeDefaultVisible").isBoolean()) {
+                        node.put("edgeDefaultVisible", evidence.path("edgeDefaultVisible").asBoolean());
+                    }
+                    if (!evidence.path("edgeAttrs").isMissingNode() && !evidence.path("edgeAttrs").isNull()) {
+                        node.set("edgeAttrs", evidence.path("edgeAttrs"));
+                    }
+                    if (evidence.path("signalConfidenceHint").isNumber()) {
+                        node.set("signalConfidenceHint", evidence.path("signalConfidenceHint"));
+                    }
+                    if (!evidence.path("signalMeta").isMissingNode() && !evidence.path("signalMeta").isNull()) {
+                        node.set("signalMeta", evidence.path("signalMeta"));
                     }
                 }
             }
@@ -1801,6 +1870,7 @@ public class LlmInputAssemblerBuildSupport {
                 int importance = baseImportance + roleBoost + confidenceBoost
                         + entryMethodReasonBoost(em.path("reason").asText(""))
                         + methodHeuristicBonus(methodName);
+                HttpEndpointSeed endpointSeed = resolveHttpEndpointSeed(em);
 
                 String seedKey = methodSeedKey(methodFqn, symbolId);
                 CoreMethodSeed prev = byFqn.get(seedKey);
@@ -1814,8 +1884,11 @@ public class LlmInputAssemblerBuildSupport {
                         firstNonBlank(prev == null ? "" : prev.filePath(), ownerSourceFile),
                         importance,
                         prev == null ? "" : prev.signatureHint(),
-                        normalizeSummarySeed(inferMethodUsage(methodName, className, "")),
-                        inferScenarioHint(methodName),
+                        normalizeSummarySeed(firstNonBlank(
+                                endpointSeed.summarySeed(),
+                                inferMethodUsage(methodName, className, "")
+                        )),
+                        firstNonBlank(endpointSeed.scenarioHint(), inferScenarioHint(methodName)),
                         prev == null ? null : prev.startLine(),
                         prev == null ? null : prev.endLine()
                 );
@@ -1832,11 +1905,59 @@ public class LlmInputAssemblerBuildSupport {
     private int entryMethodReasonBoost(String reason) {
         String normalized = safeText(reason).toUpperCase(Locale.ROOT);
         return switch (normalized) {
+            case "HTTP_ENDPOINT" -> 5;
             case "STATIC_FACTORY", "PUBLIC_CONSTRUCTOR" -> 4;
             case "PUBLIC_STATIC" -> 2;
             case "PUBLIC_INSTANCE" -> 1;
             default -> 0;
         };
+    }
+
+    /**
+     * entry_method에 연결된 HANDLES_ENDPOINT 메타데이터를 LLM용 메서드 시드로 축약한다.
+     * 가장 신뢰도가 높은 endpoint 하나를 대표값으로 선택하되, 원본 endpoint 목록은 api_map에 그대로 유지한다.
+     */
+    private HttpEndpointSeed resolveHttpEndpointSeed(JsonNode entryMethod) {
+        JsonNode endpoints = firstArray(entryMethod, "http_endpoints", "httpEndpoints");
+        if (!endpoints.isArray() || endpoints.isEmpty()) {
+            return HttpEndpointSeed.EMPTY;
+        }
+
+        JsonNode best = null;
+        double bestConfidence = -1.0d;
+        for (JsonNode endpoint : endpoints) {
+            double confidence = endpoint.path("confidence").isNumber()
+                    ? endpoint.path("confidence").asDouble(0.0d)
+                    : 0.0d;
+            if (best == null || confidence > bestConfidence) {
+                best = endpoint;
+                bestConfidence = confidence;
+            }
+        }
+        if (best == null) {
+            return HttpEndpointSeed.EMPTY;
+        }
+
+        String httpMethod = safeText(firstNonBlank(
+                best.path("http_method").asText(""),
+                best.path("httpMethod").asText("")
+        )).toUpperCase(Locale.ROOT);
+        String path = safeText(best.path("path").asText(""));
+        String endpointLabel = (httpMethod + " " + path).trim();
+        if (endpointLabel.isBlank()) {
+            return new HttpEndpointSeed(
+                    "HTTP 요청을 처리하는 외부 API 진입 메서드입니다.",
+                    "HTTP API 요청 처리"
+            );
+        }
+        return new HttpEndpointSeed(
+                "HTTP " + endpointLabel + " 요청을 처리하는 외부 API 진입 메서드입니다.",
+                "HTTP " + endpointLabel + " 요청 처리"
+        );
+    }
+
+    private record HttpEndpointSeed(String summarySeed, String scenarioHint) {
+        private static final HttpEndpointSeed EMPTY = new HttpEndpointSeed("", "");
     }
 
     /**

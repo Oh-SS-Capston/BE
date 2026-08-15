@@ -13,6 +13,7 @@ import com.example.ossdoc.domain.graphstore.enums.EdgeType;
 import com.example.ossdoc.domain.graphstore.enums.SymbolKind;
 import com.example.ossdoc.domain.graphstore.repository.EdgeRepository;
 import com.example.ossdoc.domain.graphstore.repository.SymbolRepository;
+import com.example.ossdoc.domain.graphstore.support.EdgeInferencePolicy;
 import com.example.ossdoc.domain.publicapi.artifact.ApiFlowTraceJson;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
@@ -55,7 +56,7 @@ public class ApiFlowTraceService {
     /** 트레이스 대상 진입점 상한. 환경변수/properties로 프로젝트 규모별 조정 가능(#8). */
     @Value("${ossdoc.api-flow.max-entry-points:50}")
     private int maxEntryPoints;
-    private static final String ARTIFACT_SCHEMA_VERSION = "1.0";
+    private static final String ARTIFACT_SCHEMA_VERSION = "1.1";
     private static final String ARTIFACT_PATH = "publicapi/api_flow_trace.json";
 
     private final RepoRunRepository repoRunRepository;
@@ -64,6 +65,7 @@ public class ApiFlowTraceService {
     private final ArtifactService artifactService;
     private final ArtifactRepository artifactRepository;
     private final ObjectMapper objectMapper;
+    private final EdgeInferencePolicy edgeInferencePolicy;
 
     private record ApiMapEntry(String symbolId, String role, String confidence, List<String> entryMethodIds) {}
 
@@ -105,7 +107,10 @@ public class ApiFlowTraceService {
 
         // CALLS 엣지 로드 + 인접 리스트 구성
         List<Edge> callEdges = edgeRepository.findAllByRun_RunIdAndEdgeTypeIn(
-                runId, List.of(EdgeType.CALLS));
+                        runId, List.of(EdgeType.CALLS))
+                .stream()
+                .filter(edgeInferencePolicy::isUsableForInference)
+                .toList();
         Map<String, List<AdjacentEdge>> adj = buildAdjacency(callEdges);
 
         // 진입점 목록: confidence(HIGH→MED→LOW) → role(PRIMARY 우선) 정렬 후 cap 적용 (#8)
@@ -293,8 +298,16 @@ public class ApiFlowTraceService {
                         .fromSymbolId(e.getFromSymbol().getSymbolId())
                         .toSymbolId(e.getToSymbol().getSymbolId())
                         .edgeKind(EdgeType.CALLS.name())
-                        .confidence(e.getConfidence() == null ? 0.0 : e.getConfidence().doubleValue())
+                        .confidence(edgeInferencePolicy.effectiveConfidence(e, java.math.BigDecimal.ONE).doubleValue())
+                        // evidence 필드는 1.0 호환을 위해 origin alias로 유지한다.
                         .evidence(e.getOrigin() == null ? "AST" : e.getOrigin().name())
+                        .origin(e.getOrigin() == null ? null : e.getOrigin().name())
+                        .derivationKind(e.getDerivationKind() == null ? null : e.getDerivationKind().name())
+                        .resolution(e.getResolution() == null ? null : e.getResolution().name())
+                        .resolutionReason(e.getResolutionReason())
+                        .callSiteLine(e.getCallSiteLine())
+                        .defaultVisible(edgeInferencePolicy.defaultVisible(e))
+                        .attrs(e.getAttrs())
                         .build())
                 .toList();
 

@@ -35,7 +35,7 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class ApiMapBuildService {
 
-    private static final String SCHEMA_VERSION   = "1.0";
+    private static final String SCHEMA_VERSION   = "1.1";
     private static final String API_SURFACE_FILE = "api_surface.json";
     private static final String API_MAP_FILE     = "api_map.json";
 
@@ -142,6 +142,7 @@ public class ApiMapBuildService {
                     emNode.put("symbol_id", em.getSymbolId());
                     putNullable(emNode, "simple_name", em.getSimpleName());
                     emNode.put("reason", em.getReason());
+                    putHttpEndpoints(emNode, em.getHttpEndpoints());
                     emArray.add(emNode);
                 }
             }
@@ -176,6 +177,7 @@ public class ApiMapBuildService {
             node.put("linked_extender_count",    xp.getLinkedExtenderCount());
             ArrayNode sigs = node.putArray("signals");
             xp.getSignals().forEach(sigs::add);
+            putSemanticRelations(node, xp.getSemanticRelations());
             putNullable(node, "subsystem_id",    xp.getSubsystemId());
             putNullable(node, "subsystem_label", xp.getSubsystemLabel());
             xpArray.add(node);
@@ -227,6 +229,7 @@ public class ApiMapBuildService {
                     emNode.put("symbol_id", em.getSymbolId());
                     putNullable(emNode, "simple_name", em.getSimpleName());
                     emNode.put("reason", em.getReason());
+                    putHttpEndpoints(emNode, em.getHttpEndpoints());
                     emArray.add(emNode);
                 }
             }
@@ -256,6 +259,7 @@ public class ApiMapBuildService {
             node.put("confidence", xp.getConfidence());
             ArrayNode sigs = node.putArray("signals");
             xp.getSignals().forEach(sigs::add);
+            putSemanticRelations(node, xp.getSemanticRelations());
             xpArray.add(node);
         }
 
@@ -341,6 +345,44 @@ public class ApiMapBuildService {
         }
         int dot = qualifiedName.lastIndexOf('.');
         return dot >= 0 ? qualifiedName.substring(dot + 1) : qualifiedName;
+    }
+
+    private void putSemanticRelations(
+            ObjectNode extensionNode,
+            List<ExtensionPointCandidate.SemanticRelationInfo> relations
+    ) {
+        if (relations == null || relations.isEmpty()) return;
+        ArrayNode array = extensionNode.putArray("semantic_relations");
+        for (ExtensionPointCandidate.SemanticRelationInfo relation : relations) {
+            ObjectNode node = objectMapper.createObjectNode();
+            putNullable(node, "edge_type", relation.getEdgeType());
+            putNullable(node, "source_symbol_id", relation.getSourceSymbolId());
+            if (relation.getConfidence() != null) node.put("confidence", relation.getConfidence());
+            putNullable(node, "resolution", relation.getResolution());
+            putNullable(node, "resolution_reason", relation.getResolutionReason());
+            putNullable(node, "origin", relation.getOrigin());
+            putNullable(node, "derivation_kind", relation.getDerivationKind());
+            if (relation.getDefaultVisible() != null) node.put("default_visible", relation.getDefaultVisible());
+            if (relation.getAttrs() != null && !relation.getAttrs().isNull()) node.set("attrs", relation.getAttrs());
+            array.add(node);
+        }
+    }
+
+    private void putHttpEndpoints(ObjectNode methodNode, List<EntryPointCandidate.HttpEndpointInfo> endpoints) {
+        if (endpoints == null || endpoints.isEmpty()) return;
+        ArrayNode array = methodNode.putArray("http_endpoints");
+        for (EntryPointCandidate.HttpEndpointInfo endpoint : endpoints) {
+            ObjectNode node = objectMapper.createObjectNode();
+            putNullable(node, "http_method", endpoint.getHttpMethod());
+            putNullable(node, "path", endpoint.getPath());
+            if (endpoint.getConfidence() != null) node.put("confidence", endpoint.getConfidence());
+            putNullable(node, "resolution", endpoint.getResolution());
+            putNullable(node, "resolution_reason", endpoint.getResolutionReason());
+            putNullable(node, "origin", endpoint.getOrigin());
+            putNullable(node, "derivation_kind", endpoint.getDerivationKind());
+            if (endpoint.getDefaultVisible() != null) node.put("default_visible", endpoint.getDefaultVisible());
+            array.add(node);
+        }
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
