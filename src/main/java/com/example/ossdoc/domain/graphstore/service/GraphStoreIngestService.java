@@ -1448,20 +1448,40 @@ private void logSemanticPromotionGateDecision(
      * run 범위 symbol-evidence에서 심볼 ID별 AST evidence를 한 건씩 추출한다.
      * startLine이 있는 AST evidence를 우선하여 저장한다.
      */
-    private Map<String, Evidence> loadSymbolAstEvidenceMap(String runId) {
-        List<SymbolEvidence> links = symbolEvidenceRepository.findAllWithEvidenceByRunId(runId);
+    private Map<String, Evidence> buildSymbolAstEvidenceMap(
+            List<NormalizedSymbolFact> symbols,
+            Map<String, SymbolEntity> symbolMap,
+            Map<String, Evidence> evidenceMap
+    ) {
         Map<String, Evidence> result = new HashMap<>();
-        for (SymbolEvidence se : links) {
-            String symbolId = se.getId().getSymbolId();
-            Evidence ev = se.getEvidence();
-            if (ev.getEvidenceType() != EvidenceType.AST) {
+        // 직전에 saveSymbols가 같은 facts 기준으로 symbol-evidence를 구성하므로
+        // Edge 파생 근거 선택을 위해 symbol_evidence 테이블을 다시 조회하지 않는다.
+        if (symbols == null || symbols.isEmpty()) {
+            return result;
+        }
+
+        for (NormalizedSymbolFact symbolFact : symbols) {
+            if (symbolFact == null || symbolFact.symbol() == null || symbolFact.evidenceIds() == null) {
                 continue;
             }
-            Evidence existing = result.get(symbolId);
-            if (existing == null) {
-                result.put(symbolId, ev);
-            } else if (ev.getStartLine() != null && existing.getStartLine() == null) {
-                result.put(symbolId, ev);
+
+            SymbolEntity symbol = symbolMap.get(symbolFact.symbol());
+            if (symbol == null || symbol.getSymbolId() == null) {
+                continue;
+            }
+
+            for (String factEvidenceId : symbolFact.evidenceIds()) {
+                Evidence evidence = evidenceMap.get(factEvidenceId);
+                if (evidence == null || evidence.getEvidenceType() != EvidenceType.AST) {
+                    continue;
+                }
+
+                Evidence existing = result.get(symbol.getSymbolId());
+                if (existing == null) {
+                    result.put(symbol.getSymbolId(), evidence);
+                } else if (evidence.getStartLine() != null && existing.getStartLine() == null) {
+                    result.put(symbol.getSymbolId(), evidence);
+                }
             }
         }
         return result;
@@ -1552,7 +1572,11 @@ private void logSemanticPromotionGateDecision(
         Map<String, SymbolEntity> typeLookupIndex = buildTypeLookupIndex(symbolMap);
         // P1-1: IMPLEMENTS/EXTENDS 단순명 폴백 — 크로스모듈 동일 repo 타입 해소용
         Map<String, SymbolEntity> simpleNameInheritanceLookup = buildSimpleNameInheritanceLookup(symbolMap);
-        Map<String, Evidence> symbolAstEvidenceMap = loadSymbolAstEvidenceMap(run.getRunId());
+        Map<String, Evidence> symbolAstEvidenceMap = buildSymbolAstEvidenceMap(
+                facts.symbols(),
+                symbolMap,
+                evidenceMap
+        );
         Map<String, String> symbolToOwnerMap = buildSymbolToOwnerMap(facts.symbols());
 
         List<Edge> existingEdges = edgeRepository.findAllByRun_RunId(run.getRunId());
