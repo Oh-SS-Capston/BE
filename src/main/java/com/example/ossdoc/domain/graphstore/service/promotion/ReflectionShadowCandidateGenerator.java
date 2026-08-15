@@ -59,6 +59,21 @@ public final class ReflectionShadowCandidateGenerator {
                     List.of()
             );
         }
+        return generate(ShadowFactsIndex.from(facts), objectMapper);
+    }
+
+    public static ObservationPromotionCandidateGenerationResult
+    generate(
+            ShadowFactsIndex factsIndex,
+            ObjectMapper objectMapper
+    ) {
+        if (factsIndex == null) {
+            return new ObservationPromotionCandidateGenerationResult(
+                    0,
+                    List.of(),
+                    List.of()
+            );
+        }
 
         ObjectMapper mapper =
                 objectMapper == null
@@ -72,15 +87,8 @@ public final class ReflectionShadowCandidateGenerator {
         RelationConfidencePolicy confidencePolicy =
                 new RelationConfidencePolicy();
 
-        List<NormalizedSymbolFact> symbols =
-                facts.symbols() == null
-                        ? List.of()
-                        : facts.symbols();
-
         List<NormalizedObservationFact> observations =
-                facts.observations() == null
-                        ? List.of()
-                        : facts.observations();
+                factsIndex.observations();
 
         List<ObservationPromotionShadowCandidate> candidates =
                 new ArrayList<>();
@@ -113,7 +121,7 @@ public final class ReflectionShadowCandidateGenerator {
                     generateCandidate(
                             index,
                             observation,
-                            symbols,
+                            factsIndex,
                             mapper,
                             resolutionPolicy,
                             confidencePolicy,
@@ -136,7 +144,7 @@ public final class ReflectionShadowCandidateGenerator {
     generateCandidate(
             int observationIndex,
             NormalizedObservationFact observation,
-            List<NormalizedSymbolFact> symbols,
+            ShadowFactsIndex factsIndex,
             ObjectMapper mapper,
             RelationResolutionPolicy resolutionPolicy,
             RelationConfidencePolicy confidencePolicy,
@@ -206,7 +214,7 @@ public final class ReflectionShadowCandidateGenerator {
                     case TYPE ->
                             resolveTypeTarget(
                                     targetType,
-                                    symbols
+                                    factsIndex
                             );
 
                     case METHOD ->
@@ -214,21 +222,21 @@ public final class ReflectionShadowCandidateGenerator {
                                     targetType,
                                     memberName,
                                     parameterTypes,
-                                    symbols
+                                    factsIndex
                             );
 
                     case FIELD ->
                             resolveFieldTarget(
                                     targetType,
                                     memberName,
-                                    symbols
+                                    factsIndex
                             );
 
                     case CONSTRUCTOR ->
                             resolveConstructorTarget(
                                     targetType,
                                     parameterTypes,
-                                    symbols
+                                    factsIndex
                             );
 
                     case UNKNOWN ->
@@ -406,7 +414,7 @@ public final class ReflectionShadowCandidateGenerator {
 
     private static ResolutionTarget resolveTypeTarget(
             String rawTargetType,
-            List<NormalizedSymbolFact> symbols
+            ShadowFactsIndex factsIndex
     ) {
         String normalizedType =
                 normalizeRawType(rawTargetType);
@@ -424,7 +432,7 @@ public final class ReflectionShadowCandidateGenerator {
 
         List<NormalizedSymbolFact> matches =
                 matchingTypes(
-                        symbols,
+                        factsIndex,
                         normalizedType
                 );
 
@@ -461,7 +469,7 @@ public final class ReflectionShadowCandidateGenerator {
             String rawTargetType,
             String memberName,
             List<String> parameterTypes,
-            List<NormalizedSymbolFact> symbols
+            ShadowFactsIndex factsIndex
     ) {
         String normalizedType =
                 normalizeRawType(rawTargetType);
@@ -490,10 +498,7 @@ public final class ReflectionShadowCandidateGenerator {
 
         List<NormalizedSymbolFact> matches =
                 matchingMembers(
-                        symbolsOfKind(
-                                symbols,
-                                "method"
-                        ),
+                        factsIndex.symbolsOfKind("method"),
                         normalizedType,
                         normalizedMember,
                         parameterTypes
@@ -541,7 +546,7 @@ public final class ReflectionShadowCandidateGenerator {
     private static ResolutionTarget resolveFieldTarget(
             String rawTargetType,
             String memberName,
-            List<NormalizedSymbolFact> symbols
+            ShadowFactsIndex factsIndex
     ) {
         String normalizedType =
                 normalizeRawType(rawTargetType);
@@ -567,10 +572,7 @@ public final class ReflectionShadowCandidateGenerator {
 
         List<NormalizedSymbolFact> matches =
                 matchingMembers(
-                        symbolsOfKind(
-                                symbols,
-                                "field"
-                        ),
+                        factsIndex.symbolsOfKind("field"),
                         normalizedType,
                         normalizedMember,
                         List.of()
@@ -614,7 +616,7 @@ public final class ReflectionShadowCandidateGenerator {
     private static ResolutionTarget resolveConstructorTarget(
             String rawTargetType,
             List<String> parameterTypes,
-            List<NormalizedSymbolFact> symbols
+            ShadowFactsIndex factsIndex
     ) {
         String normalizedType =
                 normalizeRawType(rawTargetType);
@@ -636,10 +638,7 @@ public final class ReflectionShadowCandidateGenerator {
 
         List<NormalizedSymbolFact> matches =
                 matchingMembers(
-                        symbolsOfKind(
-                                symbols,
-                                "constructor"
-                        ),
+                        factsIndex.symbolsOfKind("constructor"),
                         normalizedType,
                         null,
                         parameterTypes
@@ -683,13 +682,10 @@ public final class ReflectionShadowCandidateGenerator {
     }
 
     private static List<NormalizedSymbolFact> matchingTypes(
-            List<NormalizedSymbolFact> symbols,
+            ShadowFactsIndex factsIndex,
             String rawType
     ) {
-        return symbolsOfKind(
-                symbols,
-                "type"
-        ).stream()
+        return factsIndex.symbolsOfKind("type").stream()
                 .filter(symbol ->
                         typeMatches(
                                 symbol,

@@ -45,6 +45,7 @@ import com.example.ossdoc.domain.graphstore.service.promotion.EndpointEventSpiSh
 import com.example.ossdoc.domain.graphstore.service.promotion.ObservationPromotionShadowAnalyzer;
 import com.example.ossdoc.domain.graphstore.service.promotion.ReflectionShadowCandidateGenerator;
 import com.example.ossdoc.domain.graphstore.service.promotion.ReflectionShadowParityAnalyzer;
+import com.example.ossdoc.domain.graphstore.service.promotion.ShadowFactsIndex;
 import com.example.ossdoc.domain.graphstore.service.promotion.gate.SemanticPromotionGateProperties;
 import com.example.ossdoc.domain.graphstore.service.promotion.gate.SemanticPromotionResponsibilityGate;
 import com.example.ossdoc.domain.graphstore.repository.EdgeEvidenceRepository;
@@ -255,6 +256,8 @@ public class GraphStoreIngestService {
 
         NormalizedFactsDocument facts = graphStoreFactsNormalizer.normalize(rawFacts);
         validateFacts(facts);
+        // shadow generator들이 symbols/observations 인덱스를 각자 다시 만들지 않도록 ingest 단위에서 한 번만 구성한다.
+        ShadowFactsIndex shadowFactsIndex = ShadowFactsIndex.from(facts);
 
         ObservationPromotionShadowReport shadowReport =
                 ObservationPromotionShadowAnalyzer.analyze(facts);
@@ -314,7 +317,7 @@ public class GraphStoreIngestService {
                 reflectionGeneration =
                 ReflectionShadowCandidateGenerator
                         .generate(
-                                facts,
+                                shadowFactsIndex,
                                 objectMapper
                         );
 
@@ -337,7 +340,7 @@ public class GraphStoreIngestService {
                 diGeneration =
                 DiShadowCandidateGenerator
                         .generate(
-                                facts,
+                                shadowFactsIndex,
                                 objectMapper
                         );
 
