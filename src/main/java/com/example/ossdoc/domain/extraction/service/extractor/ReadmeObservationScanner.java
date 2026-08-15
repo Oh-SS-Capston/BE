@@ -195,15 +195,33 @@ public class ReadmeObservationScanner {
         StringBuilder result = new StringBuilder();
         while (target.find()) {
             int sectionStart = target.start();
-            int sectionEnd = allHeaderStarts.stream()
-                    .filter(pos -> pos > sectionStart)
-                    .findFirst()
-                    .orElse(content.length());
+            int sectionEnd = nextHeaderStartAfter(allHeaderStarts, sectionStart, content.length());
             result.append(content, sectionStart, sectionEnd);
         }
 
         // 타깃 섹션이 없으면 전체 README 사용 (기존 동작 유지)
         return result.isEmpty() ? content : result.toString();
+    }
+
+    private int nextHeaderStartAfter(List<Integer> headerStarts, int sectionStart, int fallbackEnd) {
+        // ANY_HEADER matcher가 앞에서부터 수집한 순서를 유지하므로
+        // 타깃 섹션마다 stream으로 전체 헤더를 다시 훑지 않고 이진 탐색으로 다음 헤더를 찾는다.
+        int left = 0;
+        int right = headerStarts.size() - 1;
+        int candidate = fallbackEnd;
+
+        while (left <= right) {
+            int mid = left + (right - left) / 2;
+            Integer headerStart = headerStarts.get(mid);
+            if (headerStart != null && headerStart > sectionStart) {
+                candidate = headerStart;
+                right = mid - 1;
+            } else {
+                left = mid + 1;
+            }
+        }
+
+        return candidate;
     }
 
     private Path findReadme(Path repoRoot) {
