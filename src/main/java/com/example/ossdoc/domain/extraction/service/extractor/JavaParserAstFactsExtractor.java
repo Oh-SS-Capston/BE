@@ -134,6 +134,90 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
     private record ThrowAnalysis(List<TypeRef> uncheckedTypes, boolean hasConditional) {}
     private record HttpMapping(AnnotationExpr annotation, String annotationName, List<String> httpMethods, List<String> paths, List<String> consumes, List<String> produces, Map<String, String> rawAttributes, boolean pathDeclared, boolean pathResolved) {}
     private record SourceText(String content, List<String> lines) {}
+    private record CallableBodyNodeIndex(
+            List<MethodCallExpr> methodCalls,
+            List<ObjectCreationExpr> objectCreations,
+            List<NameExpr> nameExpressions,
+            List<FieldAccessExpr> fieldAccesses
+    ) {
+
+        static CallableBodyNodeIndex from(CallableDeclaration<?> declaration) {
+            // callable 본문 relation 생성에 필요한 노드를 한 번의 AST walk로 모아
+            // CALLS/USES/field access 추출이 같은 subtree를 반복 순회하지 않게 한다.
+            List<MethodCallExpr> methodCalls = new ArrayList<>();
+            List<ObjectCreationExpr> objectCreations = new ArrayList<>();
+            List<NameExpr> nameExpressions = new ArrayList<>();
+            List<FieldAccessExpr> fieldAccesses = new ArrayList<>();
+
+            declaration.walk(node -> {
+                if (node instanceof MethodCallExpr methodCallExpr) {
+                    methodCalls.add(methodCallExpr);
+                }
+                if (node instanceof ObjectCreationExpr objectCreationExpr) {
+                    objectCreations.add(objectCreationExpr);
+                }
+                if (node instanceof NameExpr nameExpr) {
+                    nameExpressions.add(nameExpr);
+                }
+                if (node instanceof FieldAccessExpr fieldAccessExpr) {
+                    fieldAccesses.add(fieldAccessExpr);
+                }
+            });
+
+            return new CallableBodyNodeIndex(methodCalls, objectCreations, nameExpressions, fieldAccesses);
+        }
+    }
+
+    private record MethodBodyNodeIndex(
+            CallableBodyNodeIndex callableIndex,
+            List<ThrowStmt> throwStatements,
+            List<AssignExpr> assignments,
+            Set<String> localVariableNames
+    ) {
+
+        static MethodBodyNodeIndex from(MethodDeclaration method) {
+            // 메서드 본문은 relations/observations/rule signal에서 반복 사용되므로
+            // AST subtree를 기능별로 매번 다시 걷지 않고 한 번 만든 지역 인덱스를 재사용한다.
+            List<MethodCallExpr> methodCalls = new ArrayList<>();
+            List<ObjectCreationExpr> objectCreations = new ArrayList<>();
+            List<NameExpr> nameExpressions = new ArrayList<>();
+            List<FieldAccessExpr> fieldAccesses = new ArrayList<>();
+            List<ThrowStmt> throwStatements = new ArrayList<>();
+            List<AssignExpr> assignments = new ArrayList<>();
+            Set<String> localVariableNames = new LinkedHashSet<>();
+
+            method.walk(node -> {
+                if (node instanceof MethodCallExpr methodCallExpr) {
+                    methodCalls.add(methodCallExpr);
+                }
+                if (node instanceof ObjectCreationExpr objectCreationExpr) {
+                    objectCreations.add(objectCreationExpr);
+                }
+                if (node instanceof NameExpr nameExpr) {
+                    nameExpressions.add(nameExpr);
+                }
+                if (node instanceof FieldAccessExpr fieldAccessExpr) {
+                    fieldAccesses.add(fieldAccessExpr);
+                }
+                if (node instanceof ThrowStmt throwStmt) {
+                    throwStatements.add(throwStmt);
+                }
+                if (node instanceof AssignExpr assignExpr) {
+                    assignments.add(assignExpr);
+                }
+                if (node instanceof VariableDeclarator variableDeclarator) {
+                    localVariableNames.add(variableDeclarator.getNameAsString());
+                }
+            });
+
+            return new MethodBodyNodeIndex(
+                    new CallableBodyNodeIndex(methodCalls, objectCreations, nameExpressions, fieldAccesses),
+                    throwStatements,
+                    assignments,
+                    localVariableNames
+            );
+        }
+    }
 
     private boolean hasAnnotationAttribute(
             AnnotationExpr annotation,
@@ -579,7 +663,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         sink.addSymbol(fact);
 
         addAnnotationRelations(constructorSymbol, declaration.getAnnotations(), annotationRefs, relativePath, sourceLines, evidence.id(), sink);
-        addCallableBodyRelations(declaration, constructorSymbol, relativePath, sourceLines, evidence.id(), sink);
+        addCallableBodyRelations(CallableBodyNodeIndex.from(declaration), constructorSymbol, relativePath, sourceLines, evidence.id(), sink);
         addConstructorObservationsIfNeeded(
                 context,
                 declaration,
@@ -608,8 +692,9 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         List<TypeRef> annotationRefs = annotationTypeRefs(declaration.getAnnotations(), sink);
         sink.addEvidence(evidence);
 
-        ThrowAnalysis throwAnalysis = analyzeThrows(declaration, sink);
-        List<StateMutation> mutations = analyzeMutations(declaration);
+        MethodBodyNodeIndex bodyIndex = MethodBodyNodeIndex.from(declaration);
+        ThrowAnalysis throwAnalysis = analyzeThrows(declaration, bodyIndex, sink);
+        List<StateMutation> mutations = analyzeMutations(declaration, bodyIndex);
 
         SymbolFact fact = SymbolFact.builder()
                 .symbol(methodSymbol)
@@ -633,21 +718,21 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         sink.addSymbol(fact);
 
         addAnnotationRelations(methodSymbol, declaration.getAnnotations(), annotationRefs, relativePath, sourceLines, evidence.id(), sink);
-        addCallableBodyRelations(declaration, methodSymbol, relativePath, sourceLines, evidence.id(), sink);
-        addMethodObservationsIfNeeded(context, ownerTypeDeclaration, declaration, methodSymbol, relativePath, sourceLines, evidence.id(), sink);
+        addCallableBodyRelations(bodyIndex.callableIndex(), methodSymbol, relativePath, sourceLines, evidence.id(), sink);
+        addMethodObservationsIfNeeded(context, ownerTypeDeclaration, declaration, bodyIndex, methodSymbol, relativePath, sourceLines, evidence.id(), sink);
         addOverridesRelationIfPresent(declaration, methodSymbol, declaration.getNameAsString(), signature, evidence.id(), sink);
 
         if (isExampleFile(relativePath)) {
-            collectExampleTypeRefs(relativePath, declaration, sink);
+            collectExampleTypeRefs(relativePath, bodyIndex.callableIndex(), sink);
         }
     }
 
     private void collectExampleTypeRefs(
             String relativePath,
-            MethodDeclaration declaration,
+            CallableBodyNodeIndex bodyIndex,
             ExtractionSink sink
     ) {
-        declaration.findAll(ObjectCreationExpr.class).forEach(expr -> {
+        bodyIndex.objectCreations().forEach(expr -> {
             try {
                 String fqcn = expr.getType().resolve().asReferenceType().getQualifiedName();
                 if (!isStandardLibrary(fqcn)) {
@@ -665,7 +750,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             }
         });
 
-        declaration.findAll(MethodCallExpr.class).forEach(call -> {
+        bodyIndex.methodCalls().forEach(call -> {
             call.getScope().ifPresent(scope -> {
                 try {
                     ResolvedType resolved = scope.calculateResolvedType();
@@ -766,14 +851,14 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
     }
 
     private void addCallableBodyRelations(
-            CallableDeclaration<?> declaration,
+            CallableBodyNodeIndex bodyIndex,
             String callableSymbol,
             String relativePath,
             List<String> sourceLines,
             String callableEvidenceId,
             ExtractionSink sink
     ) {
-        declaration.findAll(MethodCallExpr.class)
+        bodyIndex.methodCalls()
                 .forEach(methodCallExpr ->
                         addMethodCallRelation(
                                 callableSymbol,
@@ -785,7 +870,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                         )
                 );
 
-        declaration.findAll(ObjectCreationExpr.class)
+        bodyIndex.objectCreations()
                 .forEach(objectCreationExpr ->
                         addObjectCreationRelation(
                                 callableSymbol,
@@ -797,7 +882,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                         )
                 );
 
-        declaration.findAll(NameExpr.class)
+        bodyIndex.nameExpressions()
                 .forEach(nameExpr ->
                         addFieldAccessRelation(
                                 callableSymbol,
@@ -809,7 +894,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                         )
                 );
 
-        declaration.findAll(FieldAccessExpr.class)
+        bodyIndex.fieldAccesses()
                 .forEach(fieldAccessExpr ->
                         addFieldAccessRelation(
                                 callableSymbol,
@@ -2519,6 +2604,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             ExtractionContext context,
             TypeDeclaration<?> ownerTypeDeclaration,
             MethodDeclaration declaration,
+            MethodBodyNodeIndex bodyIndex,
             String methodSymbol,
             String relativePath,
             List<String> sourceLines,
@@ -2737,7 +2823,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             );
         }
 
-        declaration.findAll(MethodCallExpr.class)
+        bodyIndex.callableIndex().methodCalls()
                 .forEach(call -> {
                     if (isPublishEventCall(call)) {
                         sink.addObservation(
@@ -2881,6 +2967,29 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                         );
                     }
                 });
+    }
+
+    private void addMethodObservationsIfNeeded(
+            ExtractionContext context,
+            TypeDeclaration<?> ownerTypeDeclaration,
+            MethodDeclaration declaration,
+            String methodSymbol,
+            String relativePath,
+            List<String> sourceLines,
+            String evidenceId,
+            ExtractionSink sink
+    ) {
+        addMethodObservationsIfNeeded(
+                context,
+                ownerTypeDeclaration,
+                declaration,
+                MethodBodyNodeIndex.from(declaration),
+                methodSymbol,
+                relativePath,
+                sourceLines,
+                evidenceId,
+                sink
+        );
     }
 
     /**
@@ -3385,7 +3494,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         }).toList();
     }
 
-    private ThrowAnalysis analyzeThrows(MethodDeclaration method, ExtractionSink sink) {
+    private ThrowAnalysis analyzeThrows(MethodDeclaration method, MethodBodyNodeIndex bodyIndex, ExtractionSink sink) {
         if (method.getBody().isEmpty()) {
             return new ThrowAnalysis(null, false);
         }
@@ -3398,7 +3507,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         List<TypeRef> unchecked = new ArrayList<>();
         boolean[] hasConditional = {false};
 
-        method.findAll(ThrowStmt.class).forEach(throwStmt -> {
+        bodyIndex.throwStatements().forEach(throwStmt -> {
             if (throwStmt.getExpression() instanceof ObjectCreationExpr oce) {
                 unchecked.add(toTypeRef(oce.getType(), sink));
                 if (isInsideConditional(throwStmt)) {
@@ -3413,7 +3522,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         );
     }
 
-    private List<StateMutation> analyzeMutations(MethodDeclaration method) {
+    private List<StateMutation> analyzeMutations(MethodDeclaration method, MethodBodyNodeIndex bodyIndex) {
         if (method.getBody().isEmpty()) {
             return null;
         }
@@ -3426,13 +3535,13 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         List<StateMutation> mutations = new ArrayList<>();
         int[] seqIdx = {0};
 
-        method.findAll(AssignExpr.class).forEach(assign -> {
+        bodyIndex.assignments().forEach(assign -> {
             if (mutations.size() >= 20) return;
             String target = null;
             if (assign.getTarget() instanceof FieldAccessExpr fae) {
                 target = fae.toString();
             } else if (assign.getTarget() instanceof NameExpr ne) {
-                if (isFieldReference(ne, method)) {
+                if (isFieldReference(ne, method, bodyIndex)) {
                     target = "this." + ne.getNameAsString();
                 }
             }
@@ -3446,7 +3555,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             }
         });
 
-        method.findAll(MethodCallExpr.class).forEach(call -> {
+        bodyIndex.callableIndex().methodCalls().forEach(call -> {
             if (mutations.size() >= 20) return;
             String name = call.getNameAsString();
             if (MUTATING_EXACT.contains(name) || MUTATING_PREFIX.matcher(name).matches()) {
@@ -3475,17 +3584,15 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         return false;
     }
 
-    private boolean isFieldReference(NameExpr ne, MethodDeclaration method) {
+    private boolean isFieldReference(NameExpr ne, MethodDeclaration method, MethodBodyNodeIndex bodyIndex) {
         String name = ne.getNameAsString();
 
         for (Parameter param : method.getParameters()) {
             if (param.getNameAsString().equals(name)) return false;
         }
 
-        if (method.getBody().isPresent()) {
-            for (VariableDeclarator vd : method.getBody().get().findAll(VariableDeclarator.class)) {
-                if (vd.getNameAsString().equals(name)) return false;
-            }
+        if (bodyIndex.localVariableNames().contains(name)) {
+            return false;
         }
 
         return true;
