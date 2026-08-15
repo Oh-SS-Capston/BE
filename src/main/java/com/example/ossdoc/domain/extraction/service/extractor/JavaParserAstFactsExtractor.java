@@ -98,6 +98,7 @@ import com.github.javaparser.symbolsolver.resolution.typesolvers.ReflectionTypeS
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.nio.charset.CharacterCodingException;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -132,6 +133,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
 
     private record ThrowAnalysis(List<TypeRef> uncheckedTypes, boolean hasConditional) {}
     private record HttpMapping(AnnotationExpr annotation, String annotationName, List<String> httpMethods, List<String> paths, List<String> consumes, List<String> produces, Map<String, String> rawAttributes, boolean pathDeclared, boolean pathResolved) {}
+    private record SourceText(String content, List<String> lines) {}
 
     private boolean hasAnnotationAttribute(
             AnnotationExpr annotation,
@@ -157,6 +159,11 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
 
     @Override
     public ChunkResult extract(ExtractionContext context) {
+        return extract(context, new ExtractionRunCache());
+    }
+
+    @Override
+    public ChunkResult extract(ExtractionContext context, ExtractionRunCache runCache) {
         ExtractionSink sink = new ExtractionSink();
 
         if (!context.isAstChunk()) {
@@ -169,7 +176,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             return sink.toChunkResult(context.chunk());
         }
 
-        ParserConfiguration parserConfiguration = parserConfiguration(context, sink);
+        ParserConfiguration parserConfiguration = parserConfiguration(context, sink, runCache);
         JavaParser parser = new JavaParser(parserConfiguration);
 
         for (Path javaFile : context.files()) {
@@ -188,7 +195,22 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         return sink.toChunkResult(context.chunk());
     }
 
-    private ParserConfiguration parserConfiguration(ExtractionContext context, ExtractionSink sink) {
+    private ParserConfiguration parserConfiguration(
+            ExtractionContext context,
+            ExtractionSink sink,
+            ExtractionRunCache runCache
+    ) {
+        ExtractionRunCache safeRunCache = runCache == null ? new ExtractionRunCache() : runCache;
+        ExtractionRunCache.AstParserConfigurationKey key =
+                ExtractionRunCache.AstParserConfigurationKey.from(
+                        context.module(),
+                        context.astLookupRoots(),
+                        context.classpathEntries()
+                );
+        return safeRunCache.astParserConfiguration(key, ignored -> buildParserConfiguration(context, sink));
+    }
+
+    private ParserConfiguration buildParserConfiguration(ExtractionContext context, ExtractionSink sink) {
         ParserConfiguration configuration = new ParserConfiguration()
                 .setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
                 .setAttributeComments(false);
@@ -243,7 +265,10 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         sink.recordFileScanned();
 
         try {
-            ParseResult<CompilationUnit> parseResult = parser.parse(javaFile);
+            SourceText sourceText = readSourceText(javaFile, sink);
+            // 파일 내용은 한 번만 읽고 JavaParser 입력과 evidence snippet/Javadoc 추출에 같이 쓴다.
+            // 기존에는 parser.parse(Path)와 readAllLines가 각각 파일을 읽어 큰 repo에서 I/O와 디코딩 비용이 중복됐다.
+            ParseResult<CompilationUnit> parseResult = parser.parse(sourceText.content());
             if (parseResult.getResult().isEmpty()) {
                 String problems = parseResult.getProblems().stream()
                         .map(problem -> problem.getVerboseMessage())
@@ -253,8 +278,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             }
 
             sink.recordFileParsed();
-            List<String> sourceLines = readSourceLines(javaFile, sink);
-            processCompilationUnit(context, relativePath, parseResult.getResult().orElseThrow(), sourceLines, sink);
+            processCompilationUnit(context, relativePath, parseResult.getResult().orElseThrow(), sourceText.lines(), sink);
         } catch (ParseProblemException | IOException e) {
             sink.addError("failed to parse source file: " + relativePath + " (" + e.getMessage() + ")");
         }
@@ -3623,29 +3647,35 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                 .build();
     }
 
-    private List<String> readSourceLines(Path javaFile, ExtractionSink sink) {
+    private SourceText readSourceText(Path javaFile, ExtractionSink sink) throws IOException {
+        byte[] bytes = Files.readAllBytes(javaFile);
         try {
-            return Files.readAllLines(javaFile, StandardCharsets.UTF_8);
-        } catch (IOException e) {
+            String content = StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(bytes))
+                    .toString();
+            return new SourceText(content, sourceLines(content));
+        } catch (CharacterCodingException e) {
             // UTF-8 strict decode failed (non-UTF-8 bytes in comments or string literals).
             // JavaParser uses CodingErrorAction.REPLACE internally and succeeds on the same file.
-            // Re-read leniently so invalid bytes become replacement chars rather than producing
-            // an empty sourceLines list that silently drops all snippet and Javadoc output.
-            try {
-                byte[] bytes = Files.readAllBytes(javaFile);
-                String content = StandardCharsets.UTF_8.newDecoder()
-                        .onMalformedInput(CodingErrorAction.REPLACE)
-                        .onUnmappableCharacter(CodingErrorAction.REPLACE)
-                        .decode(ByteBuffer.wrap(bytes))
-                        .toString();
-                sink.addWarning("source file contains non-UTF-8 bytes; snippet/javadoc extraction used lenient decoding: "
-                        + javaFile.getFileName());
-                return content.lines().collect(Collectors.toList());
-            } catch (IOException e2) {
-                sink.addWarning("failed to read source lines for snippet/javadoc extraction: " + javaFile.getFileName());
-                return List.of();
-            }
+            // 이미 읽은 byte 배열을 lenient decode해 재사용하므로 실패 파일도 추가 I/O 없이 snippet을 보존한다.
+            String content = StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPLACE)
+                    .onUnmappableCharacter(CodingErrorAction.REPLACE)
+                    .decode(ByteBuffer.wrap(bytes))
+                    .toString();
+            sink.addWarning("source file contains non-UTF-8 bytes; snippet/javadoc extraction used lenient decoding: "
+                    + javaFile.getFileName());
+            return new SourceText(content, sourceLines(content));
         }
+    }
+
+    private List<String> sourceLines(String content) {
+        if (content == null || content.isEmpty()) {
+            return List.of();
+        }
+        return content.lines().collect(Collectors.toList());
     }
 
     private String readSnippetFromLines(List<String> sourceLines, Integer startLine, Integer endLine) {

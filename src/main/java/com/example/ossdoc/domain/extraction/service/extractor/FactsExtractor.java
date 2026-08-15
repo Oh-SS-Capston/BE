@@ -15,4 +15,8 @@ public interface FactsExtractor {
     ChunkKind supports();
 
     ChunkResult extract(ExtractionContext context);
+
+    default ChunkResult extract(ExtractionContext context, ExtractionRunCache runCache) {
+        return extract(context);
+    }
 }

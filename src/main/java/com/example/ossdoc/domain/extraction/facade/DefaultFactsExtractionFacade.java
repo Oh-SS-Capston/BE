@@ -26,6 +26,7 @@ import com.example.ossdoc.domain.extraction.exception.ExtractionException;
 import com.example.ossdoc.domain.extraction.service.composer.FactsComposer;
 import com.example.ossdoc.domain.extraction.dto.context.FactsCompositionContext;
 import com.example.ossdoc.domain.extraction.service.extractor.ChunkFactsExtractionCoordinator;
+import com.example.ossdoc.domain.extraction.service.extractor.ExtractionRunCache;
 import com.example.ossdoc.domain.extraction.service.extractor.MetaInfServiceScanner;
 import com.example.ossdoc.domain.extraction.service.extractor.ReadmeObservationScanner;
 import com.example.ossdoc.domain.build.support.RepoRootResolver;
@@ -317,6 +318,7 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
         }
 
         boolean failFast = request != null && request.failFast();
+        ExtractionRunCache runCache = new ExtractionRunCache();
 
         ExecutorService executor = Executors.newFixedThreadPool(
                 chunkingPolicy.workerCount(),
@@ -333,7 +335,8 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
                         request,
                         preflightResult,
                         repoRoot,
-                        chunk
+                        chunk,
+                        runCache
                 ));
                 submitted++;
             }
@@ -418,14 +421,16 @@ public class DefaultFactsExtractionFacade implements FactsExtractionFacade {
             FactsExtractRequest request,
             ExtractionPreflightResult preflightResult,
             Path repoRoot,
-            ChunkDescriptor chunk
+            ChunkDescriptor chunk,
+            ExtractionRunCache runCache
     ) {
         try {
             ChunkResult chunkResult = chunkFactsExtractionCoordinator.extract(
                     request,
                     preflightResult,
                     repoRoot,
-                    chunk
+                    chunk,
+                    runCache
             );
             return ChunkExecutionOutcome.success(chunk, chunkResult);
         } catch (Exception e) {
