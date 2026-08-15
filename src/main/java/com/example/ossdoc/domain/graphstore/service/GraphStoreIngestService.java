@@ -279,7 +279,7 @@ public class GraphStoreIngestService {
                 candidateParity =
                 EndpointEventSpiShadowParityAnalyzer
                         .compare(
-                                facts,
+                                shadowFactsIndex,
                                 candidateGeneration,
                                 objectMapper
                         );
@@ -302,7 +302,7 @@ public class GraphStoreIngestService {
                 beanConfigurationParity =
                 BeanConfigurationShadowParityAnalyzer
                         .compare(
-                                facts,
+                                shadowFactsIndex,
                                 beanConfigurationGeneration,
                                 objectMapper
                         );
@@ -325,7 +325,7 @@ public class GraphStoreIngestService {
                 reflectionParity =
                 ReflectionShadowParityAnalyzer
                         .compare(
-                                facts,
+                                shadowFactsIndex,
                                 reflectionGeneration,
                                 objectMapper
                         );
@@ -348,7 +348,7 @@ public class GraphStoreIngestService {
                 diParity =
                 DiShadowParityAnalyzer
                         .compare(
-                                facts,
+                                shadowFactsIndex,
                                 diGeneration,
                                 objectMapper
                         );

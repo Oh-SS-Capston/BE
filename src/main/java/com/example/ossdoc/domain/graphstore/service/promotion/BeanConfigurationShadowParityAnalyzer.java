@@ -39,37 +39,27 @@ public final class BeanConfigurationShadowParityAnalyzer {
             ObservationPromotionCandidateGenerationResult generated,
             ObjectMapper objectMapper
     ) {
+        return compare(ShadowFactsIndex.from(facts), generated, objectMapper);
+    }
+
+    public static ObservationPromotionCandidateParityReport compare(
+            ShadowFactsIndex factsIndex,
+            ObservationPromotionCandidateGenerationResult generated,
+            ObjectMapper objectMapper
+    ) {
         ObjectMapper mapper =
                 objectMapper == null
                         ? new ObjectMapper()
                                 .findAndRegisterModules()
                         : objectMapper;
 
-        List<NormalizedRelationFact> allRelations =
-                facts == null
-                        || facts.relations() == null
-                        ? List.of()
-                        : facts.relations();
-
+        ShadowFactsIndex safeIndex = factsIndex == null
+                ? ShadowFactsIndex.from(null)
+                : factsIndex;
+        // 공통 relation 인덱스를 재사용해 parity 단계의 전체 relations 반복 순회를 줄인다.
         Map<String, NormalizedRelationFact> extractionByKey =
-                new LinkedHashMap<>();
-
-        for (NormalizedRelationFact relation : allRelations) {
-            if (relation == null
-                    || !TARGET_RELATION_KINDS.contains(
-                            normalizeCode(
-                                    relation.kind()
-                            )
-                    )) {
-                continue;
-            }
-
-            extractionByKey.put(
-                    ObservationPromotionShadowCandidate
-                            .relationKey(relation),
-                    relation
-            );
-        }
+                new LinkedHashMap<>(safeIndex.relationByKeyForKinds(TARGET_RELATION_KINDS));
+        int extractionRelationCount = extractionByKey.size();
 
         List<ObservationPromotionShadowCandidate> candidates =
                 generated == null
@@ -143,23 +133,6 @@ public final class BeanConfigurationShadowParityAnalyzer {
                     )
             );
         }
-
-        int extractionRelationCount =
-                (int) allRelations.stream()
-                        .filter(Objects::nonNull)
-                        .filter(relation ->
-                                TARGET_RELATION_KINDS.contains(
-                                        normalizeCode(
-                                                relation.kind()
-                                        )
-                                )
-                        )
-                        .map(
-                                ObservationPromotionShadowCandidate
-                                        ::relationKey
-                        )
-                        .distinct()
-                        .count();
 
         return new ObservationPromotionCandidateParityReport(
                 candidates.size(),

@@ -2,13 +2,17 @@ package com.example.ossdoc.domain.graphstore.service.promotion;
 
 import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedFactsDocument;
 import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedObservationFact;
+import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedRelationFact;
 import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedSymbolFact;
+import com.example.ossdoc.domain.graphstore.model.promotion.ObservationPromotionShadowCandidate;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Collections;
+import java.util.Set;
 
 /**
  * semantic promotion shadow 단계에서 반복해서 쓰는 facts 조회 인덱스.
@@ -19,13 +23,15 @@ import java.util.Collections;
 public record ShadowFactsIndex(
         List<NormalizedObservationFact> observations,
         List<NormalizedSymbolFact> symbols,
+        List<NormalizedRelationFact> relations,
         Map<String, NormalizedSymbolFact> symbolsById,
-        Map<String, List<NormalizedSymbolFact>> symbolsByKind
+        Map<String, List<NormalizedSymbolFact>> symbolsByKind,
+        Map<String, List<NormalizedRelationFact>> relationsByKind
 ) {
 
     public static ShadowFactsIndex from(NormalizedFactsDocument facts) {
         if (facts == null) {
-            return new ShadowFactsIndex(List.of(), List.of(), Map.of(), Map.of());
+            return new ShadowFactsIndex(List.of(), List.of(), List.of(), Map.of(), Map.of(), Map.of());
         }
 
         List<NormalizedObservationFact> observations = facts.observations() == null
@@ -34,6 +40,9 @@ public record ShadowFactsIndex(
         List<NormalizedSymbolFact> symbols = facts.symbols() == null
                 ? List.of()
                 : List.copyOf(facts.symbols());
+        List<NormalizedRelationFact> relations = facts.relations() == null
+                ? List.of()
+                : List.copyOf(facts.relations());
 
         Map<String, NormalizedSymbolFact> symbolsById = new LinkedHashMap<>();
         Map<String, List<NormalizedSymbolFact>> symbolsByKind = symbols.stream()
@@ -53,13 +62,25 @@ public record ShadowFactsIndex(
             symbolsById.put(symbol.symbol(), symbol);
         }
 
+        Map<String, List<NormalizedRelationFact>> relationsByKind = new LinkedHashMap<>();
+        for (NormalizedRelationFact relation : relations) {
+            String kind = relation == null ? null : normalizeCode(relation.kind());
+            if (kind == null) {
+                continue;
+            }
+            relationsByKind.computeIfAbsent(kind, ignored -> new ArrayList<>()).add(relation);
+        }
+
         symbolsByKind.replaceAll((kind, values) -> List.copyOf(values));
+        relationsByKind.replaceAll((kind, values) -> List.copyOf(values));
 
         return new ShadowFactsIndex(
                 observations,
                 symbols,
+                relations,
                 Collections.unmodifiableMap(symbolsById),
-                Collections.unmodifiableMap(symbolsByKind)
+                Collections.unmodifiableMap(symbolsByKind),
+                Collections.unmodifiableMap(relationsByKind)
         );
     }
 
@@ -69,6 +90,28 @@ public record ShadowFactsIndex(
             return List.of();
         }
         return symbolsByKind.getOrDefault(normalized, List.of());
+    }
+
+    public Map<String, NormalizedRelationFact> relationByKeyForKinds(Set<String> kinds) {
+        if (kinds == null || kinds.isEmpty()) {
+            return Map.of();
+        }
+
+        Map<String, NormalizedRelationFact> result = new LinkedHashMap<>();
+        for (String kind : kinds) {
+            for (NormalizedRelationFact relation : relationsOfKind(kind)) {
+                result.put(ObservationPromotionShadowCandidate.relationKey(relation), relation);
+            }
+        }
+        return result;
+    }
+
+    private List<NormalizedRelationFact> relationsOfKind(String kind) {
+        String normalized = normalizeCode(kind);
+        if (normalized == null) {
+            return List.of();
+        }
+        return relationsByKind.getOrDefault(normalized, List.of());
     }
 
     private static String normalizeCode(String value) {
