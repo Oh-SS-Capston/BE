@@ -249,6 +249,7 @@ public class GraphStoreIngestService {
         Map<String, ModuleEntity> moduleCache = persistModules(run);
 
         Artifact factsArtifact = resolveFactsArtifact(request);
+        Long factsArtifactId = factsArtifact.getArtifactId();
 
         JsonNode root = factsArtifact.getMeta();
         if (root == null || root.isNull()) {
@@ -264,6 +265,14 @@ public class GraphStoreIngestService {
         }
 
         NormalizedFactsDocument facts = graphStoreFactsNormalizer.normalize(rawFacts);
+        // 성능 최적화: facts.json은 JsonNode(raw artifact) → Raw DTO → Normalized DTO로 변환되며
+        // 대형 프로젝트에서는 세 표현이 동시에 힙에 오래 남으면 peak가 커진다.
+        // 이후 파이프라인은 NormalizedFactsDocument만 사용하므로 raw/root/artifact 참조를 조기에 끊는다.
+        rawFacts = null;
+        root = null;
+        detachIfManaged(factsArtifact);
+        factsArtifact = null;
+
         validateFacts(facts);
         // shadow generator들이 symbols/observations 인덱스를 각자 다시 만들지 않도록 ingest 단위에서 한 번만 구성한다.
         ShadowFactsIndex shadowFactsIndex = ShadowFactsIndex.from(facts);
@@ -421,7 +430,7 @@ public class GraphStoreIngestService {
 
         return GraphStoreIngestResponse.builder()
                 .runId(run.getRunId())
-                .artifactId(factsArtifact.getArtifactId())
+                .artifactId(factsArtifactId)
                 .evidencesSaved(evidenceSaveResult.savedCount())
                 .symbolsSaved(symbolSaveResult.savedCount())
                 .edgesSaved(edgeSaveResult.edgesSaved())
@@ -450,13 +459,20 @@ public class GraphStoreIngestService {
             return Map.of();
         }
 
+        Artifact buildManifestArtifact = opt.get();
+        JsonNode manifestRoot = buildManifestArtifact.getMeta();
         BuildManifest manifest;
         try {
-            manifest = objectMapper.treeToValue(opt.get().getMeta(), BuildManifest.class);
+            manifest = objectMapper.treeToValue(manifestRoot, BuildManifest.class);
         } catch (Exception e) {
+            detachIfManaged(buildManifestArtifact);
             log.warn("[GRAPHSTORE] BUILD_MANIFEST deserialization failed, skipping. runId={}", run.getRunId(), e);
             return Map.of();
         }
+        // 성능 최적화: module 적재에는 BuildManifest DTO만 필요하다.
+        // BUILD_MANIFEST jsonb Artifact를 조기에 detach해 큰 meta JsonNode가 영속성 컨텍스트에 오래 남지 않게 한다.
+        manifestRoot = null;
+        detachIfManaged(buildManifestArtifact);
 
         // 재실행 시 기존 적재분을 건너뛰기 위해 미리 로드
         Map<String, ModuleEntity> existing = moduleRepository.findAllByRun_RunId(run.getRunId())
@@ -2183,6 +2199,15 @@ private void logSemanticPromotionGateDecision(
             if (entity != null && entityManager.contains(entity)) {
                 entityManager.detach(entity);
             }
+        }
+    }
+
+    private void detachIfManaged(Object entity) {
+        if (entityManager == null || entity == null) {
+            return;
+        }
+        if (entityManager.contains(entity)) {
+            entityManager.detach(entity);
         }
     }
 
