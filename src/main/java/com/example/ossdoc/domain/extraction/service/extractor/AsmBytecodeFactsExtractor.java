@@ -63,6 +63,22 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
 
     private static final int ASM_API = Opcodes.ASM9;
 
+    /**
+     * 컴파일러가 자동으로 붙이는, 분석 가치가 없는 어노테이션.
+     *
+     * @kotlin.Metadata는 Kotlin 컴파일러가 모든 클래스에 삽입하며
+     * d1/d2 필드에 리플렉션용 메타데이터를 인코딩한 문자열로 담는다.
+     * 사람이 읽을 수 없는 바이너리라 Semantic Graph에 기여하지 못하면서
+     * evidence 수와 facts.json 크기만 키운다.
+     * (JUnit 분석에서 이 한 어노테이션이 snippet에 NUL 156개를 유입시켰다.)
+     *
+     * 값 자체의 NUL은 BytecodeAnnotationEvidenceFactory가 별도로 막는다.
+     * 여기서는 "애초에 수집하지 않는다"는 노이즈 제거가 목적이다.
+     */
+    private static final Set<String> COMPILER_GENERATED_ANNOTATIONS = Set.of(
+            "kotlin.Metadata"
+    );
+
     private static final class AnnotationData {
         private final String descriptor;
         private final String qualifiedName;
@@ -226,10 +242,17 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
                 String descriptor,
                 boolean visible
         ) {
+            String annotationName = annotationQualifiedName(descriptor);
+
+            // null 반환 = 이 어노테이션의 값 방문을 건너뛴다(ASM 규약).
+            if (isCompilerGeneratedAnnotation(annotationName)) {
+                return null;
+            }
+
             AnnotationData annotation =
                     new AnnotationData(
                             descriptor,
-                            annotationQualifiedName(descriptor),
+                            annotationName,
                             visible,
                             nextTypeAnnotationIndex++,
                             typeSymbol,
@@ -285,12 +308,18 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
                         String annotationDescriptor,
                         boolean visible
                 ) {
+                    String annotationName =
+                            annotationQualifiedName(annotationDescriptor);
+
+                    // null 반환 = 이 어노테이션의 값 방문을 건너뛴다(ASM 규약).
+                    if (isCompilerGeneratedAnnotation(annotationName)) {
+                        return null;
+                    }
+
                     AnnotationData annotation =
                             new AnnotationData(
                                     annotationDescriptor,
-                                    annotationQualifiedName(
-                                            annotationDescriptor
-                                    ),
+                                    annotationName,
                                     visible,
                                     nextFieldAnnotationIndex++,
                                     fieldSymbol,
@@ -417,12 +446,18 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
                         String annotationDescriptor,
                         boolean visible
                 ) {
+                    String annotationName =
+                            annotationQualifiedName(annotationDescriptor);
+
+                    // null 반환 = 이 어노테이션의 값 방문을 건너뛴다(ASM 규약).
+                    if (isCompilerGeneratedAnnotation(annotationName)) {
+                        return null;
+                    }
+
                     AnnotationData annotation =
                             new AnnotationData(
                                     annotationDescriptor,
-                                    annotationQualifiedName(
-                                            annotationDescriptor
-                                    ),
+                                    annotationName,
                                     visible,
                                     nextMethodAnnotationIndex++,
                                     symbol,
@@ -1667,6 +1702,16 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
     private String annotationQualifiedName(String descriptor) {
         TypeRef typeRef = descriptorToTypeRef(descriptor);
         return typeRef == null ? "" : typeRef.raw();
+    }
+
+    /**
+     * 수집 대상에서 제외할 컴파일러 생성 어노테이션인지 판단한다.
+     * 판정 후 visitAnnotation이 null을 반환하면 ASM은 해당 어노테이션의
+     * 값 방문 자체를 건너뛰므로, 값 파싱 비용도 함께 사라진다.
+     */
+    private boolean isCompilerGeneratedAnnotation(String qualifiedName) {
+        return qualifiedName != null
+                && COMPILER_GENERATED_ANNOTATIONS.contains(qualifiedName);
     }
 
     private TypeRef descriptorToTypeRef(String descriptor) {

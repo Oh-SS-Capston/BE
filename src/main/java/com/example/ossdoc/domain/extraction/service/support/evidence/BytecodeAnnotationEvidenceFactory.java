@@ -144,13 +144,39 @@ public final class BytecodeAnnotationEvidenceFactory {
         return snippet.toString();
     }
 
+    /**
+     * PostgreSQL의 text/jsonb는 U+0000(NUL)을 저장할 수 없다.
+     *
+     * JSON 스펙상 \\u0000은 유효하지만 Postgres는 다음과 같이 INSERT를 거부한다.
+     *   SQLState 22P05 — unsupported Unicode escape sequence
+     *   \\u0000 cannot be converted to text
+     *
+     * bytecode 어노테이션 값에는 NUL이 실제로 들어온다.
+     * 대표 사례가 Kotlin 컴파일러가 모든 클래스에 붙이는 @kotlin.Metadata로,
+     * d1/d2 필드에 메타데이터를 인코딩한 문자열이 담기며 그 안에 NUL이 섞인다.
+     * (JUnit 분석 시 facts.json에 NUL 156개가 유입되어 artifact 저장이 실패했다.)
+     *
+     * facts.json은 S3와 DB(artifact.meta JSONB) 양쪽에 저장되는데,
+     * S3는 통과하고 DB만 죽으므로 파이프라인이 마지막 단계에서 실패한다.
+     * 따라서 evidence를 만드는 시점에 제거해 두는 편이 안전하다.
+     *
+     * NUL만 제거한다. 다른 제어문자는 Postgres가 저장할 수 있으므로
+     * 원본 보존을 위해 그대로 둔다.
+     */
+    private static String stripNulCharacters(String text) {
+        if (text == null || text.indexOf('\0') < 0) {
+            return text;
+        }
+        return text.replace("\0", "");
+    }
+
     private static String formatValue(Object value) {
         if (value == null) {
             return "null";
         }
 
         if (value instanceof String text) {
-            return "\"" + text + "\"";
+            return "\"" + stripNulCharacters(text) + "\"";
         }
 
         if (value instanceof List<?> list) {
@@ -188,7 +214,8 @@ public final class BytecodeAnnotationEvidenceFactory {
                     .toString();
         }
 
-        return String.valueOf(value);
+        // char 등 String이 아닌 값도 NUL을 품을 수 있으므로 마지막 관문에서 한 번 더 막는다.
+        return stripNulCharacters(String.valueOf(value));
     }
 
     private static Map<String, Object> normalizeValues(
@@ -224,6 +251,15 @@ public final class BytecodeAnnotationEvidenceFactory {
     }
 
     private static Object normalizeValue(Object value) {
+        /*
+         * snippet뿐 아니라 attrs.values에도 원본 문자열이 그대로 실린다.
+         * 두 곳 모두 facts.json → artifact.meta(JSONB)로 흘러가므로
+         * snippet만 정제하면 저장은 여전히 실패한다.
+         */
+        if (value instanceof String text) {
+            return stripNulCharacters(text);
+        }
+
         if (value instanceof Iterable<?> iterable) {
             List<Object> result = new ArrayList<>();
 
