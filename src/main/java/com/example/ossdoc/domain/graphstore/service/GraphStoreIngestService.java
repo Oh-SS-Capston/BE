@@ -1369,15 +1369,19 @@ private void logSemanticPromotionGateDecision(
             }
         }
 
-        List<SymbolEvidence> symbolEvidenceLinks = new ArrayList<>(pendingSymbolEvidence.size());
+        List<SymbolEvidence> symbolEvidenceBuffer = new ArrayList<>(BATCH_SIZE);
+        int symbolEvidenceSaved = 0;
         for (PendingSymbolEvidence pending : pendingSymbolEvidence) {
             SymbolEvidenceId seId = new SymbolEvidenceId(
                     pending.symbol().getSymbolId(),
                     pending.evidence().getEvidenceId()
             );
-            symbolEvidenceLinks.add(new SymbolEvidence(seId, pending.symbol(), pending.evidence()));
+            symbolEvidenceBuffer.add(new SymbolEvidence(seId, pending.symbol(), pending.evidence()));
+            if (symbolEvidenceBuffer.size() >= BATCH_SIZE) {
+                symbolEvidenceSaved += flushSymbolEvidenceBuffer(symbolEvidenceBuffer);
+            }
         }
-        saveAllInBatches(symbolEvidenceLinks, BATCH_SIZE, symbolEvidenceRepository::saveAll);
+        symbolEvidenceSaved += flushSymbolEvidenceBuffer(symbolEvidenceBuffer);
 
         log.info(
                 "[GRAPHSTORE] symbol linking summary. runId={}, sourceFileLinked={}, moduleLinked={}",
@@ -1386,7 +1390,23 @@ private void logSemanticPromotionGateDecision(
                 moduleLinkedCount
         );
 
-        return new SymbolSaveResult(symbolMap, savedCount, symbolEvidenceLinks.size());
+        return new SymbolSaveResult(symbolMap, savedCount, symbolEvidenceSaved);
+    }
+
+    /**
+     * symbol_evidence 저장 버퍼를 비우고 저장 건수를 반환한다.
+     */
+    private int flushSymbolEvidenceBuffer(List<SymbolEvidence> linkBuffer) {
+        if (linkBuffer == null || linkBuffer.isEmpty()) {
+            return 0;
+        }
+
+        int saved = linkBuffer.size();
+        // 성능 최적화: symbol_evidence 전체 저장 리스트를 끝까지 들고 있지 않고, 변환 즉시 청크 단위로 저장 후 버퍼를 비운다.
+        // 기존/신규 중복 key 판별은 앞 단계에서 그대로 수행하므로 GraphStore의 symbol 근거 연결 정확성은 유지된다.
+        symbolEvidenceRepository.saveAll(linkBuffer);
+        linkBuffer.clear();
+        return saved;
     }
 
     /**
@@ -1795,34 +1815,97 @@ private void logSemanticPromotionGateDecision(
             return 0;
         }
 
-        List<Observation> toSave =
-                new ArrayList<>(observations.size());
+        List<Observation> observationBuffer =
+                new ArrayList<>(BATCH_SIZE);
+        List<NormalizedObservationFact> factBuffer =
+                new ArrayList<>(BATCH_SIZE);
+
+        int observationsSaved = 0;
+        int observationEvidenceSaved = 0;
+        int missingEvidenceReferences = 0;
+        int duplicateEvidenceReferences = 0;
 
         for (NormalizedObservationFact dto : observations) {
-            toSave.add(new Observation(
-                    null,
-                    run,
-                    dto.kind(),
-                    dto.siteSymbol(),
-                    dto.targetSymbol(),
-                    dto.targetTypeRef(),
-                    dto.note(),
-                    dto.confidenceHint(),
-                    dto.attrs()
-            ));
+            observationBuffer.add(toObservation(run, dto));
+            factBuffer.add(dto);
+
+            if (observationBuffer.size() >= BATCH_SIZE) {
+                ObservationChunkSaveResult result =
+                        flushObservationBuffer(
+                                observationBuffer,
+                                factBuffer,
+                                evidenceMap
+                        );
+                observationsSaved += result.observations();
+                observationEvidenceSaved += result.observationEvidence();
+                missingEvidenceReferences += result.missingEvidenceReferences();
+                duplicateEvidenceReferences += result.duplicateEvidenceReferences();
+            }
         }
 
-        saveAllInBatches(
-                toSave,
-                BATCH_SIZE,
-                observationRepository::saveAll
+        ObservationChunkSaveResult result =
+                flushObservationBuffer(
+                        observationBuffer,
+                        factBuffer,
+                        evidenceMap
+                );
+        observationsSaved += result.observations();
+        observationEvidenceSaved += result.observationEvidence();
+        missingEvidenceReferences += result.missingEvidenceReferences();
+        duplicateEvidenceReferences += result.duplicateEvidenceReferences();
+
+        log.info(
+                "[GRAPHSTORE] observations saved. "
+                        + "runId={}, observations={}, "
+                        + "observationEvidence={}, "
+                        + "missingEvidenceRefs={}, "
+                        + "duplicateEvidenceRefs={}",
+                runId,
+                observationsSaved,
+                observationEvidenceSaved,
+                missingEvidenceReferences,
+                duplicateEvidenceReferences
         );
 
-        ObservationEvidenceLinkSupport.LinkBuildResult
-                linkResult =
+        return observationsSaved;
+    }
+
+    private Observation toObservation(
+            RepoRun run,
+            NormalizedObservationFact dto
+    ) {
+        return new Observation(
+                null,
+                run,
+                dto.kind(),
+                dto.siteSymbol(),
+                dto.targetSymbol(),
+                dto.targetTypeRef(),
+                dto.note(),
+                dto.confidenceHint(),
+                dto.attrs()
+        );
+    }
+
+    private ObservationChunkSaveResult flushObservationBuffer(
+            List<Observation> observationBuffer,
+            List<NormalizedObservationFact> factBuffer,
+            Map<String, Evidence> evidenceMap
+    ) {
+        if (observationBuffer == null || observationBuffer.isEmpty()) {
+            return new ObservationChunkSaveResult(0, 0, 0, 0);
+        }
+
+        int observationCount = observationBuffer.size();
+
+        // 성능 최적화: observation 전체 리스트와 observation_evidence 전체 리스트를 끝까지 보관하지 않는다.
+        // 저장된 observation chunk와 같은 순서의 fact chunk를 즉시 연결해 기존 evidence 매칭 정확성은 유지한다.
+        observationRepository.saveAll(observationBuffer);
+
+        ObservationEvidenceLinkSupport.LinkBuildResult linkResult =
                 ObservationEvidenceLinkSupport.build(
-                        toSave,
-                        observations,
+                        observationBuffer,
+                        factBuffer,
                         evidenceMap
                 );
 
@@ -1832,20 +1915,19 @@ private void logSemanticPromotionGateDecision(
                 observationEvidenceRepository::saveAll
         );
 
-        log.info(
-                "[GRAPHSTORE] observations saved. "
-                        + "runId={}, observations={}, "
-                        + "observationEvidence={}, "
-                        + "missingEvidenceRefs={}, "
-                        + "duplicateEvidenceRefs={}",
-                runId,
-                toSave.size(),
-                linkResult.links().size(),
-                linkResult.missingEvidenceReferences(),
-                linkResult.duplicateEvidenceReferences()
-        );
+        int observationEvidenceCount = linkResult.links().size();
+        int missingEvidenceReferences = linkResult.missingEvidenceReferences();
+        int duplicateEvidenceReferences = linkResult.duplicateEvidenceReferences();
 
-        return toSave.size();
+        observationBuffer.clear();
+        factBuffer.clear();
+
+        return new ObservationChunkSaveResult(
+                observationCount,
+                observationEvidenceCount,
+                missingEvidenceReferences,
+                duplicateEvidenceReferences
+        );
     }
 
     /**
@@ -2117,6 +2199,14 @@ private void logSemanticPromotionGateDecision(
     }
 
     private record EdgeSaveResult(int edgesSaved, int edgeEvidenceSaved, int skippedRelations) {
+    }
+
+    private record ObservationChunkSaveResult(
+            int observations,
+            int observationEvidence,
+            int missingEvidenceReferences,
+            int duplicateEvidenceReferences
+    ) {
     }
 
     private record EvidenceLookupIndexes(
