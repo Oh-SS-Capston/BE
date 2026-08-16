@@ -29,6 +29,7 @@ import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedObservati
 import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedRelationFact;
 import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedSymbolFact;
 import com.example.ossdoc.domain.graphstore.model.projection.EvidenceLookupRow;
+import com.example.ossdoc.domain.graphstore.model.projection.SymbolEvidenceLinkKeyRow;
 import com.example.ossdoc.domain.graphstore.model.promotion.ObservationPromotionCandidateGenerationResult;
 import com.example.ossdoc.domain.graphstore.model.promotion.ObservationPromotionCandidateParityIssue;
 import com.example.ossdoc.domain.graphstore.model.promotion.ObservationPromotionCandidateParityReport;
@@ -1483,11 +1484,13 @@ private void logSemanticPromotionGateDecision(
      * run 범위 기존 symbol-evidence 연결 키를 메모리 Set으로 로드한다.
      */
     private Set<String> loadExistingSymbolEvidenceKeys(String runId) {
-        List<SymbolEvidence> existing = symbolEvidenceRepository.findAllBySymbol_Run_RunId(runId);
+        List<SymbolEvidenceLinkKeyRow> existing =
+                symbolEvidenceRepository.findLinkKeysByRunId(runId);
         Set<String> keys = new HashSet<>(Math.max(16, existing.size() * 2));
-        for (SymbolEvidence se : existing) {
-            if (se.getId() != null) {
-                keys.add(se.getId().getSymbolId() + ":" + se.getId().getEvidenceId());
+        for (SymbolEvidenceLinkKeyRow row : existing) {
+            if (row.symbolId() != null && row.evidenceId() != null) {
+                // 성능 최적화: 기존 symbol_evidence는 중복 방지 key만 필요하므로 엔티티 전체 로딩 없이 key 문자열만 구성한다.
+                keys.add(row.symbolId() + ":" + row.evidenceId());
             }
         }
         return keys;
