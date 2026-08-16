@@ -1712,7 +1712,8 @@ private void logSemanticPromotionGateDecision(
         saveAllInBatches(newEdges, BATCH_SIZE, edgeRepository::saveAll);
 
         Set<String> newEdgeEvidenceKeys = new HashSet<>();
-        List<EdgeEvidence> linksToSave = new ArrayList<>();
+        List<EdgeEvidence> linkBuffer = new ArrayList<>(BATCH_SIZE);
+        int edgeEvidenceSaved = 0;
         for (PendingEdgeEvidence pending : pendingEdgeEvidence) {
             if (pending.edge() == null || pending.edge().getEdgeId() == null || pending.evidence() == null) {
                 continue;
@@ -1726,11 +1727,13 @@ private void logSemanticPromotionGateDecision(
             }
 
             EdgeEvidenceId edgeEvidenceId = new EdgeEvidenceId(edgeId, evidenceId);
-            linksToSave.add(new EdgeEvidence(edgeEvidenceId, pending.edge(), pending.evidence()));
+            linkBuffer.add(new EdgeEvidence(edgeEvidenceId, pending.edge(), pending.evidence()));
+            if (linkBuffer.size() >= BATCH_SIZE) {
+                edgeEvidenceSaved += flushEdgeEvidenceBuffer(linkBuffer);
+            }
         }
 
-        saveAllInBatches(linksToSave, BATCH_SIZE, edgeEvidenceRepository::saveAll);
-        int edgeEvidenceSaved = linksToSave.size();
+        edgeEvidenceSaved += flushEdgeEvidenceBuffer(linkBuffer);
 
         log.info(
                 "[GRAPHSTORE] relation linking summary. runId={}, totalRelations={}, resolvedByRawRef={}, resolvedBySimpleName={}, skippedRelations={}",
@@ -1742,6 +1745,22 @@ private void logSemanticPromotionGateDecision(
         );
 
         return new EdgeSaveResult(edgesSaved, edgeEvidenceSaved, skippedRelations);
+    }
+
+    /**
+     * edge_evidence 저장 버퍼를 비우고 저장 건수를 반환한다.
+     */
+    private int flushEdgeEvidenceBuffer(List<EdgeEvidence> linkBuffer) {
+        if (linkBuffer == null || linkBuffer.isEmpty()) {
+            return 0;
+        }
+
+        int saved = linkBuffer.size();
+        // 성능 최적화: edge_evidence 전체 저장 리스트를 끝까지 들고 있지 않고, 변환 즉시 청크 단위로 저장 후 버퍼를 비운다.
+        // 중복 key 판별과 저장 조건은 그대로 유지하므로 GraphStore의 근거 연결 정확성은 바꾸지 않는다.
+        edgeEvidenceRepository.saveAll(linkBuffer);
+        linkBuffer.clear();
+        return saved;
     }
 
     /**
