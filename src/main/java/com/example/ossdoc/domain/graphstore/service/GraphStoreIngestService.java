@@ -394,8 +394,18 @@ public class GraphStoreIngestService {
                 gateDecision
         );
 
-        EvidenceSaveResult evidenceSaveResult = saveEvidence(run, facts);
-        SymbolSaveResult symbolSaveResult = saveSymbols(run, facts, evidenceSaveResult.evidenceMap(), moduleCache);
+        // 성능 최적화: evidence와 symbol 저장 흐름이 같은 run의 file_index를 사용하므로
+        // ingest 단위 캐시를 한 번만 적재해 전체 file_index 반복 조회와 중복 FileIndex 객체 생성을 줄인다.
+        Map<String, FileIndex> fileIndexCache = loadFileIndexCache(run);
+
+        EvidenceSaveResult evidenceSaveResult = saveEvidence(run, facts, fileIndexCache);
+        SymbolSaveResult symbolSaveResult = saveSymbols(
+                run,
+                facts,
+                evidenceSaveResult.evidenceMap(),
+                moduleCache,
+                fileIndexCache
+        );
         EdgeSaveResult edgeSaveResult = saveEdges(run, facts, symbolSaveResult.symbolMap(), evidenceSaveResult.evidenceMap());
         int observationsSaved = saveObservations(
                 run,
@@ -1011,7 +1021,11 @@ private void logSemanticPromotionGateDecision(
      * Evidence를 저장한다.
      * run 단위 선조회 인덱스를 사용해 건별 중복 조회(N+1)를 줄인다.
      */
-    private EvidenceSaveResult saveEvidence(RepoRun run, NormalizedFactsDocument facts) {
+    private EvidenceSaveResult saveEvidence(
+            RepoRun run,
+            NormalizedFactsDocument facts,
+            Map<String, FileIndex> fileIndexCache
+    ) {
         Map<String, Evidence> evidenceMap = new LinkedHashMap<>();
         int savedCount = 0;
 
@@ -1019,7 +1033,6 @@ private void logSemanticPromotionGateDecision(
             return new EvidenceSaveResult(evidenceMap, savedCount);
         }
 
-        Map<String, FileIndex> fileIndexCache = loadFileIndexCache(run);
         EvidenceLookupIndexes lookupIndexes = buildEvidenceLookupIndexes(run);
         ensureFileIndexes(
                 run,
@@ -1271,11 +1284,11 @@ private void logSemanticPromotionGateDecision(
             RepoRun run,
             NormalizedFactsDocument facts,
             Map<String, Evidence> evidenceMap,
-            Map<String, ModuleEntity> moduleCache  // C-2: gradle projectPath → ModuleEntity
+            Map<String, ModuleEntity> moduleCache,  // C-2: gradle projectPath → ModuleEntity
+            Map<String, FileIndex> sourceFileCache
     ) {
         Map<String, SymbolEntity> symbolMap = new LinkedHashMap<>();
         Map<String, SymbolEntity> existingSymbolsByQualifiedName = loadExistingSymbolsByQualifiedName(run);
-        Map<String, FileIndex> sourceFileCache = loadFileIndexCache(run);
         ensureFileIndexes(
                 run,
                 facts.symbols().stream()
