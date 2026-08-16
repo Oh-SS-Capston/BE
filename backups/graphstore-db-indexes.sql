@@ -7,6 +7,11 @@
 CREATE INDEX IF NOT EXISTS idx_module_run_id
     ON module (run_id);
 
+-- file_index
+-- GraphStore ingest loads file_index by run_id and resolves file paths by run_id + path.
+-- The JPA unique constraint ux_file_run_path already creates a PostgreSQL btree index
+-- on (run_id, path), so a separate duplicate index is intentionally not added.
+
 -- evidence
 CREATE INDEX IF NOT EXISTS idx_evidence_run_hash
     ON evidence (run_id, hash);
@@ -21,6 +26,11 @@ CREATE INDEX IF NOT EXISTS idx_evidence_run_created_at
     ON evidence (run_id, created_at DESC);
 
 -- symbol
+-- GraphStore ingest now loads existing symbols only for the current facts by
+-- run_id + qualified_name. The JPA unique constraint ux_symbol_run_qualified
+-- already creates a PostgreSQL btree index on (run_id, qualified_name), so a
+-- separate duplicate index is intentionally not added.
+
 CREATE INDEX IF NOT EXISTS idx_symbol_run_kind
     ON symbol (run_id, symbol_kind);
 
