@@ -28,6 +28,10 @@ import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedFactsDocu
 import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedObservationFact;
 import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedRelationFact;
 import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedSymbolFact;
+import com.example.ossdoc.domain.graphstore.model.projection.EdgeEvidenceLinkKeyRow;
+import com.example.ossdoc.domain.graphstore.model.projection.EdgeLookupRow;
+import com.example.ossdoc.domain.graphstore.model.projection.EvidenceLookupRow;
+import com.example.ossdoc.domain.graphstore.model.projection.SymbolEvidenceLinkKeyRow;
 import com.example.ossdoc.domain.graphstore.model.promotion.ObservationPromotionCandidateGenerationResult;
 import com.example.ossdoc.domain.graphstore.model.promotion.ObservationPromotionCandidateParityIssue;
 import com.example.ossdoc.domain.graphstore.model.promotion.ObservationPromotionCandidateParityReport;
@@ -45,6 +49,7 @@ import com.example.ossdoc.domain.graphstore.service.promotion.EndpointEventSpiSh
 import com.example.ossdoc.domain.graphstore.service.promotion.ObservationPromotionShadowAnalyzer;
 import com.example.ossdoc.domain.graphstore.service.promotion.ReflectionShadowCandidateGenerator;
 import com.example.ossdoc.domain.graphstore.service.promotion.ReflectionShadowParityAnalyzer;
+import com.example.ossdoc.domain.graphstore.service.promotion.ShadowFactsIndex;
 import com.example.ossdoc.domain.graphstore.service.promotion.gate.SemanticPromotionGateProperties;
 import com.example.ossdoc.domain.graphstore.service.promotion.gate.SemanticPromotionResponsibilityGate;
 import com.example.ossdoc.domain.graphstore.repository.EdgeEvidenceRepository;
@@ -65,6 +70,8 @@ import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -113,6 +120,9 @@ public class GraphStoreIngestService {
             semanticPromotionResponsibilityGate;
 
     private final ObjectMapper objectMapper;
+
+    @PersistenceContext
+    private EntityManager entityManager;
 
     /**
      * Spring이 사용하는 전체 의존성 생성자.
@@ -239,6 +249,7 @@ public class GraphStoreIngestService {
         Map<String, ModuleEntity> moduleCache = persistModules(run);
 
         Artifact factsArtifact = resolveFactsArtifact(request);
+        Long factsArtifactId = factsArtifact.getArtifactId();
 
         JsonNode root = factsArtifact.getMeta();
         if (root == null || root.isNull()) {
@@ -254,7 +265,17 @@ public class GraphStoreIngestService {
         }
 
         NormalizedFactsDocument facts = graphStoreFactsNormalizer.normalize(rawFacts);
+        // 성능 최적화: facts.json은 JsonNode(raw artifact) → Raw DTO → Normalized DTO로 변환되며
+        // 대형 프로젝트에서는 세 표현이 동시에 힙에 오래 남으면 peak가 커진다.
+        // 이후 파이프라인은 NormalizedFactsDocument만 사용하므로 raw/root/artifact 참조를 조기에 끊는다.
+        rawFacts = null;
+        root = null;
+        detachIfManaged(factsArtifact);
+        factsArtifact = null;
+
         validateFacts(facts);
+        // shadow generator들이 symbols/observations 인덱스를 각자 다시 만들지 않도록 ingest 단위에서 한 번만 구성한다.
+        ShadowFactsIndex shadowFactsIndex = ShadowFactsIndex.from(facts);
 
         ObservationPromotionShadowReport shadowReport =
                 ObservationPromotionShadowAnalyzer.analyze(facts);
@@ -276,7 +297,7 @@ public class GraphStoreIngestService {
                 candidateParity =
                 EndpointEventSpiShadowParityAnalyzer
                         .compare(
-                                facts,
+                                shadowFactsIndex,
                                 candidateGeneration,
                                 objectMapper
                         );
@@ -299,7 +320,7 @@ public class GraphStoreIngestService {
                 beanConfigurationParity =
                 BeanConfigurationShadowParityAnalyzer
                         .compare(
-                                facts,
+                                shadowFactsIndex,
                                 beanConfigurationGeneration,
                                 objectMapper
                         );
@@ -314,7 +335,7 @@ public class GraphStoreIngestService {
                 reflectionGeneration =
                 ReflectionShadowCandidateGenerator
                         .generate(
-                                facts,
+                                shadowFactsIndex,
                                 objectMapper
                         );
 
@@ -322,7 +343,7 @@ public class GraphStoreIngestService {
                 reflectionParity =
                 ReflectionShadowParityAnalyzer
                         .compare(
-                                facts,
+                                shadowFactsIndex,
                                 reflectionGeneration,
                                 objectMapper
                         );
@@ -337,7 +358,7 @@ public class GraphStoreIngestService {
                 diGeneration =
                 DiShadowCandidateGenerator
                         .generate(
-                                facts,
+                                shadowFactsIndex,
                                 objectMapper
                         );
 
@@ -345,7 +366,7 @@ public class GraphStoreIngestService {
                 diParity =
                 DiShadowParityAnalyzer
                         .compare(
-                                facts,
+                                shadowFactsIndex,
                                 diGeneration,
                                 objectMapper
                         );
@@ -388,8 +409,18 @@ public class GraphStoreIngestService {
                 gateDecision
         );
 
-        EvidenceSaveResult evidenceSaveResult = saveEvidence(run, facts);
-        SymbolSaveResult symbolSaveResult = saveSymbols(run, facts, evidenceSaveResult.evidenceMap(), moduleCache);
+        // 성능 최적화: evidence와 symbol 저장 흐름이 같은 run의 file_index를 사용하므로
+        // ingest 단위 캐시를 한 번만 적재해 전체 file_index 반복 조회와 중복 FileIndex 객체 생성을 줄인다.
+        Map<String, FileIndex> fileIndexCache = loadFileIndexCache(run);
+
+        EvidenceSaveResult evidenceSaveResult = saveEvidence(run, facts, fileIndexCache);
+        SymbolSaveResult symbolSaveResult = saveSymbols(
+                run,
+                facts,
+                evidenceSaveResult.evidenceMap(),
+                moduleCache,
+                fileIndexCache
+        );
         EdgeSaveResult edgeSaveResult = saveEdges(run, facts, symbolSaveResult.symbolMap(), evidenceSaveResult.evidenceMap());
         int observationsSaved = saveObservations(
                 run,
@@ -399,7 +430,7 @@ public class GraphStoreIngestService {
 
         return GraphStoreIngestResponse.builder()
                 .runId(run.getRunId())
-                .artifactId(factsArtifact.getArtifactId())
+                .artifactId(factsArtifactId)
                 .evidencesSaved(evidenceSaveResult.savedCount())
                 .symbolsSaved(symbolSaveResult.savedCount())
                 .edgesSaved(edgeSaveResult.edgesSaved())
@@ -428,13 +459,20 @@ public class GraphStoreIngestService {
             return Map.of();
         }
 
+        Artifact buildManifestArtifact = opt.get();
+        JsonNode manifestRoot = buildManifestArtifact.getMeta();
         BuildManifest manifest;
         try {
-            manifest = objectMapper.treeToValue(opt.get().getMeta(), BuildManifest.class);
+            manifest = objectMapper.treeToValue(manifestRoot, BuildManifest.class);
         } catch (Exception e) {
+            detachIfManaged(buildManifestArtifact);
             log.warn("[GRAPHSTORE] BUILD_MANIFEST deserialization failed, skipping. runId={}", run.getRunId(), e);
             return Map.of();
         }
+        // 성능 최적화: module 적재에는 BuildManifest DTO만 필요하다.
+        // BUILD_MANIFEST jsonb Artifact를 조기에 detach해 큰 meta JsonNode가 영속성 컨텍스트에 오래 남지 않게 한다.
+        manifestRoot = null;
+        detachIfManaged(buildManifestArtifact);
 
         // 재실행 시 기존 적재분을 건너뛰기 위해 미리 로드
         Map<String, ModuleEntity> existing = moduleRepository.findAllByRun_RunId(run.getRunId())
@@ -1005,7 +1043,11 @@ private void logSemanticPromotionGateDecision(
      * Evidence를 저장한다.
      * run 단위 선조회 인덱스를 사용해 건별 중복 조회(N+1)를 줄인다.
      */
-    private EvidenceSaveResult saveEvidence(RepoRun run, NormalizedFactsDocument facts) {
+    private EvidenceSaveResult saveEvidence(
+            RepoRun run,
+            NormalizedFactsDocument facts,
+            Map<String, FileIndex> fileIndexCache
+    ) {
         Map<String, Evidence> evidenceMap = new LinkedHashMap<>();
         int savedCount = 0;
 
@@ -1013,8 +1055,15 @@ private void logSemanticPromotionGateDecision(
             return new EvidenceSaveResult(evidenceMap, savedCount);
         }
 
-        Map<String, FileIndex> fileIndexCache = loadFileIndexCache(run);
         EvidenceLookupIndexes lookupIndexes = buildEvidenceLookupIndexes(run);
+        ensureFileIndexes(
+                run,
+                facts.evidence().values().stream()
+                        .map(NormalizedEvidenceFact::path)
+                        .toList(),
+                fileIndexCache
+        );
+        List<Evidence> newEvidence = new ArrayList<>();
 
         for (Map.Entry<String, NormalizedEvidenceFact> entry : facts.evidence().entrySet()) {
             String factEvidenceId = entry.getKey();
@@ -1028,13 +1077,18 @@ private void logSemanticPromotionGateDecision(
             if (existing != null) {
                 resolved = existing;
             } else {
-                resolved = evidenceRepository.save(candidate);
+                resolved = candidate;
+                newEvidence.add(candidate);
+                // 같은 facts 안에서 중복 evidence가 이어져도 추가 save 후보로 쌓이지 않도록
+                // 저장 예정 엔티티를 먼저 lookup에 등록한다. 실제 DB 저장은 아래 batch에서 한 번에 처리한다.
                 registerEvidenceLookup(lookupIndexes, resolved);
                 savedCount++;
             }
 
             evidenceMap.put(factEvidenceId, resolved);
         }
+
+        saveAllInBatches(newEvidence, BATCH_SIZE, evidenceRepository::saveAll);
 
         return new EvidenceSaveResult(evidenceMap, savedCount);
     }
@@ -1057,12 +1111,16 @@ private void logSemanticPromotionGateDecision(
                         signatureLookup
                 );
 
-        List<Evidence> existing =
-                evidenceRepository.findAllByRun_RunId(
+        List<EvidenceLookupRow> existing =
+                evidenceRepository.findLookupRowsByRunId(
                         run.getRunId()
                 );
 
-        for (Evidence evidence : existing) {
+        for (EvidenceLookupRow row : existing) {
+            Evidence evidence = toLookupEvidence(
+                    run,
+                    row
+            );
             registerEvidenceLookup(
                     indexes,
                     evidence
@@ -1070,6 +1128,50 @@ private void logSemanticPromotionGateDecision(
         }
 
         return indexes;
+    }
+
+    /**
+     * projection으로 조회한 기존 evidence row를 중복 판별용 경량 객체로 재구성한다.
+     */
+    private Evidence toLookupEvidence(
+            RepoRun run,
+            EvidenceLookupRow row
+    ) {
+        if (row == null) {
+            return null;
+        }
+
+        FileIndex file = row.fileId() == null
+                ? null
+                : new FileIndex(
+                        row.fileId(),
+                        run,
+                        null,
+                        row.filePath(),
+                        row.fileType() == null
+                                ? detectFileType(row.filePath())
+                                : row.fileType(),
+                        null,
+                        null
+                );
+
+        // 성능 최적화: 기존 evidence 중복 판별에는 Hibernate가 관리하는 전체 Entity가 필요하지 않다.
+        // projection row에서 필요한 값만 담은 가벼운 Evidence를 재구성해 text/jsonb 필드와 연관 로딩 부담을 줄인다.
+        return new Evidence(
+                row.evidenceId(),
+                run,
+                row.evidenceType(),
+                file,
+                row.startLine(),
+                row.startCol(),
+                row.endLine(),
+                row.endCol(),
+                row.symbol(),
+                row.snippet(),
+                row.hash(),
+                row.rawId(),
+                row.attrs()
+        );
     }
 
     /**
@@ -1112,6 +1214,41 @@ private void logSemanticPromotionGateDecision(
             }
         }
         return cache;
+    }
+
+    /**
+     * evidence/symbol에서 필요한 신규 file_index를 먼저 모아 batch 저장한다.
+     * 이후 evidence signature와 source_file FK가 같은 캐시 객체를 참조해 개별 save를 피한다.
+     */
+    private void ensureFileIndexes(RepoRun run, List<String> rawPaths, Map<String, FileIndex> cache) {
+        if (rawPaths == null || rawPaths.isEmpty()) {
+            return;
+        }
+
+        Map<String, FileIndex> newFilesByPath = new LinkedHashMap<>();
+        for (String rawPath : rawPaths) {
+            String normalizedPath = normalizeEvidencePath(rawPath);
+            if (normalizedPath == null
+                    || cache.containsKey(normalizedPath)
+                    || newFilesByPath.containsKey(normalizedPath)) {
+                continue;
+            }
+
+            FileIndex created = new FileIndex(
+                    null,
+                    run,
+                    null,
+                    normalizedPath,
+                    detectFileType(normalizedPath),
+                    null,
+                    null
+            );
+            newFilesByPath.put(normalizedPath, created);
+            cache.put(normalizedPath, created);
+        }
+
+        // Evidence/Symbol 저장 전에 file_id를 확정해야 evidence signature와 source_file FK가 안정적으로 연결된다.
+        saveAllInBatches(new ArrayList<>(newFilesByPath.values()), BATCH_SIZE, fileIndexRepository::saveAll);
     }
 
     /**
@@ -1169,11 +1306,20 @@ private void logSemanticPromotionGateDecision(
             RepoRun run,
             NormalizedFactsDocument facts,
             Map<String, Evidence> evidenceMap,
-            Map<String, ModuleEntity> moduleCache  // C-2: gradle projectPath → ModuleEntity
+            Map<String, ModuleEntity> moduleCache,  // C-2: gradle projectPath → ModuleEntity
+            Map<String, FileIndex> sourceFileCache
     ) {
         Map<String, SymbolEntity> symbolMap = new LinkedHashMap<>();
-        Map<String, SymbolEntity> existingSymbolsByQualifiedName = loadExistingSymbolsByQualifiedName(run);
-        Map<String, FileIndex> sourceFileCache = loadFileIndexCache(run);
+        Map<String, SymbolEntity> existingSymbolsByQualifiedName =
+                loadExistingSymbolsByQualifiedName(run, facts.symbols());
+        ensureFileIndexes(
+                run,
+                facts.symbols().stream()
+                        .map(NormalizedSymbolFact::sourceFile)
+                        .toList(),
+                sourceFileCache
+        );
+        List<SymbolEntity> newSymbols = new ArrayList<>();
         int savedCount = 0;
         int sourceFileLinkedCount = 0;
         int moduleLinkedCount = 0;
@@ -1187,8 +1333,8 @@ private void logSemanticPromotionGateDecision(
             if (symbol == null) {
                 String symbolId = symbolIdGenerator.generate(run.getRunId(), dto.symbol());
                 // FactsSymbolConverter:23 — module은 여전히 null, 연결은 아래에서 서비스가 담당
-                SymbolEntity entity = factsSymbolConverter.toEntity(symbolId, run, dto);
-                symbol = symbolRepository.save(entity);
+                symbol = factsSymbolConverter.toEntity(symbolId, run, dto);
+                newSymbols.add(symbol);
                 existingSymbolsByQualifiedName.put(dto.symbol(), symbol);
                 savedCount++;
             }
@@ -1211,9 +1357,13 @@ private void logSemanticPromotionGateDecision(
             symbolMap.put(dto.symbol(), symbol);
         }
 
+        // 신규 symbol은 한 번에 저장한다. owner/source span/link 계산은 아래에서 같은 엔티티 인스턴스를 이어서 사용한다.
+        saveAllInBatches(newSymbols, BATCH_SIZE, symbolRepository::saveAll);
+
         Set<String> existingSymbolEvidenceKeys = loadExistingSymbolEvidenceKeys(run.getRunId());
         Set<String> newSymbolEvidenceKeys = new HashSet<>();
-        List<PendingSymbolEvidence> pendingSymbolEvidence = new ArrayList<>();
+        List<SymbolEvidence> symbolEvidenceBuffer = new ArrayList<>(BATCH_SIZE);
+        int symbolEvidenceSaved = 0;
 
         for (NormalizedSymbolFact dto : facts.symbols()) {
             SymbolEntity current = symbolMap.get(dto.symbol());
@@ -1250,21 +1400,24 @@ private void logSemanticPromotionGateDecision(
                     }
                     String linkKey = current.getSymbolId() + ":" + evidence.getEvidenceId();
                     if (!existingSymbolEvidenceKeys.contains(linkKey) && newSymbolEvidenceKeys.add(linkKey)) {
-                        pendingSymbolEvidence.add(new PendingSymbolEvidence(current, evidence));
+                        SymbolEvidenceId seId = new SymbolEvidenceId(
+                                current.getSymbolId(),
+                                evidence.getEvidenceId()
+                        );
+                        symbolEvidenceBuffer.add(new SymbolEvidence(
+                                seId,
+                                current,
+                                evidence
+                        ));
+                        if (symbolEvidenceBuffer.size() >= BATCH_SIZE) {
+                            symbolEvidenceSaved += flushSymbolEvidenceBuffer(symbolEvidenceBuffer);
+                        }
                     }
                 }
             }
         }
 
-        List<SymbolEvidence> symbolEvidenceLinks = new ArrayList<>(pendingSymbolEvidence.size());
-        for (PendingSymbolEvidence pending : pendingSymbolEvidence) {
-            SymbolEvidenceId seId = new SymbolEvidenceId(
-                    pending.symbol().getSymbolId(),
-                    pending.evidence().getEvidenceId()
-            );
-            symbolEvidenceLinks.add(new SymbolEvidence(seId, pending.symbol(), pending.evidence()));
-        }
-        saveAllInBatches(symbolEvidenceLinks, BATCH_SIZE, symbolEvidenceRepository::saveAll);
+        symbolEvidenceSaved += flushSymbolEvidenceBuffer(symbolEvidenceBuffer);
 
         log.info(
                 "[GRAPHSTORE] symbol linking summary. runId={}, sourceFileLinked={}, moduleLinked={}",
@@ -1273,15 +1426,56 @@ private void logSemanticPromotionGateDecision(
                 moduleLinkedCount
         );
 
-        return new SymbolSaveResult(symbolMap, savedCount, symbolEvidenceLinks.size());
+        return new SymbolSaveResult(symbolMap, savedCount, symbolEvidenceSaved);
     }
 
     /**
-     * run 범위 symbol을 qualifiedName 기준 맵으로 구성한다.
+     * symbol_evidence 저장 버퍼를 비우고 저장 건수를 반환한다.
      */
-    private Map<String, SymbolEntity> loadExistingSymbolsByQualifiedName(RepoRun run) {
+    private int flushSymbolEvidenceBuffer(List<SymbolEvidence> linkBuffer) {
+        if (linkBuffer == null || linkBuffer.isEmpty()) {
+            return 0;
+        }
+
+        int saved = linkBuffer.size();
+        // 성능 최적화: symbol_evidence 후보를 pending 리스트로 끝까지 쌓지 않고, 발견 즉시 청크 단위로 저장 후 버퍼를 비운다.
+        // 기존/신규 중복 key 판별은 그대로 수행하므로 GraphStore의 symbol 근거 연결 정확성은 유지된다.
+        symbolEvidenceRepository.saveAll(linkBuffer);
+        flushAndDetachAll(linkBuffer);
+        linkBuffer.clear();
+        return saved;
+    }
+
+    /**
+     * 현재 facts에 등장한 기존 symbol만 qualifiedName 기준 맵으로 구성한다.
+     */
+    private Map<String, SymbolEntity> loadExistingSymbolsByQualifiedName(
+            RepoRun run,
+            List<NormalizedSymbolFact> symbols
+    ) {
         Map<String, SymbolEntity> cache = new HashMap<>();
-        List<SymbolEntity> existingSymbols = symbolRepository.findAllByRun_RunId(run.getRunId());
+        if (symbols == null || symbols.isEmpty()) {
+            return cache;
+        }
+
+        Set<String> qualifiedNames = new LinkedHashSet<>();
+        for (NormalizedSymbolFact symbol : symbols) {
+            if (symbol == null || symbol.symbol() == null || symbol.symbol().isBlank()) {
+                continue;
+            }
+            qualifiedNames.add(symbol.symbol());
+        }
+
+        if (qualifiedNames.isEmpty()) {
+            return cache;
+        }
+
+        // 성능 최적화: ingest는 현재 facts에 포함된 symbol만 생성/갱신/연결한다.
+        // run 전체 symbol을 올리지 않고 대상 qualifiedName으로 제한해, 기존 정확성은 유지하면서 불필요한 관리 엔티티 적재를 줄인다.
+        List<SymbolEntity> existingSymbols = symbolRepository.findAllForIngestByRunIdAndQualifiedNameIn(
+                run.getRunId(),
+                qualifiedNames
+        );
         for (SymbolEntity symbol : existingSymbols) {
             if (symbol.getQualifiedName() != null) {
                 cache.putIfAbsent(symbol.getQualifiedName(), symbol);
@@ -1372,11 +1566,13 @@ private void logSemanticPromotionGateDecision(
      * run 범위 기존 symbol-evidence 연결 키를 메모리 Set으로 로드한다.
      */
     private Set<String> loadExistingSymbolEvidenceKeys(String runId) {
-        List<SymbolEvidence> existing = symbolEvidenceRepository.findAllBySymbol_Run_RunId(runId);
+        List<SymbolEvidenceLinkKeyRow> existing =
+                symbolEvidenceRepository.findLinkKeysByRunId(runId);
         Set<String> keys = new HashSet<>(Math.max(16, existing.size() * 2));
-        for (SymbolEvidence se : existing) {
-            if (se.getId() != null) {
-                keys.add(se.getId().getSymbolId() + ":" + se.getId().getEvidenceId());
+        for (SymbolEvidenceLinkKeyRow row : existing) {
+            if (row.symbolId() != null && row.evidenceId() != null) {
+                // 성능 최적화: 기존 symbol_evidence는 중복 방지 key만 필요하므로 엔티티 전체 로딩 없이 key 문자열만 구성한다.
+                keys.add(row.symbolId() + ":" + row.evidenceId());
             }
         }
         return keys;
@@ -1386,20 +1582,40 @@ private void logSemanticPromotionGateDecision(
      * run 범위 symbol-evidence에서 심볼 ID별 AST evidence를 한 건씩 추출한다.
      * startLine이 있는 AST evidence를 우선하여 저장한다.
      */
-    private Map<String, Evidence> loadSymbolAstEvidenceMap(String runId) {
-        List<SymbolEvidence> links = symbolEvidenceRepository.findAllWithEvidenceByRunId(runId);
+    private Map<String, Evidence> buildSymbolAstEvidenceMap(
+            List<NormalizedSymbolFact> symbols,
+            Map<String, SymbolEntity> symbolMap,
+            Map<String, Evidence> evidenceMap
+    ) {
         Map<String, Evidence> result = new HashMap<>();
-        for (SymbolEvidence se : links) {
-            String symbolId = se.getId().getSymbolId();
-            Evidence ev = se.getEvidence();
-            if (ev.getEvidenceType() != EvidenceType.AST) {
+        // 직전에 saveSymbols가 같은 facts 기준으로 symbol-evidence를 구성하므로
+        // Edge 파생 근거 선택을 위해 symbol_evidence 테이블을 다시 조회하지 않는다.
+        if (symbols == null || symbols.isEmpty()) {
+            return result;
+        }
+
+        for (NormalizedSymbolFact symbolFact : symbols) {
+            if (symbolFact == null || symbolFact.symbol() == null || symbolFact.evidenceIds() == null) {
                 continue;
             }
-            Evidence existing = result.get(symbolId);
-            if (existing == null) {
-                result.put(symbolId, ev);
-            } else if (ev.getStartLine() != null && existing.getStartLine() == null) {
-                result.put(symbolId, ev);
+
+            SymbolEntity symbol = symbolMap.get(symbolFact.symbol());
+            if (symbol == null || symbol.getSymbolId() == null) {
+                continue;
+            }
+
+            for (String factEvidenceId : symbolFact.evidenceIds()) {
+                Evidence evidence = evidenceMap.get(factEvidenceId);
+                if (evidence == null || evidence.getEvidenceType() != EvidenceType.AST) {
+                    continue;
+                }
+
+                Evidence existing = result.get(symbol.getSymbolId());
+                if (existing == null) {
+                    result.put(symbol.getSymbolId(), evidence);
+                } else if (evidence.getStartLine() != null && existing.getStartLine() == null) {
+                    result.put(symbol.getSymbolId(), evidence);
+                }
             }
         }
         return result;
@@ -1490,18 +1706,22 @@ private void logSemanticPromotionGateDecision(
         Map<String, SymbolEntity> typeLookupIndex = buildTypeLookupIndex(symbolMap);
         // P1-1: IMPLEMENTS/EXTENDS 단순명 폴백 — 크로스모듈 동일 repo 타입 해소용
         Map<String, SymbolEntity> simpleNameInheritanceLookup = buildSimpleNameInheritanceLookup(symbolMap);
-        Map<String, Evidence> symbolAstEvidenceMap = loadSymbolAstEvidenceMap(run.getRunId());
+        Map<String, Evidence> symbolAstEvidenceMap = buildSymbolAstEvidenceMap(
+                facts.symbols(),
+                symbolMap,
+                evidenceMap
+        );
         Map<String, String> symbolToOwnerMap = buildSymbolToOwnerMap(facts.symbols());
 
-        List<Edge> existingEdges = edgeRepository.findAllByRun_RunId(run.getRunId());
-        Map<EdgeKey, Edge> edgeLookup = new HashMap<>(Math.max(16, existingEdges.size() * 2));
-        for (Edge existing : existingEdges) {
-            edgeLookup.putIfAbsent(toEdgeKey(existing), existing);
-        }
+        Map<EdgeKey, Long> existingEdgeIdsByKey = loadExistingEdgeIdsByKey(run.getRunId());
+        Map<EdgeKey, Edge> newEdgeLookup = new HashMap<>();
 
         Set<String> existingEdgeEvidenceKeys = loadExistingEdgeEvidenceKeys(run.getRunId());
         List<Edge> newEdges = new ArrayList<>();
-        List<PendingEdgeEvidence> pendingEdgeEvidence = new ArrayList<>();
+        Map<Edge, List<Evidence>> edgeEvidenceCandidates =
+                new LinkedHashMap<>();
+        Map<Long, List<Evidence>> existingEdgeEvidenceCandidates =
+                new LinkedHashMap<>();
 
         for (NormalizedRelationFact dto : facts.relations()) {
             if (dto.srcSymbol() == null || dto.srcSymbol().isBlank()) {
@@ -1530,13 +1750,17 @@ private void logSemanticPromotionGateDecision(
 
             Edge candidate = factsEdgeConverter.toEntity(run, dto, from, to);
             EdgeKey edgeKey = toEdgeKey(from, candidate);
-            Edge edge = edgeLookup.get(edgeKey);
+            Edge edge = newEdgeLookup.get(edgeKey);
+            Long existingEdgeId = null;
 
             if (edge == null) {
-                edge = candidate;
-                edgeLookup.put(edgeKey, edge);
-                newEdges.add(edge);
-                edgesSaved++;
+                existingEdgeId = existingEdgeIdsByKey.get(edgeKey);
+                if (existingEdgeId == null) {
+                    edge = candidate;
+                    newEdgeLookup.put(edgeKey, edge);
+                    newEdges.add(edge);
+                    edgesSaved++;
+                }
             }
 
             if (dto.evidenceIds() != null) {
@@ -1545,7 +1769,19 @@ private void logSemanticPromotionGateDecision(
                     if (evidence == null || evidence.getEvidenceId() == null) {
                         continue;
                     }
-                    pendingEdgeEvidence.add(new PendingEdgeEvidence(edge, evidence));
+                    if (existingEdgeId != null) {
+                        addExistingEdgeEvidenceCandidate(
+                                existingEdgeEvidenceCandidates,
+                                existingEdgeId,
+                                evidence
+                        );
+                    } else {
+                        addEdgeEvidenceCandidate(
+                                edgeEvidenceCandidates,
+                                edge,
+                                evidence
+                        );
+                    }
                 }
             }
 
@@ -1563,9 +1799,19 @@ private void logSemanticPromotionGateDecision(
 
                 if (derivedEvidence != null
                         && derivedEvidence.getEvidenceId() != null) {
-                    pendingEdgeEvidence.add(
-                            new PendingEdgeEvidence(edge, derivedEvidence)
-                    );
+                    if (existingEdgeId != null) {
+                        addExistingEdgeEvidenceCandidate(
+                                existingEdgeEvidenceCandidates,
+                                existingEdgeId,
+                                derivedEvidence
+                        );
+                    } else {
+                        addEdgeEvidenceCandidate(
+                                edgeEvidenceCandidates,
+                                edge,
+                                derivedEvidence
+                        );
+                    }
                 }
             }
         }
@@ -1573,25 +1819,63 @@ private void logSemanticPromotionGateDecision(
         saveAllInBatches(newEdges, BATCH_SIZE, edgeRepository::saveAll);
 
         Set<String> newEdgeEvidenceKeys = new HashSet<>();
-        List<EdgeEvidence> linksToSave = new ArrayList<>();
-        for (PendingEdgeEvidence pending : pendingEdgeEvidence) {
-            if (pending.edge() == null || pending.edge().getEdgeId() == null || pending.evidence() == null) {
+        List<EdgeEvidence> linkBuffer = new ArrayList<>(BATCH_SIZE);
+        int edgeEvidenceSaved = 0;
+        for (Map.Entry<Long, List<Evidence>> entry : existingEdgeEvidenceCandidates.entrySet()) {
+            Long edgeId = entry.getKey();
+            if (edgeId == null) {
                 continue;
             }
 
-            Long edgeId = pending.edge().getEdgeId();
-            Long evidenceId = pending.evidence().getEvidenceId();
-            String linkKey = toEdgeEvidenceLinkKey(edgeId, evidenceId);
-            if (existingEdgeEvidenceKeys.contains(linkKey) || !newEdgeEvidenceKeys.add(linkKey)) {
-                continue;
-            }
+            // 성능 최적화: 기존 edge는 중복 판별 시 전체 엔티티를 로딩하지 않고 edgeId만 보관한다.
+            // evidence 연결이 실제로 필요한 edge만 reference로 연결해 FK 정확성은 유지하면서 영속성 컨텍스트 부담을 줄인다.
+            Edge edgeReference = edgeRepository.getReferenceById(edgeId);
+            for (Evidence evidence : entry.getValue()) {
+                if (evidence == null || evidence.getEvidenceId() == null) {
+                    continue;
+                }
 
-            EdgeEvidenceId edgeEvidenceId = new EdgeEvidenceId(edgeId, evidenceId);
-            linksToSave.add(new EdgeEvidence(edgeEvidenceId, pending.edge(), pending.evidence()));
+                Long evidenceId = evidence.getEvidenceId();
+                String linkKey = toEdgeEvidenceLinkKey(edgeId, evidenceId);
+                if (existingEdgeEvidenceKeys.contains(linkKey) || !newEdgeEvidenceKeys.add(linkKey)) {
+                    continue;
+                }
+
+                EdgeEvidenceId edgeEvidenceId = new EdgeEvidenceId(edgeId, evidenceId);
+                linkBuffer.add(new EdgeEvidence(edgeEvidenceId, edgeReference, evidence));
+                if (linkBuffer.size() >= BATCH_SIZE) {
+                    edgeEvidenceSaved += flushEdgeEvidenceBuffer(linkBuffer);
+                }
+            }
         }
 
-        saveAllInBatches(linksToSave, BATCH_SIZE, edgeEvidenceRepository::saveAll);
-        int edgeEvidenceSaved = linksToSave.size();
+        for (Map.Entry<Edge, List<Evidence>> entry : edgeEvidenceCandidates.entrySet()) {
+            Edge edge = entry.getKey();
+            if (edge == null || edge.getEdgeId() == null) {
+                continue;
+            }
+
+            for (Evidence evidence : entry.getValue()) {
+                if (evidence == null || evidence.getEvidenceId() == null) {
+                    continue;
+                }
+
+                Long edgeId = edge.getEdgeId();
+                Long evidenceId = evidence.getEvidenceId();
+                String linkKey = toEdgeEvidenceLinkKey(edgeId, evidenceId);
+                if (existingEdgeEvidenceKeys.contains(linkKey) || !newEdgeEvidenceKeys.add(linkKey)) {
+                    continue;
+                }
+
+                EdgeEvidenceId edgeEvidenceId = new EdgeEvidenceId(edgeId, evidenceId);
+                linkBuffer.add(new EdgeEvidence(edgeEvidenceId, edge, evidence));
+                if (linkBuffer.size() >= BATCH_SIZE) {
+                    edgeEvidenceSaved += flushEdgeEvidenceBuffer(linkBuffer);
+                }
+            }
+        }
+
+        edgeEvidenceSaved += flushEdgeEvidenceBuffer(linkBuffer);
 
         log.info(
                 "[GRAPHSTORE] relation linking summary. runId={}, totalRelations={}, resolvedByRawRef={}, resolvedBySimpleName={}, skippedRelations={}",
@@ -1603,6 +1887,78 @@ private void logSemanticPromotionGateDecision(
         );
 
         return new EdgeSaveResult(edgesSaved, edgeEvidenceSaved, skippedRelations);
+    }
+
+    /**
+     * run 범위 기존 edge를 중복 판별 key와 edgeId만으로 적재한다.
+     */
+    private Map<EdgeKey, Long> loadExistingEdgeIdsByKey(String runId) {
+        List<EdgeLookupRow> existingEdges = edgeRepository.findLookupRowsByRunId(runId);
+        Map<EdgeKey, Long> edgeIdsByKey = new HashMap<>(Math.max(16, existingEdges.size() * 2));
+
+        for (EdgeLookupRow row : existingEdges) {
+            if (row == null || row.edgeId() == null || row.fromSymbolId() == null || row.edgeType() == null) {
+                continue;
+            }
+
+            // 성능 최적화: 기존 edge 중복 판별에는 Edge 전체 엔티티가 아니라
+            // from/type/to 또는 rawRef로 구성한 동일한 EdgeKey와 edgeId만 필요하다.
+            edgeIdsByKey.putIfAbsent(
+                    toEdgeKey(row),
+                    row.edgeId()
+            );
+        }
+
+        return edgeIdsByKey;
+    }
+
+    private void addEdgeEvidenceCandidate(
+            Map<Edge, List<Evidence>> edgeEvidenceCandidates,
+            Edge edge,
+            Evidence evidence
+    ) {
+        if (edge == null || evidence == null) {
+            return;
+        }
+
+        // 성능 최적화: edge-evidence 후보를 PendingEdgeEvidence record 리스트로 끝까지 쌓지 않고,
+        // edge별 evidence 목록으로 묶어 새 edge 저장 후 같은 중복 key 기준으로 연결한다.
+        edgeEvidenceCandidates
+                .computeIfAbsent(edge, ignored -> new ArrayList<>())
+                .add(evidence);
+    }
+
+    private void addExistingEdgeEvidenceCandidate(
+            Map<Long, List<Evidence>> existingEdgeEvidenceCandidates,
+            Long edgeId,
+            Evidence evidence
+    ) {
+        if (edgeId == null || evidence == null) {
+            return;
+        }
+
+        // 성능 최적화: 기존 edge 후보는 Edge 엔티티 대신 edgeId 기준으로 묶는다.
+        // 연결 저장 시점에는 같은 edgeId로 reference만 얻어 edge_evidence FK를 정확히 유지한다.
+        existingEdgeEvidenceCandidates
+                .computeIfAbsent(edgeId, ignored -> new ArrayList<>())
+                .add(evidence);
+    }
+
+    /**
+     * edge_evidence 저장 버퍼를 비우고 저장 건수를 반환한다.
+     */
+    private int flushEdgeEvidenceBuffer(List<EdgeEvidence> linkBuffer) {
+        if (linkBuffer == null || linkBuffer.isEmpty()) {
+            return 0;
+        }
+
+        int saved = linkBuffer.size();
+        // 성능 최적화: edge_evidence 전체 저장 리스트를 끝까지 들고 있지 않고, 변환 즉시 청크 단위로 저장 후 버퍼를 비운다.
+        // 중복 key 판별과 저장 조건은 그대로 유지하므로 GraphStore의 근거 연결 정확성은 바꾸지 않는다.
+        edgeEvidenceRepository.saveAll(linkBuffer);
+        flushAndDetachAll(linkBuffer);
+        linkBuffer.clear();
+        return saved;
     }
 
     /**
@@ -1637,42 +1993,44 @@ private void logSemanticPromotionGateDecision(
             return 0;
         }
 
-        List<Observation> toSave =
-                new ArrayList<>(observations.size());
+        List<Observation> observationBuffer =
+                new ArrayList<>(BATCH_SIZE);
+        List<NormalizedObservationFact> factBuffer =
+                new ArrayList<>(BATCH_SIZE);
+
+        int observationsSaved = 0;
+        int observationEvidenceSaved = 0;
+        int missingEvidenceReferences = 0;
+        int duplicateEvidenceReferences = 0;
 
         for (NormalizedObservationFact dto : observations) {
-            toSave.add(new Observation(
-                    null,
-                    run,
-                    dto.kind(),
-                    dto.siteSymbol(),
-                    dto.targetSymbol(),
-                    dto.targetTypeRef(),
-                    dto.note(),
-                    dto.confidenceHint(),
-                    dto.attrs()
-            ));
+            observationBuffer.add(toObservation(run, dto));
+            factBuffer.add(dto);
+
+            if (observationBuffer.size() >= BATCH_SIZE) {
+                ObservationChunkSaveResult result =
+                        flushObservationBuffer(
+                                observationBuffer,
+                                factBuffer,
+                                evidenceMap
+                        );
+                observationsSaved += result.observations();
+                observationEvidenceSaved += result.observationEvidence();
+                missingEvidenceReferences += result.missingEvidenceReferences();
+                duplicateEvidenceReferences += result.duplicateEvidenceReferences();
+            }
         }
 
-        saveAllInBatches(
-                toSave,
-                BATCH_SIZE,
-                observationRepository::saveAll
-        );
-
-        ObservationEvidenceLinkSupport.LinkBuildResult
-                linkResult =
-                ObservationEvidenceLinkSupport.build(
-                        toSave,
-                        observations,
+        ObservationChunkSaveResult result =
+                flushObservationBuffer(
+                        observationBuffer,
+                        factBuffer,
                         evidenceMap
                 );
-
-        saveAllInBatches(
-                linkResult.links(),
-                BATCH_SIZE,
-                observationEvidenceRepository::saveAll
-        );
+        observationsSaved += result.observations();
+        observationEvidenceSaved += result.observationEvidence();
+        missingEvidenceReferences += result.missingEvidenceReferences();
+        duplicateEvidenceReferences += result.duplicateEvidenceReferences();
 
         log.info(
                 "[GRAPHSTORE] observations saved. "
@@ -1681,13 +2039,76 @@ private void logSemanticPromotionGateDecision(
                         + "missingEvidenceRefs={}, "
                         + "duplicateEvidenceRefs={}",
                 runId,
-                toSave.size(),
-                linkResult.links().size(),
-                linkResult.missingEvidenceReferences(),
-                linkResult.duplicateEvidenceReferences()
+                observationsSaved,
+                observationEvidenceSaved,
+                missingEvidenceReferences,
+                duplicateEvidenceReferences
         );
 
-        return toSave.size();
+        return observationsSaved;
+    }
+
+    private Observation toObservation(
+            RepoRun run,
+            NormalizedObservationFact dto
+    ) {
+        return new Observation(
+                null,
+                run,
+                dto.kind(),
+                dto.siteSymbol(),
+                dto.targetSymbol(),
+                dto.targetTypeRef(),
+                dto.note(),
+                dto.confidenceHint(),
+                dto.attrs()
+        );
+    }
+
+    private ObservationChunkSaveResult flushObservationBuffer(
+            List<Observation> observationBuffer,
+            List<NormalizedObservationFact> factBuffer,
+            Map<String, Evidence> evidenceMap
+    ) {
+        if (observationBuffer == null || observationBuffer.isEmpty()) {
+            return new ObservationChunkSaveResult(0, 0, 0, 0);
+        }
+
+        int observationCount = observationBuffer.size();
+
+        // 성능 최적화: observation 전체 리스트와 observation_evidence 전체 리스트를 끝까지 보관하지 않는다.
+        // 저장된 observation chunk와 같은 순서의 fact chunk를 즉시 연결해 기존 evidence 매칭 정확성은 유지한다.
+        observationRepository.saveAll(observationBuffer);
+
+        ObservationEvidenceLinkSupport.LinkBuildResult linkResult =
+                ObservationEvidenceLinkSupport.build(
+                        observationBuffer,
+                        factBuffer,
+                        evidenceMap
+                );
+
+        saveAllInBatchesAndDetach(
+                linkResult.links(),
+                BATCH_SIZE,
+                observationEvidenceRepository::saveAll
+        );
+
+        int observationEvidenceCount = linkResult.links().size();
+        int missingEvidenceReferences = linkResult.missingEvidenceReferences();
+        int duplicateEvidenceReferences = linkResult.duplicateEvidenceReferences();
+
+        // 성능 최적화: observation chunk는 evidence 연결까지 끝나면 이후 단계에서 다시 수정하지 않는다.
+        // 청크 단위 flush/detach로 Hibernate 영속성 컨텍스트에 observation이 누적되는 것을 막는다.
+        flushAndDetachAll(observationBuffer);
+        observationBuffer.clear();
+        factBuffer.clear();
+
+        return new ObservationChunkSaveResult(
+                observationCount,
+                observationEvidenceCount,
+                missingEvidenceReferences,
+                duplicateEvidenceReferences
+        );
     }
 
     /**
@@ -1695,13 +2116,15 @@ private void logSemanticPromotionGateDecision(
      * edge_id IN(...) 대신 run_id JOIN으로 조회해 PostgreSQL 65,535 파라미터 한도를 우회한다.
      */
     private Set<String> loadExistingEdgeEvidenceKeys(String runId) {
-        List<EdgeEvidence> existingLinks = edgeEvidenceRepository.findAllByEdge_Run_RunId(runId);
+        List<EdgeEvidenceLinkKeyRow> existingLinks =
+                edgeEvidenceRepository.findLinkKeysByRunId(runId);
         Set<String> keys = new HashSet<>(Math.max(16, existingLinks.size() * 2));
-        for (EdgeEvidence link : existingLinks) {
-            if (link.getId() == null) {
+        for (EdgeEvidenceLinkKeyRow link : existingLinks) {
+            if (link.edgeId() == null || link.evidenceId() == null) {
                 continue;
             }
-            keys.add(toEdgeEvidenceLinkKey(link.getId().getEdgeId(), link.getId().getEvidenceId()));
+            // 성능 최적화: 기존 edge_evidence는 중복 방지 key만 필요하므로 엔티티 전체 로딩 없이 key 문자열만 구성한다.
+            keys.add(toEdgeEvidenceLinkKey(link.edgeId(), link.evidenceId()));
         }
         return keys;
     }
@@ -1727,6 +2150,11 @@ private void logSemanticPromotionGateDecision(
         return new EdgeKey(from.getSymbolId(), edge.getEdgeType(), toSymbolId, toRawRefCanonical);
     }
 
+    private EdgeKey toEdgeKey(EdgeLookupRow row) {
+        String toRawRefCanonical = row.toSymbolId() == null ? canonicalJson(row.toRawRef()) : null;
+        return new EdgeKey(row.fromSymbolId(), row.edgeType(), row.toSymbolId(), toRawRefCanonical);
+    }
+
     /**
      * 리스트를 청크 단위로 saveAll 처리한다.
      */
@@ -1737,6 +2165,49 @@ private void logSemanticPromotionGateDecision(
         for (int start = 0; start < values.size(); start += batchSize) {
             int end = Math.min(start + batchSize, values.size());
             saver.accept(values.subList(start, end));
+        }
+    }
+
+    /**
+     * 저장한 청크를 즉시 flush/detach해 영속성 컨텍스트 누적을 줄인다.
+     */
+    private <T> void saveAllInBatchesAndDetach(
+            List<T> values,
+            int batchSize,
+            Consumer<List<T>> saver
+    ) {
+        if (values == null || values.isEmpty()) {
+            return;
+        }
+        for (int start = 0; start < values.size(); start += batchSize) {
+            int end = Math.min(start + batchSize, values.size());
+            List<T> chunk = values.subList(start, end);
+            saver.accept(chunk);
+            flushAndDetachAll(chunk);
+        }
+    }
+
+    private void flushAndDetachAll(List<?> entities) {
+        if (entityManager == null || entities == null || entities.isEmpty()) {
+            return;
+        }
+
+        // 성능 최적화: 전체 clear()는 symbol/evidence/edge 같은 후속 단계용 managed entity까지 분리할 수 있다.
+        // 저장이 끝난 청크 엔티티만 detach해 GraphStore 연결 정확성은 유지하면서 heap peak를 낮춘다.
+        entityManager.flush();
+        for (Object entity : entities) {
+            if (entity != null && entityManager.contains(entity)) {
+                entityManager.detach(entity);
+            }
+        }
+    }
+
+    private void detachIfManaged(Object entity) {
+        if (entityManager == null || entity == null) {
+            return;
+        }
+        if (entityManager.contains(entity)) {
+            entityManager.detach(entity);
         }
     }
 
@@ -1959,6 +2430,14 @@ private void logSemanticPromotionGateDecision(
     private record EdgeSaveResult(int edgesSaved, int edgeEvidenceSaved, int skippedRelations) {
     }
 
+    private record ObservationChunkSaveResult(
+            int observations,
+            int observationEvidence,
+            int missingEvidenceReferences,
+            int duplicateEvidenceReferences
+    ) {
+    }
+
     private record EvidenceLookupIndexes(
             Map<String, Evidence> rawIdLookup,
             Map<EvidenceIdentitySupport.Signature, Evidence>
@@ -1974,9 +2453,4 @@ private void logSemanticPromotionGateDecision(
     ) {
     }
 
-    private record PendingEdgeEvidence(Edge edge, Evidence evidence) {
-    }
-
-    private record PendingSymbolEvidence(SymbolEntity symbol, Evidence evidence) {
-    }
 }

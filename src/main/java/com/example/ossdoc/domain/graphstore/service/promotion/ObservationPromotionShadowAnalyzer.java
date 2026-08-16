@@ -14,7 +14,9 @@ import java.lang.reflect.Array;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -55,8 +57,10 @@ public final class ObservationPromotionShadowAnalyzer {
         List<NormalizedObservationFact> observations =
                 safeList(facts.observations());
 
-        List<NormalizedRelationFact> relations =
-                safeList(facts.relations());
+        RelationAnchorIndex relationIndex =
+                RelationAnchorIndex.from(
+                        safeList(facts.relations())
+                );
 
         List<ObservationPromotionShadowIssue> issues =
                 new ArrayList<>(observations.size());
@@ -95,7 +99,7 @@ public final class ObservationPromotionShadowAnalyzer {
                     index,
                     observation,
                     contract.get(),
-                    relations
+                    relationIndex
             ));
         }
 
@@ -110,16 +114,22 @@ public final class ObservationPromotionShadowAnalyzer {
             int observationIndex,
             NormalizedObservationFact observation,
             ObservationPromotionContract contract,
-            List<NormalizedRelationFact> relations
+            RelationAnchorIndex relationIndex
     ) {
+        ObservationAnchor observationAnchor =
+                ObservationAnchor.from(observation);
+
         List<ScoredRelation> anchoredRelations =
-                relations.stream()
-                        .filter(relation -> relation != null)
+                relationIndex.candidatesFor(
+                                observationAnchor,
+                                contract
+                        )
+                        .stream()
                         .map(relation ->
                                 new ScoredRelation(
-                                        relation,
+                                        relation.relation(),
                                         anchorScore(
-                                                observation,
+                                                observationAnchor,
                                                 contract,
                                                 relation
                                         )
@@ -255,9 +265,9 @@ public final class ObservationPromotionShadowAnalyzer {
      * target 일치는 후보 간 선택용 보너스로만 사용한다.
      */
     private static int anchorScore(
-            NormalizedObservationFact observation,
+            ObservationAnchor observation,
             ObservationPromotionContract contract,
-            NormalizedRelationFact relation
+            IndexedRelation relation
     ) {
         if (observation == null || relation == null) {
             return 0;
@@ -265,28 +275,18 @@ public final class ObservationPromotionShadowAnalyzer {
 
         int score = 0;
 
-        String sourceObservationKind =
-                stringAttr(
-                        relation.attrs(),
-                        "source_observation_kind"
-                );
-
         if (sameObservationKind(
                 observation.kind(),
-                sourceObservationKind
+                relation.sourceObservationKind()
         )) {
             score += 100;
         }
 
         Set<String> observationEvidence =
-                normalizedIds(
-                        observation.evidenceIds()
-                );
+                observation.evidenceIds();
 
         Set<String> relationEvidence =
-                normalizedIds(
-                        relation.evidenceIds()
-                );
+                relation.evidenceIds();
 
         if (!observationEvidence.isEmpty()) {
             if (relationEvidence.containsAll(
@@ -302,37 +302,29 @@ public final class ObservationPromotionShadowAnalyzer {
         }
 
         String siteSymbol =
-                trimToNull(
-                        observation.siteSymbol()
-                );
+                observation.siteSymbol();
 
         if (siteSymbol != null) {
             if (siteSymbol.equals(
-                    trimToNull(relation.srcSymbol())
+                    relation.srcSymbol()
             )) {
                 score += 40;
             }
 
-            if (containsValue(
-                    relation.attrs(),
-                    siteSymbol
-            )) {
+            if (relation.attrValues().contains(siteSymbol)) {
                 score += 35;
             }
         }
 
-        if (targetMatches(
-                observation,
-                relation
+        if (observation.target() != null
+                && observation.target().equals(
+                relation.destination()
         )) {
             score += 20;
         }
 
         String resolver =
-                stringAttr(
-                        relation.attrs(),
-                        "resolver"
-                );
+                relation.resolver();
 
         if (contract.resolverClassName()
                 .equals(resolver)) {
@@ -584,27 +576,6 @@ public final class ObservationPromotionShadowAnalyzer {
                 : trimToNull(relation.dstRawRef());
     }
 
-    private static boolean targetMatches(
-            NormalizedObservationFact observation,
-            NormalizedRelationFact relation
-    ) {
-        String observationTarget =
-                normalizeTarget(
-                        observationTarget(observation)
-                );
-
-        if (observationTarget == null) {
-            return false;
-        }
-
-        String relationTarget =
-                normalizeTarget(
-                        relationDestination(relation)
-                );
-
-        return observationTarget.equals(relationTarget);
-    }
-
     private static String normalizeTarget(String value) {
         String normalized =
                 trimToNull(value);
@@ -693,62 +664,6 @@ public final class ObservationPromotionShadowAnalyzer {
                 );
     }
 
-    private static boolean containsValue(
-            Object value,
-            String expected
-    ) {
-        if (value == null || expected == null) {
-            return false;
-        }
-
-        if (value instanceof CharSequence sequence) {
-            return expected.equals(
-                    sequence.toString()
-            );
-        }
-
-        if (value instanceof Map<?, ?> map) {
-            for (Object nested : map.values()) {
-                if (containsValue(
-                        nested,
-                        expected
-                )) {
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        if (value instanceof Collection<?> collection) {
-            for (Object nested : collection) {
-                if (containsValue(
-                        nested,
-                        expected
-                )) {
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        if (value.getClass().isArray()) {
-            int length = Array.getLength(value);
-
-            for (int index = 0;
-                 index < length;
-                 index++) {
-                if (containsValue(
-                        Array.get(value, index),
-                        expected
-                )) {
-                    return true;
-                }
-            }
-        }
-
-        return expected.equals(String.valueOf(value));
-    }
-
     private static Set<String> normalizedIds(
             List<String> ids
     ) {
@@ -806,6 +721,241 @@ public final class ObservationPromotionShadowAnalyzer {
         return values == null
                 ? List.of()
                 : values;
+    }
+
+    /**
+     * Observation promotion shadow는 원래 observation마다 모든 relation을 다시 훑었다.
+     * relation anchor 조건에 쓰이는 값을 한 번만 인덱싱해 점수가 생길 수 있는 후보만 평가한다.
+     */
+    private static final class RelationAnchorIndex {
+
+        private final Map<String, List<IndexedRelation>> bySourceObservationKind;
+        private final Map<String, List<IndexedRelation>> byEvidenceId;
+        private final Map<String, List<IndexedRelation>> bySrcSymbol;
+        private final Map<String, List<IndexedRelation>> byAttrValue;
+        private final Map<String, List<IndexedRelation>> byDestination;
+        private final Map<String, List<IndexedRelation>> byResolver;
+
+        private RelationAnchorIndex(
+                Map<String, List<IndexedRelation>> bySourceObservationKind,
+                Map<String, List<IndexedRelation>> byEvidenceId,
+                Map<String, List<IndexedRelation>> bySrcSymbol,
+                Map<String, List<IndexedRelation>> byAttrValue,
+                Map<String, List<IndexedRelation>> byDestination,
+                Map<String, List<IndexedRelation>> byResolver
+        ) {
+            this.bySourceObservationKind = bySourceObservationKind;
+            this.byEvidenceId = byEvidenceId;
+            this.bySrcSymbol = bySrcSymbol;
+            this.byAttrValue = byAttrValue;
+            this.byDestination = byDestination;
+            this.byResolver = byResolver;
+        }
+
+        static RelationAnchorIndex from(List<NormalizedRelationFact> relations) {
+            List<IndexedRelation> indexed = new ArrayList<>();
+            Map<String, List<IndexedRelation>> bySourceObservationKind = new LinkedHashMap<>();
+            Map<String, List<IndexedRelation>> byEvidenceId = new LinkedHashMap<>();
+            Map<String, List<IndexedRelation>> bySrcSymbol = new LinkedHashMap<>();
+            Map<String, List<IndexedRelation>> byAttrValue = new LinkedHashMap<>();
+            Map<String, List<IndexedRelation>> byDestination = new LinkedHashMap<>();
+            Map<String, List<IndexedRelation>> byResolver = new LinkedHashMap<>();
+
+            for (int index = 0; index < relations.size(); index++) {
+                NormalizedRelationFact relation = relations.get(index);
+                if (relation == null) {
+                    continue;
+                }
+
+                IndexedRelation value = IndexedRelation.from(index, relation);
+                indexed.add(value);
+                add(bySourceObservationKind, value.sourceObservationKind(), value);
+                add(bySrcSymbol, value.srcSymbol(), value);
+                add(byDestination, value.destination(), value);
+                add(byResolver, value.resolver(), value);
+
+                for (String evidenceId : value.evidenceIds()) {
+                    add(byEvidenceId, evidenceId, value);
+                }
+                for (String attrValue : value.attrValues()) {
+                    add(byAttrValue, attrValue, value);
+                }
+            }
+
+            return new RelationAnchorIndex(
+                    freeze(bySourceObservationKind),
+                    freeze(byEvidenceId),
+                    freeze(bySrcSymbol),
+                    freeze(byAttrValue),
+                    freeze(byDestination),
+                    freeze(byResolver)
+            );
+        }
+
+        List<IndexedRelation> candidatesFor(
+                ObservationAnchor observation,
+                ObservationPromotionContract contract
+        ) {
+            if (observation == null) {
+                return List.of();
+            }
+
+            Map<Integer, IndexedRelation> candidates = new LinkedHashMap<>();
+            addAll(candidates, indexed(bySourceObservationKind, observation.kind()));
+            addAll(candidates, indexed(bySrcSymbol, observation.siteSymbol()));
+            addAll(candidates, indexed(byAttrValue, observation.siteSymbol()));
+            addAll(candidates, indexed(byDestination, observation.target()));
+
+            if (contract != null) {
+                addAll(candidates, indexed(byResolver, contract.resolverClassName()));
+            }
+
+            for (String evidenceId : observation.evidenceIds()) {
+                addAll(candidates, indexed(byEvidenceId, evidenceId));
+            }
+
+            if (candidates.isEmpty()) {
+                return List.of();
+            }
+
+            return candidates.values()
+                    .stream()
+                    .sorted(Comparator.comparingInt(IndexedRelation::index))
+                    .toList();
+        }
+
+        private static void add(
+                Map<String, List<IndexedRelation>> index,
+                String key,
+                IndexedRelation relation
+        ) {
+            if (key == null || relation == null) {
+                return;
+            }
+            index.computeIfAbsent(key, ignored -> new ArrayList<>()).add(relation);
+        }
+
+        private static void addAll(
+                Map<Integer, IndexedRelation> target,
+                List<IndexedRelation> values
+        ) {
+            if (values == null || values.isEmpty()) {
+                return;
+            }
+            for (IndexedRelation value : values) {
+                target.putIfAbsent(value.index(), value);
+            }
+        }
+
+        private static List<IndexedRelation> indexed(
+                Map<String, List<IndexedRelation>> index,
+                String key
+        ) {
+            if (key == null || index == null) {
+                return List.of();
+            }
+            return index.getOrDefault(key, List.of());
+        }
+
+        private static Map<String, List<IndexedRelation>> freeze(
+                Map<String, List<IndexedRelation>> source
+        ) {
+            source.replaceAll((key, values) -> List.copyOf(values));
+            return Collections.unmodifiableMap(new LinkedHashMap<>(source));
+        }
+    }
+
+    private record ObservationAnchor(
+            String kind,
+            String siteSymbol,
+            String target,
+            Set<String> evidenceIds
+    ) {
+
+        static ObservationAnchor from(NormalizedObservationFact observation) {
+            if (observation == null) {
+                return new ObservationAnchor(null, null, null, Set.of());
+            }
+            return new ObservationAnchor(
+                    normalizeCode(observation.kind()),
+                    trimToNull(observation.siteSymbol()),
+                    normalizeTarget(observationTarget(observation)),
+                    normalizedIds(observation.evidenceIds())
+            );
+        }
+    }
+
+    private record IndexedRelation(
+            int index,
+            NormalizedRelationFact relation,
+            String sourceObservationKind,
+            Set<String> evidenceIds,
+            String srcSymbol,
+            Set<String> attrValues,
+            String destination,
+            String resolver
+    ) {
+
+        static IndexedRelation from(int index, NormalizedRelationFact relation) {
+            return new IndexedRelation(
+                    index,
+                    relation,
+                    normalizeCode(stringAttr(relation.attrs(), "source_observation_kind")),
+                    normalizedIds(relation.evidenceIds()),
+                    trimToNull(relation.srcSymbol()),
+                    scalarAttrValues(relation.attrs()),
+                    normalizeTarget(relationDestination(relation)),
+                    stringAttr(relation.attrs(), "resolver")
+            );
+        }
+    }
+
+    private static Set<String> scalarAttrValues(Object value) {
+        if (value == null) {
+            return Set.of();
+        }
+
+        LinkedHashSet<String> result = new LinkedHashSet<>();
+        collectScalarAttrValues(value, result);
+        return Set.copyOf(result);
+    }
+
+    private static void collectScalarAttrValues(Object value, Set<String> target) {
+        if (value == null) {
+            return;
+        }
+
+        if (value instanceof CharSequence sequence) {
+            String normalized = trimToNull(sequence.toString());
+            if (normalized != null) {
+                target.add(normalized);
+            }
+            return;
+        }
+
+        if (value instanceof Map<?, ?> map) {
+            for (Object nested : map.values()) {
+                collectScalarAttrValues(nested, target);
+            }
+            return;
+        }
+
+        if (value instanceof Collection<?> collection) {
+            for (Object nested : collection) {
+                collectScalarAttrValues(nested, target);
+            }
+            return;
+        }
+
+        if (value.getClass().isArray()) {
+            int length = Array.getLength(value);
+            for (int index = 0; index < length; index++) {
+                collectScalarAttrValues(Array.get(value, index), target);
+            }
+            return;
+        }
+
+        target.add(String.valueOf(value));
     }
 
     private record ScoredRelation(

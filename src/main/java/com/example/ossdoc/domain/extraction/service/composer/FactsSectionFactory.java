@@ -12,13 +12,13 @@ import com.example.ossdoc.domain.extraction.dto.model.SymbolTable;
 import com.example.ossdoc.domain.extraction.enums.EvidenceType;
 
 import java.util.ArrayList;
-import java.util.Objects;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 
 /**
@@ -90,6 +90,7 @@ final class FactsSectionFactory {
         for (SymbolFact symbol : flattenSymbols(raw)) {
             merged.merge(FactsDedupSupport.symbolKey(symbol), symbol, FactsDedupSupport::mergeSymbol);
         }
+        Set<String> testEvidenceIds = testEvidenceIds(evidenceMap);
 
         List<SymbolFact> types = new ArrayList<>();
         List<SymbolFact> constructors = new ArrayList<>();
@@ -100,7 +101,7 @@ final class FactsSectionFactory {
             if (symbol == null || symbol.kind() == null) {
                 continue;
             }
-            SymbolFact enriched = applyTestCoverageHint(symbol, evidenceMap);
+            SymbolFact enriched = applyTestCoverageHint(symbol, testEvidenceIds);
             switch (enriched.kind()) {
                 case TYPE -> types.add(enriched);
                 case CONSTRUCTOR -> constructors.add(enriched);
@@ -331,13 +332,34 @@ final class FactsSectionFactory {
                 .build();
     }
 
-    private SymbolFact applyTestCoverageHint(SymbolFact s, Map<String, EvidenceFact> evidenceMap) {
-        if (s.evidenceIds() == null || s.evidenceIds().isEmpty()) return s;
+    private Set<String> testEvidenceIds(Map<String, EvidenceFact> evidenceMap) {
+        if (evidenceMap == null || evidenceMap.isEmpty()) {
+            return Set.of();
+        }
 
-        boolean hasTest = s.evidenceIds().stream()
-                .map(evidenceMap::get)
-                .filter(Objects::nonNull)
-                .anyMatch(ev -> ev.type() == EvidenceType.TEST);
+        Set<String> result = new LinkedHashSet<>();
+        for (Map.Entry<String, EvidenceFact> entry : evidenceMap.entrySet()) {
+            EvidenceFact evidence = entry.getValue();
+            if (entry.getKey() != null && evidence != null && evidence.type() == EvidenceType.TEST) {
+                result.add(entry.getKey());
+            }
+        }
+        return Set.copyOf(result);
+    }
+
+    private SymbolFact applyTestCoverageHint(SymbolFact s, Set<String> testEvidenceIds) {
+        if (s.evidenceIds() == null || s.evidenceIds().isEmpty()) return s;
+        if (testEvidenceIds == null || testEvidenceIds.isEmpty()) return s;
+
+        // TEST evidence id 목록은 composeSymbols 진입 시 한 번만 계산해
+        // symbol마다 evidenceMap stream 조회를 반복하지 않는다.
+        boolean hasTest = false;
+        for (String evidenceId : s.evidenceIds()) {
+            if (testEvidenceIds.contains(evidenceId)) {
+                hasTest = true;
+                break;
+            }
+        }
         if (!hasTest) return s;
 
         return SymbolFact.builder()

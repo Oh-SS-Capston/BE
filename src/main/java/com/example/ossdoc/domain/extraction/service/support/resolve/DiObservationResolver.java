@@ -363,9 +363,7 @@ public class DiObservationResolver
         attrs.put("candidate_count", candidates.size());
         attrs.put(
                 "candidate_provider_symbols",
-                candidates.stream()
-                        .map(ProviderCandidate::siteSymbol)
-                        .toList()
+                candidateProviderSymbols(candidates)
         );
         if (!explicitNames.isEmpty()) {
             attrs.put("injection_qualifiers", explicitNames);
@@ -470,9 +468,10 @@ public class DiObservationResolver
         }
 
         if (!explicitNames.isEmpty()) {
-            List<ProviderCandidate> qualified = candidates.stream()
-                    .filter(candidate -> candidate.matchesAnyName(explicitNames))
-                    .toList();
+            List<ProviderCandidate> qualified = candidatesByAnyName(
+                    candidates,
+                    explicitNames
+            );
             if (qualified.size() == 1) {
                 return Selection.resolved(
                         qualified.get(0),
@@ -492,9 +491,10 @@ public class DiObservationResolver
         }
 
         if (parameterName != null && candidates.size() > 1) {
-            List<ProviderCandidate> named = candidates.stream()
-                    .filter(candidate -> candidate.matchesName(parameterName))
-                    .toList();
+            List<ProviderCandidate> named = candidatesByName(
+                    candidates,
+                    parameterName
+            );
             if (named.size() == 1) {
                 return Selection.partial(
                         named.get(0),
@@ -525,9 +525,9 @@ public class DiObservationResolver
             );
         }
 
-        List<ProviderCandidate> primaryCandidates = candidates.stream()
-                .filter(ProviderCandidate::primary)
-                .toList();
+        List<ProviderCandidate> primaryCandidates = primaryCandidates(
+                candidates
+        );
         if (primaryCandidates.size() == 1) {
             return Selection.resolved(
                     primaryCandidates.get(0),
@@ -548,21 +548,77 @@ public class DiObservationResolver
             String injectionType,
             boolean unresolvedType
     ) {
-        List<ProviderCandidate> exact = providers.stream()
-                .filter(candidate -> candidate.exposesExact(injectionType))
-                .toList();
+        List<ProviderCandidate> exact = new ArrayList<>();
+        for (ProviderCandidate candidate : providers) {
+            if (candidate.exposesExact(injectionType)) {
+                exact.add(candidate);
+            }
+        }
         if (!exact.isEmpty()) {
-            return new CandidateMatch(exact, false);
+            return new CandidateMatch(List.copyOf(exact), false);
         }
 
         if (!unresolvedType) {
             return new CandidateMatch(List.of(), false);
         }
 
-        List<ProviderCandidate> simple = providers.stream()
-                .filter(candidate -> candidate.exposesSimple(injectionType))
-                .toList();
-        return new CandidateMatch(simple, !simple.isEmpty());
+        List<ProviderCandidate> simple = new ArrayList<>();
+        for (ProviderCandidate candidate : providers) {
+            if (candidate.exposesSimple(injectionType)) {
+                simple.add(candidate);
+            }
+        }
+        List<ProviderCandidate> simpleMatches = List.copyOf(simple);
+        return new CandidateMatch(simpleMatches, !simpleMatches.isEmpty());
+    }
+
+    private List<ProviderCandidate> candidatesByAnyName(
+            List<ProviderCandidate> candidates,
+            List<String> names
+    ) {
+        List<ProviderCandidate> matched = new ArrayList<>();
+        for (ProviderCandidate candidate : candidates) {
+            if (candidate.matchesAnyName(names)) {
+                matched.add(candidate);
+            }
+        }
+        return List.copyOf(matched);
+    }
+
+    private List<ProviderCandidate> candidatesByName(
+            List<ProviderCandidate> candidates,
+            String name
+    ) {
+        List<ProviderCandidate> matched = new ArrayList<>();
+        for (ProviderCandidate candidate : candidates) {
+            if (candidate.matchesName(name)) {
+                matched.add(candidate);
+            }
+        }
+        return List.copyOf(matched);
+    }
+
+    private List<ProviderCandidate> primaryCandidates(
+            List<ProviderCandidate> candidates
+    ) {
+        List<ProviderCandidate> matched = new ArrayList<>();
+        for (ProviderCandidate candidate : candidates) {
+            if (candidate.primary()) {
+                matched.add(candidate);
+            }
+        }
+        return List.copyOf(matched);
+    }
+
+    private List<String> candidateProviderSymbols(
+            List<ProviderCandidate> candidates
+    ) {
+        // 성능 최적화: 관계 attrs 생성도 injection site별 반복 경로라 stream 대신 단순 루프로 중간 객체 생성을 줄인다.
+        List<String> symbols = new ArrayList<>(candidates.size());
+        for (ProviderCandidate candidate : candidates) {
+            symbols.add(candidate.siteSymbol());
+        }
+        return List.copyOf(symbols);
     }
 
     private List<ProviderCandidate> providerCandidates(
@@ -650,11 +706,16 @@ public class DiObservationResolver
                 stringList(attrs.get("qualifiers"))
         );
 
+        // 성능 최적화: unresolved type fallback은 provider 후보별 exposed type의 simple name을 반복 비교한다.
+        // 후보 생성 시 한 번만 계산해두면 injection site마다 문자열 분해와 stream 순회를 다시 하지 않아도 된다.
+        Set<String> exposedSimpleTypes = simpleTypeNames(exposedTypes);
+
         return new ProviderCandidate(
                 provider,
                 siteSymbol,
                 providedType,
                 Set.copyOf(exposedTypes),
+                exposedSimpleTypes,
                 beanNames,
                 qualifiers,
                 booleanValue(attrs.get("primary")),
@@ -982,6 +1043,21 @@ public class DiObservationResolver
         }
     }
 
+    private Set<String> simpleTypeNames(Set<String> types) {
+        if (types == null || types.isEmpty()) {
+            return Set.of();
+        }
+
+        Set<String> simpleNames = new LinkedHashSet<>();
+        for (String type : types) {
+            String simpleName = ProviderCandidate.simpleTypeName(type);
+            if (simpleName != null) {
+                simpleNames.add(simpleName);
+            }
+        }
+        return Set.copyOf(simpleNames);
+    }
+
     private String simpleName(String raw) {
         String normalized = normalizeType(raw);
         if (normalized == null) {
@@ -1203,6 +1279,7 @@ public class DiObservationResolver
             String siteSymbol,
             String providedType,
             Set<String> exposedTypes,
+            Set<String> exposedSimpleTypes,
             List<String> beanNames,
             List<String> qualifiers,
             boolean primary,
@@ -1217,9 +1294,7 @@ public class DiObservationResolver
             if (expected == null) {
                 return false;
             }
-            return exposedTypes.stream()
-                    .map(ProviderCandidate::simpleTypeName)
-                    .anyMatch(expected::equals);
+            return exposedSimpleTypes.contains(expected);
         }
 
         private boolean matchesAnyName(List<String> names) {
