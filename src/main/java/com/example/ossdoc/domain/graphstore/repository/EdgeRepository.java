@@ -2,7 +2,10 @@ package com.example.ossdoc.domain.graphstore.repository;
 
 import com.example.ossdoc.domain.graphstore.entity.Edge;
 import com.example.ossdoc.domain.graphstore.enums.EdgeType;
+import com.example.ossdoc.domain.graphstore.model.projection.EdgeLookupRow;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 
 import java.util.List;
 import java.util.Optional;
@@ -23,6 +26,27 @@ public interface EdgeRepository extends JpaRepository<Edge, Long> {
     );
 
     List<Edge> findAllByRun_RunId(String runId);
+
+    /**
+     * GraphStore ingest 중복 판별에 필요한 edge key 필드만 조회한다.
+     *
+     * <p>기존 findAllByRun_RunId는 Edge 엔티티 전체와 jsonb/연관 엔티티를 영속성 컨텍스트에 올린다.
+     * projection 조회로 기존 edge의 식별 정보만 읽고, evidence 연결 시 필요한 edge만 reference로 연결한다.</p>
+     */
+    @Query("""
+            select new com.example.ossdoc.domain.graphstore.model.projection.EdgeLookupRow(
+                e.edgeId,
+                e.edgeType,
+                fromSymbol.symbolId,
+                toSymbol.symbolId,
+                e.toRawRef
+            )
+            from Edge e
+            join e.fromSymbol fromSymbol
+            left join e.toSymbol toSymbol
+            where e.run.runId = :runId
+            """)
+    List<EdgeLookupRow> findLookupRowsByRunId(@Param("runId") String runId);
 
     /**
      * run 범위의 edge 총량을 집계한다.

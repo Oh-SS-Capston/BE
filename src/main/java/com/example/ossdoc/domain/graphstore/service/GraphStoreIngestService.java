@@ -29,6 +29,7 @@ import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedObservati
 import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedRelationFact;
 import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedSymbolFact;
 import com.example.ossdoc.domain.graphstore.model.projection.EdgeEvidenceLinkKeyRow;
+import com.example.ossdoc.domain.graphstore.model.projection.EdgeLookupRow;
 import com.example.ossdoc.domain.graphstore.model.projection.EvidenceLookupRow;
 import com.example.ossdoc.domain.graphstore.model.projection.SymbolEvidenceLinkKeyRow;
 import com.example.ossdoc.domain.graphstore.model.promotion.ObservationPromotionCandidateGenerationResult;
@@ -1665,15 +1666,14 @@ private void logSemanticPromotionGateDecision(
         );
         Map<String, String> symbolToOwnerMap = buildSymbolToOwnerMap(facts.symbols());
 
-        List<Edge> existingEdges = edgeRepository.findAllByRun_RunId(run.getRunId());
-        Map<EdgeKey, Edge> edgeLookup = new HashMap<>(Math.max(16, existingEdges.size() * 2));
-        for (Edge existing : existingEdges) {
-            edgeLookup.putIfAbsent(toEdgeKey(existing), existing);
-        }
+        Map<EdgeKey, Long> existingEdgeIdsByKey = loadExistingEdgeIdsByKey(run.getRunId());
+        Map<EdgeKey, Edge> newEdgeLookup = new HashMap<>();
 
         Set<String> existingEdgeEvidenceKeys = loadExistingEdgeEvidenceKeys(run.getRunId());
         List<Edge> newEdges = new ArrayList<>();
         Map<Edge, List<Evidence>> edgeEvidenceCandidates =
+                new LinkedHashMap<>();
+        Map<Long, List<Evidence>> existingEdgeEvidenceCandidates =
                 new LinkedHashMap<>();
 
         for (NormalizedRelationFact dto : facts.relations()) {
@@ -1703,13 +1703,17 @@ private void logSemanticPromotionGateDecision(
 
             Edge candidate = factsEdgeConverter.toEntity(run, dto, from, to);
             EdgeKey edgeKey = toEdgeKey(from, candidate);
-            Edge edge = edgeLookup.get(edgeKey);
+            Edge edge = newEdgeLookup.get(edgeKey);
+            Long existingEdgeId = null;
 
             if (edge == null) {
-                edge = candidate;
-                edgeLookup.put(edgeKey, edge);
-                newEdges.add(edge);
-                edgesSaved++;
+                existingEdgeId = existingEdgeIdsByKey.get(edgeKey);
+                if (existingEdgeId == null) {
+                    edge = candidate;
+                    newEdgeLookup.put(edgeKey, edge);
+                    newEdges.add(edge);
+                    edgesSaved++;
+                }
             }
 
             if (dto.evidenceIds() != null) {
@@ -1718,11 +1722,19 @@ private void logSemanticPromotionGateDecision(
                     if (evidence == null || evidence.getEvidenceId() == null) {
                         continue;
                     }
-                    addEdgeEvidenceCandidate(
-                            edgeEvidenceCandidates,
-                            edge,
-                            evidence
-                    );
+                    if (existingEdgeId != null) {
+                        addExistingEdgeEvidenceCandidate(
+                                existingEdgeEvidenceCandidates,
+                                existingEdgeId,
+                                evidence
+                        );
+                    } else {
+                        addEdgeEvidenceCandidate(
+                                edgeEvidenceCandidates,
+                                edge,
+                                evidence
+                        );
+                    }
                 }
             }
 
@@ -1740,11 +1752,19 @@ private void logSemanticPromotionGateDecision(
 
                 if (derivedEvidence != null
                         && derivedEvidence.getEvidenceId() != null) {
-                    addEdgeEvidenceCandidate(
-                            edgeEvidenceCandidates,
-                            edge,
-                            derivedEvidence
-                    );
+                    if (existingEdgeId != null) {
+                        addExistingEdgeEvidenceCandidate(
+                                existingEdgeEvidenceCandidates,
+                                existingEdgeId,
+                                derivedEvidence
+                        );
+                    } else {
+                        addEdgeEvidenceCandidate(
+                                edgeEvidenceCandidates,
+                                edge,
+                                derivedEvidence
+                        );
+                    }
                 }
             }
         }
@@ -1754,6 +1774,34 @@ private void logSemanticPromotionGateDecision(
         Set<String> newEdgeEvidenceKeys = new HashSet<>();
         List<EdgeEvidence> linkBuffer = new ArrayList<>(BATCH_SIZE);
         int edgeEvidenceSaved = 0;
+        for (Map.Entry<Long, List<Evidence>> entry : existingEdgeEvidenceCandidates.entrySet()) {
+            Long edgeId = entry.getKey();
+            if (edgeId == null) {
+                continue;
+            }
+
+            // 성능 최적화: 기존 edge는 중복 판별 시 전체 엔티티를 로딩하지 않고 edgeId만 보관한다.
+            // evidence 연결이 실제로 필요한 edge만 reference로 연결해 FK 정확성은 유지하면서 영속성 컨텍스트 부담을 줄인다.
+            Edge edgeReference = edgeRepository.getReferenceById(edgeId);
+            for (Evidence evidence : entry.getValue()) {
+                if (evidence == null || evidence.getEvidenceId() == null) {
+                    continue;
+                }
+
+                Long evidenceId = evidence.getEvidenceId();
+                String linkKey = toEdgeEvidenceLinkKey(edgeId, evidenceId);
+                if (existingEdgeEvidenceKeys.contains(linkKey) || !newEdgeEvidenceKeys.add(linkKey)) {
+                    continue;
+                }
+
+                EdgeEvidenceId edgeEvidenceId = new EdgeEvidenceId(edgeId, evidenceId);
+                linkBuffer.add(new EdgeEvidence(edgeEvidenceId, edgeReference, evidence));
+                if (linkBuffer.size() >= BATCH_SIZE) {
+                    edgeEvidenceSaved += flushEdgeEvidenceBuffer(linkBuffer);
+                }
+            }
+        }
+
         for (Map.Entry<Edge, List<Evidence>> entry : edgeEvidenceCandidates.entrySet()) {
             Edge edge = entry.getKey();
             if (edge == null || edge.getEdgeId() == null) {
@@ -1794,6 +1842,29 @@ private void logSemanticPromotionGateDecision(
         return new EdgeSaveResult(edgesSaved, edgeEvidenceSaved, skippedRelations);
     }
 
+    /**
+     * run 범위 기존 edge를 중복 판별 key와 edgeId만으로 적재한다.
+     */
+    private Map<EdgeKey, Long> loadExistingEdgeIdsByKey(String runId) {
+        List<EdgeLookupRow> existingEdges = edgeRepository.findLookupRowsByRunId(runId);
+        Map<EdgeKey, Long> edgeIdsByKey = new HashMap<>(Math.max(16, existingEdges.size() * 2));
+
+        for (EdgeLookupRow row : existingEdges) {
+            if (row == null || row.edgeId() == null || row.fromSymbolId() == null || row.edgeType() == null) {
+                continue;
+            }
+
+            // 성능 최적화: 기존 edge 중복 판별에는 Edge 전체 엔티티가 아니라
+            // from/type/to 또는 rawRef로 구성한 동일한 EdgeKey와 edgeId만 필요하다.
+            edgeIdsByKey.putIfAbsent(
+                    toEdgeKey(row),
+                    row.edgeId()
+            );
+        }
+
+        return edgeIdsByKey;
+    }
+
     private void addEdgeEvidenceCandidate(
             Map<Edge, List<Evidence>> edgeEvidenceCandidates,
             Edge edge,
@@ -1807,6 +1878,22 @@ private void logSemanticPromotionGateDecision(
         // edge별 evidence 목록으로 묶어 새 edge 저장 후 같은 중복 key 기준으로 연결한다.
         edgeEvidenceCandidates
                 .computeIfAbsent(edge, ignored -> new ArrayList<>())
+                .add(evidence);
+    }
+
+    private void addExistingEdgeEvidenceCandidate(
+            Map<Long, List<Evidence>> existingEdgeEvidenceCandidates,
+            Long edgeId,
+            Evidence evidence
+    ) {
+        if (edgeId == null || evidence == null) {
+            return;
+        }
+
+        // 성능 최적화: 기존 edge 후보는 Edge 엔티티 대신 edgeId 기준으로 묶는다.
+        // 연결 저장 시점에는 같은 edgeId로 reference만 얻어 edge_evidence FK를 정확히 유지한다.
+        existingEdgeEvidenceCandidates
+                .computeIfAbsent(edgeId, ignored -> new ArrayList<>())
                 .add(evidence);
     }
 
@@ -2010,6 +2097,11 @@ private void logSemanticPromotionGateDecision(
         String toSymbolId = edge.getToSymbol() == null ? null : edge.getToSymbol().getSymbolId();
         String toRawRefCanonical = toSymbolId == null ? canonicalJson(edge.getToRawRef()) : null;
         return new EdgeKey(from.getSymbolId(), edge.getEdgeType(), toSymbolId, toRawRefCanonical);
+    }
+
+    private EdgeKey toEdgeKey(EdgeLookupRow row) {
+        String toRawRefCanonical = row.toSymbolId() == null ? canonicalJson(row.toRawRef()) : null;
+        return new EdgeKey(row.fromSymbolId(), row.edgeType(), row.toSymbolId(), toRawRefCanonical);
     }
 
     /**
