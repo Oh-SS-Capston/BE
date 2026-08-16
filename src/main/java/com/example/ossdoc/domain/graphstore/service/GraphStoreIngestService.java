@@ -70,6 +70,8 @@ import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -118,6 +120,9 @@ public class GraphStoreIngestService {
             semanticPromotionResponsibilityGate;
 
     private final ObjectMapper objectMapper;
+
+    @PersistenceContext
+    private EntityManager entityManager;
 
     /**
      * Spring이 사용하는 전체 의존성 생성자.
@@ -1420,6 +1425,7 @@ private void logSemanticPromotionGateDecision(
         // 성능 최적화: symbol_evidence 후보를 pending 리스트로 끝까지 쌓지 않고, 발견 즉시 청크 단위로 저장 후 버퍼를 비운다.
         // 기존/신규 중복 key 판별은 그대로 수행하므로 GraphStore의 symbol 근거 연결 정확성은 유지된다.
         symbolEvidenceRepository.saveAll(linkBuffer);
+        flushAndDetachAll(linkBuffer);
         linkBuffer.clear();
         return saved;
     }
@@ -1934,6 +1940,7 @@ private void logSemanticPromotionGateDecision(
         // 성능 최적화: edge_evidence 전체 저장 리스트를 끝까지 들고 있지 않고, 변환 즉시 청크 단위로 저장 후 버퍼를 비운다.
         // 중복 key 판별과 저장 조건은 그대로 유지하므로 GraphStore의 근거 연결 정확성은 바꾸지 않는다.
         edgeEvidenceRepository.saveAll(linkBuffer);
+        flushAndDetachAll(linkBuffer);
         linkBuffer.clear();
         return saved;
     }
@@ -2064,7 +2071,7 @@ private void logSemanticPromotionGateDecision(
                         evidenceMap
                 );
 
-        saveAllInBatches(
+        saveAllInBatchesAndDetach(
                 linkResult.links(),
                 BATCH_SIZE,
                 observationEvidenceRepository::saveAll
@@ -2074,6 +2081,9 @@ private void logSemanticPromotionGateDecision(
         int missingEvidenceReferences = linkResult.missingEvidenceReferences();
         int duplicateEvidenceReferences = linkResult.duplicateEvidenceReferences();
 
+        // 성능 최적화: observation chunk는 evidence 연결까지 끝나면 이후 단계에서 다시 수정하지 않는다.
+        // 청크 단위 flush/detach로 Hibernate 영속성 컨텍스트에 observation이 누적되는 것을 막는다.
+        flushAndDetachAll(observationBuffer);
         observationBuffer.clear();
         factBuffer.clear();
 
@@ -2139,6 +2149,40 @@ private void logSemanticPromotionGateDecision(
         for (int start = 0; start < values.size(); start += batchSize) {
             int end = Math.min(start + batchSize, values.size());
             saver.accept(values.subList(start, end));
+        }
+    }
+
+    /**
+     * 저장한 청크를 즉시 flush/detach해 영속성 컨텍스트 누적을 줄인다.
+     */
+    private <T> void saveAllInBatchesAndDetach(
+            List<T> values,
+            int batchSize,
+            Consumer<List<T>> saver
+    ) {
+        if (values == null || values.isEmpty()) {
+            return;
+        }
+        for (int start = 0; start < values.size(); start += batchSize) {
+            int end = Math.min(start + batchSize, values.size());
+            List<T> chunk = values.subList(start, end);
+            saver.accept(chunk);
+            flushAndDetachAll(chunk);
+        }
+    }
+
+    private void flushAndDetachAll(List<?> entities) {
+        if (entityManager == null || entities == null || entities.isEmpty()) {
+            return;
+        }
+
+        // 성능 최적화: 전체 clear()는 symbol/evidence/edge 같은 후속 단계용 managed entity까지 분리할 수 있다.
+        // 저장이 끝난 청크 엔티티만 detach해 GraphStore 연결 정확성은 유지하면서 heap peak를 낮춘다.
+        entityManager.flush();
+        for (Object entity : entities) {
+            if (entity != null && entityManager.contains(entity)) {
+                entityManager.detach(entity);
+            }
         }
     }
 
