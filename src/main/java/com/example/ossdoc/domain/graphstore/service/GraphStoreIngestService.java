@@ -1660,7 +1660,8 @@ private void logSemanticPromotionGateDecision(
 
         Set<String> existingEdgeEvidenceKeys = loadExistingEdgeEvidenceKeys(run.getRunId());
         List<Edge> newEdges = new ArrayList<>();
-        List<PendingEdgeEvidence> pendingEdgeEvidence = new ArrayList<>();
+        Map<Edge, List<Evidence>> edgeEvidenceCandidates =
+                new LinkedHashMap<>();
 
         for (NormalizedRelationFact dto : facts.relations()) {
             if (dto.srcSymbol() == null || dto.srcSymbol().isBlank()) {
@@ -1704,7 +1705,11 @@ private void logSemanticPromotionGateDecision(
                     if (evidence == null || evidence.getEvidenceId() == null) {
                         continue;
                     }
-                    pendingEdgeEvidence.add(new PendingEdgeEvidence(edge, evidence));
+                    addEdgeEvidenceCandidate(
+                            edgeEvidenceCandidates,
+                            edge,
+                            evidence
+                    );
                 }
             }
 
@@ -1722,8 +1727,10 @@ private void logSemanticPromotionGateDecision(
 
                 if (derivedEvidence != null
                         && derivedEvidence.getEvidenceId() != null) {
-                    pendingEdgeEvidence.add(
-                            new PendingEdgeEvidence(edge, derivedEvidence)
+                    addEdgeEvidenceCandidate(
+                            edgeEvidenceCandidates,
+                            edge,
+                            derivedEvidence
                     );
                 }
             }
@@ -1734,22 +1741,29 @@ private void logSemanticPromotionGateDecision(
         Set<String> newEdgeEvidenceKeys = new HashSet<>();
         List<EdgeEvidence> linkBuffer = new ArrayList<>(BATCH_SIZE);
         int edgeEvidenceSaved = 0;
-        for (PendingEdgeEvidence pending : pendingEdgeEvidence) {
-            if (pending.edge() == null || pending.edge().getEdgeId() == null || pending.evidence() == null) {
+        for (Map.Entry<Edge, List<Evidence>> entry : edgeEvidenceCandidates.entrySet()) {
+            Edge edge = entry.getKey();
+            if (edge == null || edge.getEdgeId() == null) {
                 continue;
             }
 
-            Long edgeId = pending.edge().getEdgeId();
-            Long evidenceId = pending.evidence().getEvidenceId();
-            String linkKey = toEdgeEvidenceLinkKey(edgeId, evidenceId);
-            if (existingEdgeEvidenceKeys.contains(linkKey) || !newEdgeEvidenceKeys.add(linkKey)) {
-                continue;
-            }
+            for (Evidence evidence : entry.getValue()) {
+                if (evidence == null || evidence.getEvidenceId() == null) {
+                    continue;
+                }
 
-            EdgeEvidenceId edgeEvidenceId = new EdgeEvidenceId(edgeId, evidenceId);
-            linkBuffer.add(new EdgeEvidence(edgeEvidenceId, pending.edge(), pending.evidence()));
-            if (linkBuffer.size() >= BATCH_SIZE) {
-                edgeEvidenceSaved += flushEdgeEvidenceBuffer(linkBuffer);
+                Long edgeId = edge.getEdgeId();
+                Long evidenceId = evidence.getEvidenceId();
+                String linkKey = toEdgeEvidenceLinkKey(edgeId, evidenceId);
+                if (existingEdgeEvidenceKeys.contains(linkKey) || !newEdgeEvidenceKeys.add(linkKey)) {
+                    continue;
+                }
+
+                EdgeEvidenceId edgeEvidenceId = new EdgeEvidenceId(edgeId, evidenceId);
+                linkBuffer.add(new EdgeEvidence(edgeEvidenceId, edge, evidence));
+                if (linkBuffer.size() >= BATCH_SIZE) {
+                    edgeEvidenceSaved += flushEdgeEvidenceBuffer(linkBuffer);
+                }
             }
         }
 
@@ -1765,6 +1779,22 @@ private void logSemanticPromotionGateDecision(
         );
 
         return new EdgeSaveResult(edgesSaved, edgeEvidenceSaved, skippedRelations);
+    }
+
+    private void addEdgeEvidenceCandidate(
+            Map<Edge, List<Evidence>> edgeEvidenceCandidates,
+            Edge edge,
+            Evidence evidence
+    ) {
+        if (edge == null || evidence == null) {
+            return;
+        }
+
+        // 성능 최적화: edge-evidence 후보를 PendingEdgeEvidence record 리스트로 끝까지 쌓지 않고,
+        // edge별 evidence 목록으로 묶어 새 edge 저장 후 같은 중복 key 기준으로 연결한다.
+        edgeEvidenceCandidates
+                .computeIfAbsent(edge, ignored -> new ArrayList<>())
+                .add(evidence);
     }
 
     /**
@@ -2222,9 +2252,6 @@ private void logSemanticPromotionGateDecision(
             String toSymbolId,
             String toRawRefCanonical
     ) {
-    }
-
-    private record PendingEdgeEvidence(Edge edge, Evidence evidence) {
     }
 
 }
