@@ -55,6 +55,9 @@ import java.util.concurrent.atomic.AtomicReference;
  *
  * 필수 단계 실패: FAILED
  * 선택 단계 실패: PARTIAL_SUCCESS
+ *
+ * [임시] LLM 단계는 모델 교체 작업 동안 실행하지 않고 SKIPPED로만 기록합니다.
+ * 실제 파이프라인은 RULE 단계까지만 진행됩니다.
  */
 @Slf4j
 @Service
@@ -273,33 +276,44 @@ public class RunPipelineExecutor {
             );
 
             /*
-             * RULE이 실패하면 LLM 입력 전제가 깨지므로,
-             * LLM을 억지로 실행하지 않고 SKIPPED로 남깁니다.
+             * [임시 비활성화] LLM 모델 교체 작업 동안 파이프라인에서 LLM 단계를 실행하지 않습니다.
+             *
+             * - LLM은 선택 단계이므로 optionalFailures에 넣지 않고 SKIPPED로만 남깁니다.
+             *   따라서 최종 상태(SUCCESS / PARTIAL_SUCCESS) 판정에는 영향이 없습니다.
+             * - 다만 LLM 산출물 5종이 생성되지 않으므로
+             *   AnalysisCachePublishService.REQUIRED_READY_ARTIFACT_KINDS 조건을 만족하지 못해
+             *   READY 캐시가 발행되지 않습니다. 비활성화 기간에는 동일 repo/commit 재요청도
+             *   캐시 miss로 전체 재분석됩니다. (의도된 동작)
+             *
+             * 복구 방법: 아래 skipStep 호출을 지우고 주석 처리된 원래 블록을 되살리면 됩니다.
+             *
+             * // RULE이 실패하면 LLM 입력 전제가 깨지므로, LLM을 억지로 실행하지 않고 SKIPPED로 남깁니다.
+             * if (ruleSucceeded) {
+             *     executeOptional(
+             *             jobId,
+             *             RunStage.LLM,
+             *             "LLM 분석 결과를 생성 중입니다.",
+             *             "LLM 결과 생성에 실패했습니다.",
+             *             optionalFailures,
+             *             () -> llmService.refine(
+             *                     new LlmRequest(runId, null, null, true, true)
+             *             )
+             *     );
+             * } else {
+             *     stepService.skipStep(
+             *             jobId,
+             *             RunStage.LLM,
+             *             "규칙 후보 생성 실패로 LLM 결과 생성을 건너뛰었습니다."
+             *     );
+             * }
              */
-            if (ruleSucceeded) {
-                executeOptional(
-                        jobId,
-                        RunStage.LLM,
-                        "LLM 분석 결과를 생성 중입니다.",
-                        "LLM 결과 생성에 실패했습니다.",
-                        optionalFailures,
-                        () -> llmService.refine(
-                                new LlmRequest(
-                                        runId,
-                                        null,
-                                        null,
-                                        true,
-                                        true
-                                )
-                        )
-                );
-            } else {
-                stepService.skipStep(
-                        jobId,
-                        RunStage.LLM,
-                        "규칙 후보 생성 실패로 LLM 결과 생성을 건너뛰었습니다."
-                );
-            }
+            stepService.skipStep(
+                    jobId,
+                    RunStage.LLM,
+                    ruleSucceeded
+                            ? "LLM 모델 교체 작업으로 LLM 결과 생성을 일시 비활성화했습니다."
+                            : "규칙 후보 생성 실패로 LLM 결과 생성을 건너뛰었습니다."
+            );
 
             BuildMode buildMode = buildModeRef.get();
             if (buildMode == BuildMode.FAILED) {
