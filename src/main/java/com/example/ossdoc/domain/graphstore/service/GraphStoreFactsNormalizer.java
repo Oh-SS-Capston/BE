@@ -21,6 +21,7 @@ import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -660,14 +661,17 @@ public class GraphStoreFactsNormalizer {
     /**
      * SymbolFact의 구조 정보를 이용해 생성한 relation.
      *
-     * origin은 근거가 된 symbol의 수집 출처를 사용하고,
+     * origin은 근거가 된 symbol의 수집 출처를 relation 도메인으로 변환해 사용하고,
      * derivation은 derived로 별도 기록한다.
+     *
+     * symbol에서 파생되는 모든 relation(EXTENDS/IMPLEMENTS/CONTAINS/HAS_FIELD/
+     * RETURNS/PARAM/THROWS)은 이 메서드를 거치므로, 변환을 여기 한 곳에 둔다.
      */
     private NormalizedRelationFact makeDerivedRelation(
             String kind,
             String sourceSymbol,
             String destinationSymbol,
-            String origin,
+            String symbolOrigin,
             BigDecimal confidence
     ) {
         return new NormalizedRelationFact(
@@ -675,7 +679,7 @@ public class GraphStoreFactsNormalizer {
                 sourceSymbol,
                 destinationSymbol,
                 null,
-                origin,
+                toRelationOrigin(symbolOrigin),
                 "derived",
                 null,
                 null,
@@ -684,6 +688,42 @@ public class GraphStoreFactsNormalizer {
                 Map.of(),
                 List.of()
         );
+    }
+
+    /**
+     * symbol의 origin 값을 relation의 origin 값으로 변환한다.
+     *
+     * [왜 변환이 필요한가]
+     * 두 값 집합은 서로 다른 enum이다.
+     *   symbol   : SymbolOriginKind  = ast, bytecode, generated, ast_and_bytecode
+     *   relation : FactsEdgeConverter.toOriginKind가 받는 집합
+     *              = ast, bytecode, merged(ast_and_bytecode), contract, derived, observed, resource
+     * 대부분 이름이 겹쳐 그냥 넘겨도 통했지만, generated는 relation 쪽에 대응값이 없다.
+     * 그대로 넘기면 edge 변환 단계에서 다음으로 터진다.
+     *   IllegalArgumentException: Unsupported relation origin: generated
+     * 실제로 record를 쓰는 저장소(JUnit)에서 record 컴포넌트 필드 105개가
+     * origin=generated로 수집되어 HAS_FIELD/CONTAINS 파생 중 GRAPHSTORE 전체가 죽었다.
+     *
+     * [generated를 derived로 보내는 이유]
+     * 여기서 만드는 relation은 이미 derivation="derived"인 파생 관계다.
+     * "컴파일러가 생성한 심볼"이라는 정보는 symbol 쪽 origin에 그대로 남아 있으므로
+     * relation 쪽에서 잃는 정보가 없다.
+     *
+     * 모르는 값은 임의로 통과시키지 않고 derived로 모은다.
+     * relation origin 도메인에 없는 값이 edge 변환까지 흘러가 파이프라인을 죽이는 것보다,
+     * 파생 관계라는 사실만 남기는 편이 안전하다.
+     */
+    private String toRelationOrigin(String symbolOrigin) {
+        if (symbolOrigin == null || symbolOrigin.isBlank()) {
+            return "derived";
+        }
+
+        return switch (symbolOrigin.trim().toLowerCase(Locale.ROOT)) {
+            case "ast" -> "ast";
+            case "bytecode" -> "bytecode";
+            case "ast_and_bytecode" -> "ast_and_bytecode";
+            default -> "derived";
+        };
     }
 
     // ─────────────────────────────────────────────────────────────────────────
