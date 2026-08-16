@@ -1326,7 +1326,8 @@ private void logSemanticPromotionGateDecision(
 
         Set<String> existingSymbolEvidenceKeys = loadExistingSymbolEvidenceKeys(run.getRunId());
         Set<String> newSymbolEvidenceKeys = new HashSet<>();
-        List<PendingSymbolEvidence> pendingSymbolEvidence = new ArrayList<>();
+        List<SymbolEvidence> symbolEvidenceBuffer = new ArrayList<>(BATCH_SIZE);
+        int symbolEvidenceSaved = 0;
 
         for (NormalizedSymbolFact dto : facts.symbols()) {
             SymbolEntity current = symbolMap.get(dto.symbol());
@@ -1363,24 +1364,23 @@ private void logSemanticPromotionGateDecision(
                     }
                     String linkKey = current.getSymbolId() + ":" + evidence.getEvidenceId();
                     if (!existingSymbolEvidenceKeys.contains(linkKey) && newSymbolEvidenceKeys.add(linkKey)) {
-                        pendingSymbolEvidence.add(new PendingSymbolEvidence(current, evidence));
+                        SymbolEvidenceId seId = new SymbolEvidenceId(
+                                current.getSymbolId(),
+                                evidence.getEvidenceId()
+                        );
+                        symbolEvidenceBuffer.add(new SymbolEvidence(
+                                seId,
+                                current,
+                                evidence
+                        ));
+                        if (symbolEvidenceBuffer.size() >= BATCH_SIZE) {
+                            symbolEvidenceSaved += flushSymbolEvidenceBuffer(symbolEvidenceBuffer);
+                        }
                     }
                 }
             }
         }
 
-        List<SymbolEvidence> symbolEvidenceBuffer = new ArrayList<>(BATCH_SIZE);
-        int symbolEvidenceSaved = 0;
-        for (PendingSymbolEvidence pending : pendingSymbolEvidence) {
-            SymbolEvidenceId seId = new SymbolEvidenceId(
-                    pending.symbol().getSymbolId(),
-                    pending.evidence().getEvidenceId()
-            );
-            symbolEvidenceBuffer.add(new SymbolEvidence(seId, pending.symbol(), pending.evidence()));
-            if (symbolEvidenceBuffer.size() >= BATCH_SIZE) {
-                symbolEvidenceSaved += flushSymbolEvidenceBuffer(symbolEvidenceBuffer);
-            }
-        }
         symbolEvidenceSaved += flushSymbolEvidenceBuffer(symbolEvidenceBuffer);
 
         log.info(
@@ -1402,8 +1402,8 @@ private void logSemanticPromotionGateDecision(
         }
 
         int saved = linkBuffer.size();
-        // 성능 최적화: symbol_evidence 전체 저장 리스트를 끝까지 들고 있지 않고, 변환 즉시 청크 단위로 저장 후 버퍼를 비운다.
-        // 기존/신규 중복 key 판별은 앞 단계에서 그대로 수행하므로 GraphStore의 symbol 근거 연결 정확성은 유지된다.
+        // 성능 최적화: symbol_evidence 후보를 pending 리스트로 끝까지 쌓지 않고, 발견 즉시 청크 단위로 저장 후 버퍼를 비운다.
+        // 기존/신규 중복 key 판별은 그대로 수행하므로 GraphStore의 symbol 근거 연결 정확성은 유지된다.
         symbolEvidenceRepository.saveAll(linkBuffer);
         linkBuffer.clear();
         return saved;
@@ -2227,6 +2227,4 @@ private void logSemanticPromotionGateDecision(
     private record PendingEdgeEvidence(Edge edge, Evidence evidence) {
     }
 
-    private record PendingSymbolEvidence(SymbolEntity symbol, Evidence evidence) {
-    }
 }
