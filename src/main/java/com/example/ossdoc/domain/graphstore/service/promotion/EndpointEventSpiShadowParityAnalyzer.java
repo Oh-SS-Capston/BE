@@ -12,7 +12,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -57,8 +56,10 @@ public final class EndpointEventSpiShadowParityAnalyzer {
                 ? ShadowFactsIndex.from(null)
                 : factsIndex;
         // 공통 relation 인덱스에서 대상 kind만 꺼내 비교해 전체 relations 반복 순회를 줄인다.
+        // 성능 최적화: relationByKeyForKinds가 이미 remove 가능한 새 Map을 반환하므로 추가 복사를 생략한다.
+        // parity 비교 로직은 동일하게 extractionByKey.remove(key)를 사용하고, 중간 heap 사용량만 줄인다.
         Map<String, NormalizedRelationFact> extractionByKey =
-                new LinkedHashMap<>(safeIndex.relationByKeyForKinds(TARGET_RELATION_KINDS));
+                safeIndex.relationByKeyForKinds(TARGET_RELATION_KINDS);
         int extractionCount = extractionByKey.size();
 
         List<ObservationPromotionShadowCandidate> candidates =

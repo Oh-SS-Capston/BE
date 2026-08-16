@@ -12,7 +12,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -57,8 +56,10 @@ public final class BeanConfigurationShadowParityAnalyzer {
                 ? ShadowFactsIndex.from(null)
                 : factsIndex;
         // 공통 relation 인덱스를 재사용해 parity 단계의 전체 relations 반복 순회를 줄인다.
+        // 성능 최적화: relationByKeyForKinds가 이미 remove 가능한 새 Map을 반환하므로 추가 복사를 생략한다.
+        // shadow parity 단계의 비교 방식은 유지하고, 대형 프로젝트에서 relation key map 중복 생성을 줄인다.
         Map<String, NormalizedRelationFact> extractionByKey =
-                new LinkedHashMap<>(safeIndex.relationByKeyForKinds(TARGET_RELATION_KINDS));
+                safeIndex.relationByKeyForKinds(TARGET_RELATION_KINDS);
         int extractionRelationCount = extractionByKey.size();
 
         List<ObservationPromotionShadowCandidate> candidates =

@@ -12,7 +12,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -51,8 +50,10 @@ public final class DiShadowParityAnalyzer {
                 ? ShadowFactsIndex.from(null)
                 : factsIndex;
         // 공통 relation 인덱스를 재사용해 parity 단계의 전체 relations 반복 순회를 줄인다.
+        // 성능 최적화: relationByKeyForKinds가 이미 remove 가능한 새 Map을 반환하므로 추가 복사를 생략한다.
+        // DI parity의 누락/불일치 판정은 유지하면서 중간 Map 복사 비용만 제거한다.
         Map<String, NormalizedRelationFact> extractionByKey =
-                new LinkedHashMap<>(safeIndex.relationByKeyForKinds(Set.of(TARGET_KIND)));
+                safeIndex.relationByKeyForKinds(Set.of(TARGET_KIND));
         int extractionCount = extractionByKey.size();
 
         List<ObservationPromotionShadowCandidate> candidates =

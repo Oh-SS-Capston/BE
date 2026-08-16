@@ -36,13 +36,13 @@ public record ShadowFactsIndex(
 
         List<NormalizedObservationFact> observations = facts.observations() == null
                 ? List.of()
-                : List.copyOf(facts.observations());
+                : readOnlyView(facts.observations());
         List<NormalizedSymbolFact> symbols = facts.symbols() == null
                 ? List.of()
-                : List.copyOf(facts.symbols());
+                : readOnlyView(facts.symbols());
         List<NormalizedRelationFact> relations = facts.relations() == null
                 ? List.of()
-                : List.copyOf(facts.relations());
+                : readOnlyView(facts.relations());
 
         Map<String, NormalizedSymbolFact> symbolsById = new LinkedHashMap<>();
         Map<String, List<NormalizedSymbolFact>> symbolsByKind = symbols.stream()
@@ -104,6 +104,14 @@ public record ShadowFactsIndex(
             }
         }
         return result;
+    }
+
+    private static <T> List<T> readOnlyView(List<T> values) {
+        // 성능 최적화: facts 원본 리스트는 ingest 동안 변경하지 않으므로 shadow index에서 배열을 한 번 더 복사하지 않는다.
+        // 읽기 전용 view만 씌워 기존 외부 수정 방지 계약은 유지하면서 대형 프로젝트의 중간 heap 사용량을 낮춘다.
+        return values.isEmpty()
+                ? List.of()
+                : Collections.unmodifiableList(values);
     }
 
     private List<NormalizedRelationFact> relationsOfKind(String kind) {
