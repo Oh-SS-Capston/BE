@@ -28,6 +28,7 @@ import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedFactsDocu
 import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedObservationFact;
 import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedRelationFact;
 import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedSymbolFact;
+import com.example.ossdoc.domain.graphstore.model.projection.EvidenceLookupRow;
 import com.example.ossdoc.domain.graphstore.model.promotion.ObservationPromotionCandidateGenerationResult;
 import com.example.ossdoc.domain.graphstore.model.promotion.ObservationPromotionCandidateParityIssue;
 import com.example.ossdoc.domain.graphstore.model.promotion.ObservationPromotionCandidateParityReport;
@@ -1073,12 +1074,16 @@ private void logSemanticPromotionGateDecision(
                         signatureLookup
                 );
 
-        List<Evidence> existing =
-                evidenceRepository.findAllByRun_RunId(
+        List<EvidenceLookupRow> existing =
+                evidenceRepository.findLookupRowsByRunId(
                         run.getRunId()
                 );
 
-        for (Evidence evidence : existing) {
+        for (EvidenceLookupRow row : existing) {
+            Evidence evidence = toLookupEvidence(
+                    run,
+                    row
+            );
             registerEvidenceLookup(
                     indexes,
                     evidence
@@ -1086,6 +1091,50 @@ private void logSemanticPromotionGateDecision(
         }
 
         return indexes;
+    }
+
+    /**
+     * projection으로 조회한 기존 evidence row를 중복 판별용 경량 객체로 재구성한다.
+     */
+    private Evidence toLookupEvidence(
+            RepoRun run,
+            EvidenceLookupRow row
+    ) {
+        if (row == null) {
+            return null;
+        }
+
+        FileIndex file = row.fileId() == null
+                ? null
+                : new FileIndex(
+                        row.fileId(),
+                        run,
+                        null,
+                        row.filePath(),
+                        row.fileType() == null
+                                ? detectFileType(row.filePath())
+                                : row.fileType(),
+                        null,
+                        null
+                );
+
+        // 성능 최적화: 기존 evidence 중복 판별에는 Hibernate가 관리하는 전체 Entity가 필요하지 않다.
+        // projection row에서 필요한 값만 담은 가벼운 Evidence를 재구성해 text/jsonb 필드와 연관 로딩 부담을 줄인다.
+        return new Evidence(
+                row.evidenceId(),
+                run,
+                row.evidenceType(),
+                file,
+                row.startLine(),
+                row.startCol(),
+                row.endLine(),
+                row.endCol(),
+                row.symbol(),
+                row.snippet(),
+                row.hash(),
+                row.rawId(),
+                row.attrs()
+        );
     }
 
     /**
