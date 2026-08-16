@@ -1289,7 +1289,8 @@ private void logSemanticPromotionGateDecision(
             Map<String, FileIndex> sourceFileCache
     ) {
         Map<String, SymbolEntity> symbolMap = new LinkedHashMap<>();
-        Map<String, SymbolEntity> existingSymbolsByQualifiedName = loadExistingSymbolsByQualifiedName(run);
+        Map<String, SymbolEntity> existingSymbolsByQualifiedName =
+                loadExistingSymbolsByQualifiedName(run, facts.symbols());
         ensureFileIndexes(
                 run,
                 facts.symbols().stream()
@@ -1424,11 +1425,35 @@ private void logSemanticPromotionGateDecision(
     }
 
     /**
-     * run 범위 symbol을 qualifiedName 기준 맵으로 구성한다.
+     * 현재 facts에 등장한 기존 symbol만 qualifiedName 기준 맵으로 구성한다.
      */
-    private Map<String, SymbolEntity> loadExistingSymbolsByQualifiedName(RepoRun run) {
+    private Map<String, SymbolEntity> loadExistingSymbolsByQualifiedName(
+            RepoRun run,
+            List<NormalizedSymbolFact> symbols
+    ) {
         Map<String, SymbolEntity> cache = new HashMap<>();
-        List<SymbolEntity> existingSymbols = symbolRepository.findAllByRun_RunId(run.getRunId());
+        if (symbols == null || symbols.isEmpty()) {
+            return cache;
+        }
+
+        Set<String> qualifiedNames = new LinkedHashSet<>();
+        for (NormalizedSymbolFact symbol : symbols) {
+            if (symbol == null || symbol.symbol() == null || symbol.symbol().isBlank()) {
+                continue;
+            }
+            qualifiedNames.add(symbol.symbol());
+        }
+
+        if (qualifiedNames.isEmpty()) {
+            return cache;
+        }
+
+        // 성능 최적화: ingest는 현재 facts에 포함된 symbol만 생성/갱신/연결한다.
+        // run 전체 symbol을 올리지 않고 대상 qualifiedName으로 제한해, 기존 정확성은 유지하면서 불필요한 관리 엔티티 적재를 줄인다.
+        List<SymbolEntity> existingSymbols = symbolRepository.findAllForIngestByRunIdAndQualifiedNameIn(
+                run.getRunId(),
+                qualifiedNames
+        );
         for (SymbolEntity symbol : existingSymbols) {
             if (symbol.getQualifiedName() != null) {
                 cache.putIfAbsent(symbol.getQualifiedName(), symbol);

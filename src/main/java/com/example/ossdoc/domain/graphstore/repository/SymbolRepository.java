@@ -8,6 +8,7 @@ import org.springframework.data.repository.query.Param;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 public interface SymbolRepository extends JpaRepository<SymbolEntity, String> {
 
@@ -17,6 +18,24 @@ public interface SymbolRepository extends JpaRepository<SymbolEntity, String> {
      * 성능 최적화를 위해 run 범위 symbol을 한 번에 로드한다.
      */
     List<SymbolEntity> findAllByRun_RunId(String runId);
+
+    /**
+     * GraphStore ingest에서 이번 facts에 등장한 symbol만 관리 엔티티로 조회한다.
+     *
+     * <p>symbol은 module/sourceFile/owner/source span 갱신이 필요하므로 projection으로 대체하지 않는다.
+     * 대신 run 전체 symbol을 올리지 않고 현재 facts의 qualified name 범위로 제한해 대형 프로젝트의 heap peak를 낮춘다.</p>
+     */
+    @Query("""
+            select s
+            from SymbolEntity s
+            left join fetch s.sourceFile
+            where s.run.runId = :runId
+              and s.qualifiedName in :qualifiedNames
+            """)
+    List<SymbolEntity> findAllForIngestByRunIdAndQualifiedNameIn(
+            @Param("runId") String runId,
+            @Param("qualifiedNames") Set<String> qualifiedNames
+    );
 
     List<SymbolEntity> findAllByRun_RunIdAndSymbolKind(String runId, SymbolKind symbolkind);
 
