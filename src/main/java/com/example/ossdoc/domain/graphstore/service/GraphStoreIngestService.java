@@ -28,6 +28,7 @@ import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedFactsDocu
 import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedObservationFact;
 import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedRelationFact;
 import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedSymbolFact;
+import com.example.ossdoc.domain.graphstore.model.projection.EdgeEvidenceLinkKeyRow;
 import com.example.ossdoc.domain.graphstore.model.projection.EvidenceLookupRow;
 import com.example.ossdoc.domain.graphstore.model.projection.SymbolEvidenceLinkKeyRow;
 import com.example.ossdoc.domain.graphstore.model.promotion.ObservationPromotionCandidateGenerationResult;
@@ -1833,13 +1834,15 @@ private void logSemanticPromotionGateDecision(
      * edge_id IN(...) 대신 run_id JOIN으로 조회해 PostgreSQL 65,535 파라미터 한도를 우회한다.
      */
     private Set<String> loadExistingEdgeEvidenceKeys(String runId) {
-        List<EdgeEvidence> existingLinks = edgeEvidenceRepository.findAllByEdge_Run_RunId(runId);
+        List<EdgeEvidenceLinkKeyRow> existingLinks =
+                edgeEvidenceRepository.findLinkKeysByRunId(runId);
         Set<String> keys = new HashSet<>(Math.max(16, existingLinks.size() * 2));
-        for (EdgeEvidence link : existingLinks) {
-            if (link.getId() == null) {
+        for (EdgeEvidenceLinkKeyRow link : existingLinks) {
+            if (link.edgeId() == null || link.evidenceId() == null) {
                 continue;
             }
-            keys.add(toEdgeEvidenceLinkKey(link.getId().getEdgeId(), link.getId().getEvidenceId()));
+            // 성능 최적화: 기존 edge_evidence는 중복 방지 key만 필요하므로 엔티티 전체 로딩 없이 key 문자열만 구성한다.
+            keys.add(toEdgeEvidenceLinkKey(link.edgeId(), link.evidenceId()));
         }
         return keys;
     }
