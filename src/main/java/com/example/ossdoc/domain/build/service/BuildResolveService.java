@@ -60,6 +60,12 @@ import java.util.function.Function;
 @RequiredArgsConstructor
 public class BuildResolveService {
 
+    /**
+     * build_manifest.failures[].logHint 최대 길이.
+     * 600자 시절에는 Gradle이 마지막에 출력하는 실패 요약이 잘려 원인 파악이 불가능했다.
+     */
+    private static final int LOG_HINT_LIMIT = 2000;
+
     private final RepoRunRepository repoRunRepository;
     private final ArtifactService artifactService;
     private final RepoRootResolver repoRootResolver;
@@ -198,6 +204,7 @@ public class BuildResolveService {
         dumpCmd.add(init.toString());
         dumpCmd.add("ossdocDump");
         dumpCmd.add("-q");
+        appendGradleDumpCacheDisableOptions(dumpCmd);
         appendGradleDaemonOption(dumpCmd);
 
         ProcessRunner.Result dump = gradleBuildSupport.runWithJavaFallback(
@@ -450,11 +457,43 @@ public class BuildResolveService {
         return BuildMode.SOURCE_ONLY;
     }
 
+    /**
+     * 실패 원인 진단용 로그 힌트를 만든다.
+     *
+     * - stdout/stderr를 함께 담는다. Gradle/Maven은 실제 원인을 stderr에만 남기는 경우가 있다.
+     * - 길면 앞뒤를 함께 남긴다. 원인 요약은 보통 로그 끝부분에 나오므로 앞부분만 자르면 진단이 불가능하다.
+     */
     private String hint(ProcessRunner.Result r) {
-        String base = (r.getOutput() != null && !r.getOutput().isBlank())
-                ? r.getOutput()
-                : (r.getError() == null ? "" : r.getError());
-        return base.substring(0, Math.min(600, base.length()));
+        String output = r.getOutput() == null ? "" : r.getOutput();
+        String error = r.getError() == null ? "" : r.getError();
+
+        StringBuilder combined = new StringBuilder();
+        if (!output.isBlank()) {
+            combined.append(output);
+        }
+        if (!error.isBlank()) {
+            if (!combined.isEmpty()) {
+                combined.append(System.lineSeparator())
+                        .append("--- stderr ---")
+                        .append(System.lineSeparator());
+            }
+            combined.append(error);
+        }
+
+        return abbreviateHeadTail(combined.toString());
+    }
+
+    private String abbreviateHeadTail(String text) {
+        if (text.length() <= LOG_HINT_LIMIT) {
+            return text;
+        }
+        int head = LOG_HINT_LIMIT / 2;
+        int tail = LOG_HINT_LIMIT - head;
+        return text.substring(0, head)
+                + System.lineSeparator()
+                + "...(" + (text.length() - LOG_HINT_LIMIT) + " chars omitted)..."
+                + System.lineSeparator()
+                + text.substring(text.length() - tail);
     }
 
     /**
@@ -466,6 +505,45 @@ public class BuildResolveService {
         if (buildCommandProperties.isGradleNoDaemon()) {
             command.add("--no-daemon");
         }
+    }
+
+    /**
+     * dump 실행에서만 Gradle의 Configuration Cache(CC)와 Isolated Projects(IP)를 함께 끈다.
+     *
+     * [CC를 끄는 이유]
+     * configuration cache가 켜진 저장소(org.gradle.configuration-cache=true)에서는
+     * -I init script가 등록한 ossdocDump 태스크까지 직렬화 대상이 되어 dump가 실패한다.
+     * init script 자체도 CC 호환으로 작성했지만, Gradle 버전·플러그인 조합에 따라
+     * 다른 직렬화 문제가 생길 수 있어 dump 경로에서는 CC를 끄는 쪽이 안전하다.
+     *
+     * [IP도 함께 꺼야 하는 이유 - 두 가지]
+     * 1) IP는 CC 위에 얹힌 기능이라 CC를 전제로 한다.
+     *    CC만 끄고 IP를 켜 둔 조합은 Gradle이 모순으로 판단해 빌드를 시작조차 하지 않는다.
+     *      "Configuration Cache cannot be disabled when Isolated Projects is enabled."
+     *    실제로 JUnit(org.gradle.isolated-projects=true, Gradle 9.x) 분석에서
+     *    dump가 태스크 실행 전에 exitCode=1로 즉사해 SOURCE_ONLY로 폴백됐다.
+     * 2) IP를 살려둔 채 CC만 되살리는 방법도 쓸 수 없다.
+     *    GradleInitScriptWriter의 덤프 스크립트는 gradle.projectsEvaluated 안에서
+     *    rootProject.allprojects로 모든 모듈의 sourceSets/classpath를 읽는데,
+     *    이는 IP가 금지하는 cross-project 접근이라 IP가 켜져 있으면 어차피 위반으로 걸린다.
+     *    전체 모듈을 한 번에 훑어야 하는 덤프의 성격상 IP와는 근본적으로 양립 불가다.
+     *
+     * [--no-configuration-cache 플래그 대신 -D 프로퍼티를 쓰는 이유]
+     * 플래그는 이 옵션을 모르는 구버전 Gradle에서 unknown option으로 즉시 실패하지만,
+     * -D 프로퍼티는 모르는 버전에서도 무해하게 무시된다.
+     * -D는 저장소의 gradle.properties보다 우선순위가 높아 repo 파일을 수정하지 않고 덮어쓸 수 있다.
+     * IP 프로퍼티 키는 Gradle 8의 org.gradle.unsafe.isolated-projects에서
+     * Gradle 9의 org.gradle.isolated-projects로 바뀌었으므로 두 키를 모두 넘긴다.
+     * (해당 버전이 모르는 키는 그냥 무시된다.)
+     *
+     * compile(classes) 실행에는 붙이지 않는다. compile은 init script를 쓰지 않아
+     * CC/IP와 충돌하지 않고, 저장소가 켜 둔 CC/IP를 살려두는 편이 반복 빌드에서 훨씬 빠르다.
+     */
+    private void appendGradleDumpCacheDisableOptions(List<String> command) {
+        // IP를 먼저 끈다. IP가 켜진 상태에서는 아래 CC 비활성화 자체가 거부된다.
+        command.add("-Dorg.gradle.isolated-projects=false");
+        command.add("-Dorg.gradle.unsafe.isolated-projects=false");
+        command.add("-Dorg.gradle.configuration-cache=false");
     }
 
     /**
