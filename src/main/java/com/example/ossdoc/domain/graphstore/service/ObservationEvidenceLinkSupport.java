@@ -7,6 +7,7 @@ import com.example.ossdoc.domain.graphstore.entity.ObservationEvidenceId;
 import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedObservationFact;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -139,10 +140,22 @@ final class ObservationEvidenceLinkSupport {
         }
 
         return new LinkBuildResult(
-                List.copyOf(links),
+                readOnlyLinks(links),
                 missingEvidenceReferences,
                 duplicateEvidenceReferences
         );
+    }
+
+    private static List<ObservationEvidence> readOnlyLinks(
+            List<ObservationEvidence> links
+    ) {
+        if (links == null || links.isEmpty()) {
+            return List.of();
+        }
+
+        // 성능 최적화: GraphStoreIngestService가 chunk 단위로 즉시 저장하므로
+        // links 배열을 한 번 더 복사하지 않고 읽기 전용 view만 씌워 반환한다.
+        return Collections.unmodifiableList(links);
     }
 
     record LinkBuildResult(
