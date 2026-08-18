@@ -1,7 +1,6 @@
 package com.example.ossdoc.global.llm.service;
 
 import com.example.ossdoc.domain.artifact.enums.ArtifactKind;
-import com.example.ossdoc.domain.artifact.service.ArtifactService;
 import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.example.ossdoc.global.llm.dto.json.LlmResult;
@@ -10,8 +9,11 @@ import com.example.ossdoc.global.llm.dto.response.LlmResponse;
 import com.example.ossdoc.global.llm.entity.LlmScenarioCache;
 import com.example.ossdoc.global.llm.exception.LlmException;
 import com.example.ossdoc.global.llm.exception.code.LlmErrorCode;
+import com.example.ossdoc.global.llm.config.LlmGenerationProperties;
+import com.example.ossdoc.global.llm.config.LlmOutputProperties;
 import com.example.ossdoc.global.llm.model.LlmContextBundle;
-import com.example.ossdoc.global.llm.service.support.LlmClaudeClientSupport;
+import com.example.ossdoc.global.llm.service.support.LlmArtifactWriter;
+import com.example.ossdoc.global.llm.service.support.LlmChatClient;
 import com.example.ossdoc.global.llm.service.support.LlmPromptCatalog;
 import com.example.ossdoc.global.llm.service.support.LlmServiceBuildSupport;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -51,24 +53,18 @@ public class LlmService {
     private static final String PATH_API_DOCS = "llm/api_docs.json";
     private static final String PATH_FILE_TREE_DOCS = "llm/file_tree_docs.json";
 
-    private static final int MAX_CAUTIONS = 12;
-    private static final int MAX_SCENARIOS = 4;
-    private static final int MAX_STEPS_PER_SCENARIO = 8;
-
-
-    private static final int TOKENS_CAUTIONS = 16000;
-
-    private static final int TOKENS_SCENARIOS = 20000;
     private static final int CONTEXT_LIMIT_CAUTIONS_COMPACT = 32000;
     private static final int CONTEXT_LIMIT_SCENARIOS_COMPACT = 48000;
 
     private final ObjectMapper objectMapper;
-    private final ArtifactService artifactService;
+    private final LlmArtifactWriter llmArtifactWriter;
     private final RepoRunRepository repoRunRepository;
     private final LlmInputAssemblerService llmInputAssemblerService;
     private final LlmScenarioCacheService llmScenarioCacheService;
-    private final LlmClaudeClientSupport llmClaudeClientSupport;
+    private final LlmChatClient llmChatClient;
     private final LlmServiceBuildSupport llmServiceBuildSupport;
+    private final LlmGenerationProperties llmGenerationProperties;
+    private final LlmOutputProperties llmOutputProperties;
 
     /**
      * LLM 정제 파이프라인 실행.
@@ -87,33 +83,40 @@ public class LlmService {
                 : bundle.evidenceBundle();
 
         JsonNode refinedRules = generateCautions(structure, evidence);
-        artifactService.saveJsonArtifact(
+        llmArtifactWriter.write(
                 run, ArtifactKind.LLM_REFINED_RULES, ARTIFACT_SCHEMA_VERSION, PATH_REFINED_RULES, refinedRules
         );
 
         JsonNode scenarioSpecs = generateScenarioSpecs(structure, refinedRules, evidence);
-        artifactService.saveJsonArtifact(
+        llmArtifactWriter.write(
                 run, ArtifactKind.LLM_SCENARIO_SPECS, ARTIFACT_SCHEMA_VERSION, PATH_SCENARIO_SPECS, scenarioSpecs
         );
-        LlmScenarioCache scenarioCache = llmScenarioCacheService.upsertScenarioCache(
-                run,
-                scenarioSpecs,
-                llmClaudeClientSupport.resolvePrimaryModel(),
-                SCENARIO_PROMPT_VERSION
-        );
+        // local-only 모드에서는 DB 저장을 전부 생략하므로 시나리오 캐시도 남기지 않는다.
+        Long scenarioCacheId = null;
+        if (llmOutputProperties.isLocalOnly()) {
+            log.info("[LlmService] local-only 모드 — llm_scenario_cache 저장을 생략합니다.");
+        } else {
+            LlmScenarioCache scenarioCache = llmScenarioCacheService.upsertScenarioCache(
+                    run,
+                    scenarioSpecs,
+                    llmChatClient.resolvePrimaryModel(),
+                    SCENARIO_PROMPT_VERSION
+            );
+            scenarioCacheId = scenarioCache.getCacheId();
+        }
 
         JsonNode subsystemSummaries = buildSubsystemSummaries(structure, scenarioSpecs, refinedRules);
-        artifactService.saveJsonArtifact(
+        llmArtifactWriter.write(
                 run, ArtifactKind.LLM_SUBSYSTEM_SUMMARIES, ARTIFACT_SCHEMA_VERSION, PATH_SUBSYSTEM_SUMMARIES, subsystemSummaries
         );
 
         JsonNode apiDocs = buildApiDocs(structure, scenarioSpecs, refinedRules);
-        artifactService.saveJsonArtifact(
+        llmArtifactWriter.write(
                 run, ArtifactKind.LLM_API_DOCS, ARTIFACT_SCHEMA_VERSION, PATH_API_DOCS, apiDocs
         );
 
         JsonNode fileTreeDocs = buildFileTreeDocs(structure);
-        artifactService.saveJsonArtifact(
+        llmArtifactWriter.write(
                 run, ArtifactKind.LLM_FILE_TREE_DOCS, ARTIFACT_SCHEMA_VERSION, PATH_FILE_TREE_DOCS, fileTreeDocs
         );
 
@@ -126,7 +129,7 @@ public class LlmService {
                 .subsystemSummaries(toSerializable(subsystemSummaries))
                 .apiDocs(toSerializable(apiDocs))
                 .fileTreeDocs(toSerializable(fileTreeDocs))
-                .scenarioCacheId(scenarioCache.getCacheId())
+                .scenarioCacheId(scenarioCacheId)
                 .build();
 
         return new LlmResponse(request.getRunId(), result);
@@ -139,12 +142,13 @@ public class LlmService {
         String context = llmServiceBuildSupport.buildCautionContext(structure, evidence);
         log.info("[LlmService] {} (contextChars={})", STEP1_REFINED_RULES, context.length());
 
+        int maxCautions = llmGenerationProperties.getMaxCautions();
         JsonNode cautions = generateWithRetryPlan(
                 STEP1_REFINED_RULES,
-                applyLanguagePolicy(String.format(LlmPromptCatalog.PROMPT_CAUTIONS, MAX_CAUTIONS)),
-                applyLanguagePolicy(String.format(LlmPromptCatalog.PROMPT_CAUTIONS_COMPACT, Math.min(8, MAX_CAUTIONS))),
+                applyLanguagePolicy(String.format(LlmPromptCatalog.PROMPT_CAUTIONS, maxCautions)),
+                applyLanguagePolicy(String.format(LlmPromptCatalog.PROMPT_CAUTIONS_COMPACT, Math.min(8, maxCautions))),
                 context,
-                TOKENS_CAUTIONS,
+                llmGenerationProperties.getTokensCautions(),
                 CONTEXT_LIMIT_CAUTIONS_COMPACT,
                 raw -> llmServiceBuildSupport.normalizeCautions(raw, structure),
                 () -> llmServiceBuildSupport.fallbackCautions(structure)
@@ -172,12 +176,17 @@ public class LlmService {
         String context = llmServiceBuildSupport.buildScenarioContext(structure, refinedRules, evidence);
         log.info("[LlmService] {} (contextChars={})", STEP2_SCENARIO_SPECS, context.length());
 
+        int maxScenarios = llmGenerationProperties.getMaxScenarios();
         return generateWithRetryPlan(
                 STEP2_SCENARIO_SPECS,
-                applyLanguagePolicy(String.format(LlmPromptCatalog.PROMPT_SCENARIOS, MAX_SCENARIOS, MAX_STEPS_PER_SCENARIO)),
-                applyLanguagePolicy(String.format(LlmPromptCatalog.PROMPT_SCENARIOS_COMPACT, Math.min(3, MAX_SCENARIOS))),
+                applyLanguagePolicy(String.format(
+                        LlmPromptCatalog.PROMPT_SCENARIOS,
+                        maxScenarios,
+                        llmGenerationProperties.getMaxStepsPerScenario()
+                )),
+                applyLanguagePolicy(String.format(LlmPromptCatalog.PROMPT_SCENARIOS_COMPACT, Math.min(3, maxScenarios))),
                 context,
-                TOKENS_SCENARIOS,
+                llmGenerationProperties.getTokensScenarios(),
                 CONTEXT_LIMIT_SCENARIOS_COMPACT,
                 raw -> llmServiceBuildSupport.normalizeScenarioSpecs(raw, structure),
                 () -> llmServiceBuildSupport.fallbackScenarioSpecs(structure, refinedRules)
@@ -290,7 +299,7 @@ public class LlmService {
             Supplier<JsonNode> fallbackSupplier
     ) {
         try {
-            JsonNode raw = llmClaudeClientSupport.callClaudeWithHaikuFallback(stepName, normalPrompt, context, maxTokens);
+            JsonNode raw = llmChatClient.call(stepName, normalPrompt, context, maxTokens);
             return normalizer.apply(raw);
         } catch (LlmException firstFailure) {
             if (!isResponseParseFailed(firstFailure)) {
@@ -303,7 +312,7 @@ public class LlmService {
                 ? context
                 : context.substring(0, compactContextLimit);
         try {
-            JsonNode raw = llmClaudeClientSupport.callClaudeWithHaikuFallback(stepName + " compact", compactPrompt, compactContext, maxTokens);
+            JsonNode raw = llmChatClient.call(stepName + " compact", compactPrompt, compactContext, maxTokens);
             return normalizer.apply(raw);
         } catch (LlmException secondFailure) {
             if (!isResponseParseFailed(secondFailure)) {

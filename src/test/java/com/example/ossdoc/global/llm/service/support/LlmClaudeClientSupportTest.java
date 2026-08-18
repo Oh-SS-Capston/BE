@@ -44,7 +44,7 @@ class LlmClaudeClientSupportTest {
                         {"content":[{"type":"text","text":"not-json"}],"stop_reason":"end_turn"}
                         """, MediaType.APPLICATION_JSON));
 
-        assertThatThrownBy(() -> support.callClaudeWithHaikuFallback("step", "system", "user", 1000))
+        assertThatThrownBy(() -> support.call("step", "system", "user", 1000))
                 .isInstanceOf(LlmException.class)
                 .extracting(e -> ((LlmException) e).getCode())
                 .isEqualTo(LlmErrorCode.RESPONSE_PARSE_FAILED);

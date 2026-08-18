@@ -106,6 +106,20 @@ ossdoc:
     super-cluster:
       enabled: ${CLUSTER_SUPER_CLUSTER_ENABLED:false}
   llm:
+    # 사용할 LLM 제공자. ollama = 로컬 모델, claude = Anthropic API.
+    # 미지정 시 ollama가 기본이다.
+    provider: ${LLM_PROVIDER:ollama}
+    # LLM 산출물 저장 방식. true면 로컬 파일만 남기고 S3/DB 저장을 건너뛴다.
+    output:
+      local-only: ${LLM_OUTPUT_LOCAL_ONLY:true}
+    # 생성 단계 튜닝.
+    # 출력 토큰 상한은 num_predict와 min()으로 clamp되므로 둘을 같은 값으로 맞춘다.
+    generation:
+      max-cautions: ${LLM_MAX_CAUTIONS:8}
+      max-scenarios: ${LLM_MAX_SCENARIOS:3}
+      max-steps-per-scenario: ${LLM_MAX_STEPS_PER_SCENARIO:6}
+      tokens-cautions: ${LLM_TOKENS_CAUTIONS:16384}
+      tokens-scenarios: ${LLM_TOKENS_SCENARIOS:16384}
     input:
       super-cluster:
         enabled: ${LLM_INPUT_SUPER_CLUSTER_ENABLED:false}
@@ -147,6 +161,26 @@ claude:
   haiku-fallback-enabled: ${CLAUDE_HAIKU_FALLBACK_ENABLED:false}
   # enabled: ${LLM_ENABLED:false}
   max-tokens: ${CLAUDE_MAX_TOKENS:20000}
+
+# 로컬 Ollama. ossdoc.llm.provider=ollama(기본)일 때 사용된다.
+ollama:
+  base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+  # ollama list에 보이는 태그와 정확히 같아야 한다.
+  model: ${OLLAMA_MODEL:qwen3.5:9b}
+  # num_ctx는 프롬프트 + 생성 출력을 모두 담아야 한다.
+  # run_20260815_94b1aaa5(junit-framework) 실측: 프롬프트 최대 약 6,200토큰
+  #   (STEP2 컨텍스트 18,194자 + system 2,100자, 실측 3.27 chars/token)
+  # 여기에 num_predict 16,384를 더해 약 22,600토큰. 여유를 두어 32,768로 잡는다.
+  # 모델 점유 실측: 16384=6.6GB / 32768=7.2GB / 65536=8.7GB (총 RAM 17GB)
+  num-ctx: ${OLLAMA_NUM_CTX:32768}
+  num-predict: ${OLLAMA_NUM_PREDICT:16384}
+  temperature: ${OLLAMA_TEMPERATURE:0.2}
+  # 읽기 타임아웃은 num_predict를 전부 생성하는 시간보다 길어야 한다.
+  # 실측 3.7 tok/s 기준 num_predict=16384는 약 74분이 필요하므로 3배 여유를 두어 240분.
+  # 짧게 잡으면 생성이 끝나기 전에 끊기고, 그 요청은 재시도해도 같은 시간이 걸려 반드시 실패한다.
+  timeout-minutes: ${OLLAMA_TIMEOUT_MINUTES:240}
+  json-format: ${OLLAMA_JSON_FORMAT:true}
+  think: ${OLLAMA_THINK:false}
 
 cloud:
   aws:

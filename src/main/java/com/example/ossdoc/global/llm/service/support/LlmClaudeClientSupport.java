@@ -8,31 +8,48 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientResponseException;
 
 /**
- * Claude API 호출/재시도/응답 파싱 전담 컴포넌트.
+ * Anthropic Claude API 호출/재시도/응답 파싱 전담 컴포넌트.
+ *
+ * <p>{@code ossdoc.llm.provider=claude}일 때만 빈으로 등록된다.
+ * 기본값은 ollama이므로 이 구현은 명시적으로 되돌렸을 때만 동작한다.</p>
  */
 @Slf4j
 @Component
-@RequiredArgsConstructor
-public class LlmClaudeClientSupport {
+@ConditionalOnProperty(name = "ossdoc.llm.provider", havingValue = "claude")
+public class LlmClaudeClientSupport implements LlmChatClient {
 
     private static final int MAX_CLAUDE_RETRY_ATTEMPTS = 2;
-    private static final long BASE_RETRY_DELAY_MILLIS = 1500L;
-    private static final long MAX_RETRY_DELAY_MILLIS = 12000L;
 
     private final RestClient claudeRestClient;
     private final LlmConfig llmConfig;
     private final ObjectMapper objectMapper;
 
     /**
+     * ollamaRestClient 빈이 함께 존재하므로 타입만으로는 주입 대상이 모호하다.
+     * lombok.config가 없어 @Qualifier가 생성자로 복사되지 않아 생성자를 직접 선언한다.
+     */
+    public LlmClaudeClientSupport(
+            @Qualifier("claudeRestClient") RestClient claudeRestClient,
+            LlmConfig llmConfig,
+            ObjectMapper objectMapper
+    ) {
+        this.claudeRestClient = claudeRestClient;
+        this.llmConfig = llmConfig;
+        this.objectMapper = objectMapper;
+    }
+
+    /**
      * 실행 시 사용할 1순위 모델을 결정하는 역할.
      */
+    @Override
     public String resolvePrimaryModel() {
         String model = llmConfig.getModel();
         if (model == null || model.isBlank()) {
@@ -44,7 +61,8 @@ public class LlmClaudeClientSupport {
     /**
      * Claude 호출을 수행하고 필요 시 fallback 모델로 재시도하는 역할.
      */
-    public JsonNode callClaudeWithHaikuFallback(
+    @Override
+    public JsonNode call(
             String stepName,
             String systemPrompt,
             String userMessage,
@@ -122,11 +140,11 @@ public class LlmClaudeClientSupport {
                 throw e;
             } catch (RestClientResponseException e) {
                 int status = e.getStatusCode().value();
-                if (!isRetryableStatus(status) || attempt > MAX_CLAUDE_RETRY_ATTEMPTS) {
+                if (!LlmResponseJsonSupport.isRetryableStatus(status) || attempt > MAX_CLAUDE_RETRY_ATTEMPTS) {
                     log.error("[LlmClaudeClientSupport] Claude API call failed. status={}, message={}", status, e.getMessage());
                     throw new LlmException(LlmErrorCode.CLAUDE_API_CALL_FAILED);
                 }
-                long delay = resolveRetryDelayMillis(e, attempt);
+                long delay = LlmResponseJsonSupport.resolveRetryDelayMillis(e, attempt);
                 log.warn(
                         "[LlmClaudeClientSupport] Claude API temporary failure. status={}, attempt={}/{}, retryDelayMs={}",
                         status,
@@ -134,17 +152,13 @@ public class LlmClaudeClientSupport {
                         MAX_CLAUDE_RETRY_ATTEMPTS + 1,
                         delay
                 );
-                sleepForRetry(delay);
+                LlmResponseJsonSupport.sleepForRetry(delay);
             } catch (Exception e) {
                 if (attempt > MAX_CLAUDE_RETRY_ATTEMPTS) {
                     log.error("[LlmClaudeClientSupport] Claude API call failed. message={}", e.getMessage());
                     throw new LlmException(LlmErrorCode.CLAUDE_API_CALL_FAILED);
                 }
-                long delay = Math.min(
-                        BASE_RETRY_DELAY_MILLIS * (1L << Math.min(attempt - 1, 3)),
-                        MAX_RETRY_DELAY_MILLIS
-                );
-                sleepForRetry(delay);
+                LlmResponseJsonSupport.sleepForRetry(LlmResponseJsonSupport.backoffDelayMillis(attempt));
             }
         }
         throw new LlmException(LlmErrorCode.CLAUDE_API_CALL_FAILED);
@@ -192,7 +206,7 @@ public class LlmClaudeClientSupport {
                 }
             }
 
-            String jsonPayload = stripFence(textContent.trim());
+            String jsonPayload = LlmResponseJsonSupport.stripFence(textContent.trim());
             if (jsonPayload.isBlank()) {
                 throw new LlmException(LlmErrorCode.RESPONSE_PARSE_FAILED);
             }
@@ -203,7 +217,7 @@ public class LlmClaudeClientSupport {
                 if ("max_tokens".equalsIgnoreCase(stopReason)) {
                     log.warn("[LlmClaudeClientSupport] Claude response truncated by max_tokens.");
                 }
-                JsonNode recovered = tryRecoverTruncatedJson(jsonPayload);
+                JsonNode recovered = LlmResponseJsonSupport.tryRecoverTruncatedJson(objectMapper, jsonPayload);
                 if (recovered != null) {
                     log.warn("[LlmClaudeClientSupport] Recovered truncated response.");
                     return recovered;
@@ -215,138 +229,6 @@ public class LlmClaudeClientSupport {
         } catch (Exception e) {
             log.error("[LlmClaudeClientSupport] Failed to parse Claude response. raw={}", raw);
             throw new LlmException(LlmErrorCode.RESPONSE_PARSE_FAILED);
-        }
-    }
-
-    private String stripFence(String text) {
-        if (!text.startsWith("```")) {
-            return text;
-        }
-        int firstNewline = text.indexOf('\n');
-        if (firstNewline < 0) {
-            return text.replace("```", "").trim();
-        }
-        String body = text.substring(firstNewline + 1);
-        int lastFence = body.lastIndexOf("```");
-        if (lastFence >= 0) {
-            body = body.substring(0, lastFence);
-        }
-        return body.trim();
-    }
-
-    private JsonNode tryRecoverTruncatedJson(String payload) {
-        if (payload == null || payload.isBlank()) {
-            return null;
-        }
-        String recovered = recoverPotentiallyTruncatedJson(payload);
-        if (recovered.isBlank()) {
-            return null;
-        }
-        try {
-            return objectMapper.readTree(recovered);
-        } catch (Exception ignored) {
-            return null;
-        }
-    }
-
-    private String recoverPotentiallyTruncatedJson(String payload) {
-        String input = payload.trim();
-        int objectStart = input.indexOf('{');
-        int arrayStart = input.indexOf('[');
-        int start;
-        if (objectStart < 0) {
-            start = arrayStart;
-        } else if (arrayStart < 0) {
-            start = objectStart;
-        } else {
-            start = Math.min(objectStart, arrayStart);
-        }
-        if (start < 0) {
-            return "";
-        }
-
-        StringBuilder sb = new StringBuilder();
-        boolean inString = false;
-        boolean escaped = false;
-        int openObject = 0;
-        int openArray = 0;
-
-        for (int i = start; i < input.length(); i++) {
-            char ch = input.charAt(i);
-            sb.append(ch);
-
-            if (escaped) {
-                escaped = false;
-                continue;
-            }
-            if (inString && ch == '\\') {
-                escaped = true;
-                continue;
-            }
-            if (ch == '"') {
-                inString = !inString;
-                continue;
-            }
-            if (inString) {
-                continue;
-            }
-            if (ch == '{') {
-                openObject++;
-            } else if (ch == '}') {
-                openObject = Math.max(0, openObject - 1);
-            } else if (ch == '[') {
-                openArray++;
-            } else if (ch == ']') {
-                openArray = Math.max(0, openArray - 1);
-            }
-        }
-
-        if (inString) {
-            sb.append('"');
-        }
-        for (int i = 0; i < openArray; i++) {
-            sb.append(']');
-        }
-        for (int i = 0; i < openObject; i++) {
-            sb.append('}');
-        }
-        return sb.toString()
-                .replaceAll(",\\s*}", "}")
-                .replaceAll(",\\s*]", "]")
-                .trim();
-    }
-
-    private boolean isRetryableStatus(int status) {
-        return status == 429 || status == 500 || status == 502 || status == 503 || status == 504;
-    }
-
-    private long resolveRetryDelayMillis(RestClientResponseException e, int attempt) {
-        String retryAfter = null;
-        if (e.getResponseHeaders() != null) {
-            retryAfter = e.getResponseHeaders().getFirst("retry-after");
-        }
-        if (retryAfter != null && !retryAfter.isBlank()) {
-            try {
-                long seconds = Long.parseLong(retryAfter.trim());
-                if (seconds > 0) {
-                    return Math.min(seconds * 1000L, MAX_RETRY_DELAY_MILLIS);
-                }
-            } catch (NumberFormatException ignored) {
-                // 헤더 값이 비정상이면 기본 백오프로 진행한다.
-            }
-        }
-        return Math.min(
-                BASE_RETRY_DELAY_MILLIS * (1L << Math.min(attempt - 1, 3)),
-                MAX_RETRY_DELAY_MILLIS
-        );
-    }
-
-    private void sleepForRetry(long delayMillis) {
-        try {
-            Thread.sleep(Math.max(delayMillis, 0L));
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new LlmException(LlmErrorCode.CLAUDE_API_CALL_FAILED);
         }
     }
 }
