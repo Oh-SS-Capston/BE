@@ -1730,7 +1730,7 @@ public class LlmInputAssemblerBuildSupport {
     private static String methodSeedKey(String methodFqn, String symbolId) {
         String fqn = safeText(methodFqn);
         String sym = safeText(symbolId);
-        return sym.isBlank() ? fqn : fqn + ' ' + sym;
+        return sym.isBlank() ? fqn : fqn + '\0' + sym;
     }
 
     /**
