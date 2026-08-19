@@ -170,4 +170,62 @@ class LlmOllamaClientSupportTest {
 
         server.verify();
     }
+
+    @Test
+    @DisplayName("반복 루프로 채워진 잘린 응답도 진단 로그가 파싱을 막지 않는다")
+    void diagnosticsDoNotBreakParsingOnRepetitionLoop() {
+        LlmOllamaClientSupport support = newSupport();
+
+        // 모델이 같은 항목을 계속 뱉다 상한에 걸린 형태.
+        StringBuilder loop = new StringBuilder("{\\\"scenarios\\\":[");
+        for (int i = 0; i < 40; i++) {
+            loop.append("{\\\"scenarioId\\\":\\\"SCN-001\\\"},");
+        }
+        loop.append("{\\\"scenarioId\\\":\\\"SCN-0");
+
+        server.expect(once(), requestTo(GENERATE_URL))
+                .andRespond(withSuccess(
+                        "{\"response\":\"" + loop + "\",\"done_reason\":\"length\",\"eval_count\":5000}",
+                        MediaType.APPLICATION_JSON));
+
+        JsonNode result = support.call("step", "system", "user", 5000);
+
+        assertThat(result.path("scenarios").isArray()).isTrue();
+        assertThat(result.path("scenarios").size()).isGreaterThanOrEqualTo(40);
+        server.verify();
+    }
+
+    @Test
+    @DisplayName("eval_count가 없는 응답에도 진단 로그가 0으로 나누지 않고 통과한다")
+    void diagnosticsSurviveMissingEvalCount() {
+        LlmOllamaClientSupport support = newSupport();
+
+        server.expect(once(), requestTo(GENERATE_URL))
+                .andRespond(withSuccess(
+                        "{\"response\":\"{\\\"cautions\\\":[]}\",\"done_reason\":\"stop\"}",
+                        MediaType.APPLICATION_JSON));
+
+        JsonNode result = support.call("step", "system", "user", 6000);
+
+        assertThat(result.path("cautions").isArray()).isTrue();
+        server.verify();
+    }
+
+    @Test
+    @DisplayName("추론 블록이 섞이면 제거 분량을 재고도 본문 파싱 결과는 그대로다")
+    void diagnosticsMeasureThinkLeakWithoutAlteringPayload() {
+        LlmOllamaClientSupport support = newSupport();
+
+        server.expect(once(), requestTo(GENERATE_URL))
+                .andRespond(withSuccess(
+                        "{\"response\":\"<think>어떤 시나리오를 쓸지 고민한다</think>"
+                                + "{\\\"cautions\\\":[{\\\"cautionId\\\":\\\"CAU-009\\\"}]}\","
+                                + "\"done_reason\":\"stop\",\"eval_count\":120}",
+                        MediaType.APPLICATION_JSON));
+
+        JsonNode result = support.call("step", "system", "user", 6000);
+
+        assertThat(result.path("cautions").get(0).path("cautionId").asText()).isEqualTo("CAU-009");
+        server.verify();
+    }
 }

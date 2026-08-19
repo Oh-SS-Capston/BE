@@ -44,6 +44,21 @@ public class LlmOllamaClientSupport implements LlmChatClient {
      */
     private static final double BASELINE_TOKENS_PER_SECOND = 3.7;
 
+    /**
+     * 실측 자/토큰. 진단 로그에서 "이 토큰수면 본문이 몇 자여야 하는가"의 기준선으로만 쓴다.
+     * 사전 경고용 {@link #CHARS_PER_TOKEN_ESTIMATE}와 달리 보수적으로 낮추지 않은 값이다.
+     */
+    private static final double MEASURED_CHARS_PER_TOKEN = 3.27;
+
+    /** 반복 루프 탐지 시 훑어볼 말미 길이. */
+    private static final int REPETITION_WINDOW_CHARS = 1200;
+
+    /** 이보다 짧은 주기는 정상 JSON 구분자와 구분되지 않아 오탐이 된다. */
+    private static final int MIN_REPETITION_UNIT = 8;
+
+    /** 절단 지점 확인용 발췌 길이. 로그 한 줄이 터지지 않을 만큼만 남긴다. */
+    private static final int EXCERPT_CHARS = 600;
+
     private final RestClient ollamaRestClient;
     private final OllamaConfig ollamaConfig;
     private final ObjectMapper objectMapper;
@@ -279,10 +294,13 @@ public class LlmOllamaClientSupport implements LlmChatClient {
 
             String doneReason = root.path("done_reason").asText("");
             String textContent = root.path("response").asText("");
+            boolean truncated = "length".equalsIgnoreCase(doneReason);
 
-            String jsonPayload = LlmResponseJsonSupport.stripFence(
-                    LlmResponseJsonSupport.stripThinkBlock(textContent)
-            );
+            String afterThink = LlmResponseJsonSupport.stripThinkBlock(textContent);
+            String jsonPayload = LlmResponseJsonSupport.stripFence(afterThink);
+
+            logResponseDiagnostics(stepName, root, textContent, afterThink, jsonPayload, truncated);
+
             if (jsonPayload.isBlank()) {
                 throw new LlmException(LlmErrorCode.RESPONSE_PARSE_FAILED);
             }
@@ -290,12 +308,13 @@ public class LlmOllamaClientSupport implements LlmChatClient {
             try {
                 return objectMapper.readTree(jsonPayload);
             } catch (Exception parseFail) {
-                if ("length".equalsIgnoreCase(doneReason)) {
+                if (truncated) {
                     log.warn("[LlmOllama] {} 응답이 num_predict 상한에서 잘렸습니다.", stepName);
                 }
                 JsonNode recovered = LlmResponseJsonSupport.tryRecoverTruncatedJson(objectMapper, jsonPayload);
                 if (recovered != null) {
                     log.warn("[LlmOllama] {} 잘린 응답을 복원했습니다.", stepName);
+                    logRecoveryLoss(stepName, jsonPayload, recovered);
                     return recovered;
                 }
                 throw parseFail;
@@ -329,5 +348,145 @@ public class LlmOllamaClientSupport implements LlmChatClient {
                 String.format("%.2f", tokensPerSecond),
                 String.format("%.1f", loadNanos / 1_000_000_000.0)
         );
+    }
+
+    /**
+     * 생성 토큰이 실제로 어디에 쓰였는지 남긴다.
+     *
+     * <p>4차 실행에서 {@code eval_count}가 5,000인데 최종 산출물에 남은 모델 서술은
+     * 약 2,000토큰 분량뿐이라 3,000토큰의 행방을 설명할 수 없었다. 후보는 세 가지였고
+     * 처방이 서로 달라 추정으로 상한을 올릴 수 없었다. 아래 세 수치가 그 셋을 가른다.</p>
+     *
+     * <ul>
+     *   <li>{@code 본문} 길이가 토큰수 × 실측 3.27자에 가까우면 → 토큰은 실제 본문에 쓰였다.
+     *       그런데도 산출물이 빈약하면 골격 에코이거나 복원 손실이다.</li>
+     *   <li>{@code think제거}가 0보다 크면 → {@code think:false}를 뚫고 추론이 새어나왔다.</li>
+     *   <li>{@code 본문} 길이가 예상보다 크게 짧으면 → 응답에 실리지 않은 토큰이 있다는 뜻이다.</li>
+     * </ul>
+     */
+    private void logResponseDiagnostics(
+            String stepName,
+            JsonNode root,
+            String rawText,
+            String afterThink,
+            String jsonPayload,
+            boolean truncated
+    ) {
+        long outputTokens = root.path("eval_count").asLong(0);
+        int thinkStripped = rawText.length() - afterThink.length();
+        int fenceStripped = afterThink.length() - jsonPayload.length();
+        double charsPerToken = outputTokens > 0 ? (double) rawText.length() / outputTokens : 0.0;
+
+        String summary = String.format(
+                "[LlmOllama] %s 응답 분해. 본문 %d자, 출력 %d토큰 → 실측 %.2f자/토큰"
+                        + " (기준 %.2f), think제거 %d자, fence제거 %d자, 파싱대상 %d자",
+                stepName,
+                rawText.length(),
+                outputTokens,
+                charsPerToken,
+                MEASURED_CHARS_PER_TOKEN,
+                thinkStripped,
+                fenceStripped,
+                jsonPayload.length()
+        );
+
+        if (truncated || thinkStripped > 0) {
+            log.warn(summary);
+        } else {
+            log.info(summary);
+        }
+
+        if (thinkStripped > 0) {
+            log.warn(
+                    "[LlmOllama] {} think:false인데 추론 블록이 {}자 섞여 나왔습니다."
+                            + " 생성 토큰 상당량이 여기로 샜을 수 있습니다.",
+                    stepName, thinkStripped
+            );
+        }
+
+        String repetition = detectTailRepetition(jsonPayload);
+        if (repetition != null) {
+            log.warn("[LlmOllama] {} 응답 말미에 반복 루프 의심. {}", stepName, repetition);
+        }
+
+        // 어디서 끊겼는지는 말미를 봐야 안다. 로그가 터지지 않도록 앞뒤만 잘라 남긴다.
+        if (truncated) {
+            log.warn("[LlmOllama] {} 잘린 응답 앞부분 ▶ {}", stepName, excerpt(jsonPayload, true));
+            log.warn("[LlmOllama] {} 잘린 응답 끝부분 ▶ {}", stepName, excerpt(jsonPayload, false));
+        }
+    }
+
+    /**
+     * 절단 복원이 버린 분량을 남긴다.
+     *
+     * <p>복원은 괄호/따옴표 균형을 맞추려고 마지막 미완성 항목을 통째로 버린다.
+     * 버린 양이 크면 "상한이 모자란 것"이 아니라 "쓴 것을 우리가 버린 것"이므로
+     * 처방이 완전히 달라진다.</p>
+     */
+    private void logRecoveryLoss(String stepName, String jsonPayload, JsonNode recovered) {
+        try {
+            int keptChars = objectMapper.writeValueAsString(recovered).length();
+            int lostChars = jsonPayload.length() - keptChars;
+            double lostRatio = jsonPayload.length() > 0
+                    ? (double) lostChars / jsonPayload.length()
+                    : 0.0;
+            log.warn(
+                    "[LlmOllama] {} 복원 손실. 파싱대상 {}자 → 보존 {}자, 폐기 {}자 ({}%)",
+                    stepName,
+                    jsonPayload.length(),
+                    keptChars,
+                    lostChars,
+                    String.format("%.1f", lostRatio * 100)
+            );
+        } catch (JsonProcessingException e) {
+            log.warn("[LlmOllama] {} 복원 손실 측정 실패.", stepName);
+        }
+    }
+
+    /**
+     * 말미가 같은 문자열의 반복으로 채워졌는지 본다.
+     *
+     * <p>모델이 루프에 빠지면 동일 단위가 계속 붙는다. 정확히 반복되는 주기만 잡으므로
+     * 오탐이 적고, 잡히면 원인이 확정된다.</p>
+     */
+    private static String detectTailRepetition(String text) {
+        int windowSize = Math.min(text.length(), REPETITION_WINDOW_CHARS);
+        if (windowSize < MIN_REPETITION_UNIT * 3) {
+            return null;
+        }
+        String tail = text.substring(text.length() - windowSize);
+
+        for (int period = MIN_REPETITION_UNIT; period <= windowSize / 3; period++) {
+            String unit = tail.substring(tail.length() - period);
+            int repeats = 1;
+            int pos = tail.length() - period;
+            while (pos - period >= 0 && tail.startsWith(unit, pos - period)) {
+                repeats++;
+                pos -= period;
+            }
+            if (repeats >= 3) {
+                return String.format(
+                        "주기 %d자 패턴이 %d회 연속 반복 (%d자 소모): %s",
+                        period, repeats, period * repeats, abbreviate(unit, 80)
+                );
+            }
+        }
+        return null;
+    }
+
+    /** 로그 한 줄에 담기도록 앞/뒤 일부만 잘라 개행을 접는다. */
+    private static String excerpt(String text, boolean fromHead) {
+        if (text.length() <= EXCERPT_CHARS) {
+            return abbreviate(text, EXCERPT_CHARS);
+        }
+        String part = fromHead
+                ? text.substring(0, EXCERPT_CHARS)
+                : text.substring(text.length() - EXCERPT_CHARS);
+        return part.replaceAll("\\s+", " ").trim();
+    }
+
+    private static String abbreviate(String text, int maxLength) {
+        String flat = text.replaceAll("\\s+", " ").trim();
+        return flat.length() <= maxLength ? flat : flat.substring(0, maxLength) + "…";
     }
 }
