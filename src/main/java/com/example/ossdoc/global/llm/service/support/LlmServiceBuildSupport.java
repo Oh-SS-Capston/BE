@@ -15,9 +15,11 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -425,6 +427,14 @@ public class LlmServiceBuildSupport {
             }
         }
 
+        // 골격 밖 응답은 여기서 조용히 사라진다. 얼마나 버리는지 모르면
+        // 모델이 프롬프트를 지키는지 측정할 방법이 없다.
+        Set<JsonNode> consumedScenarios = Collections.newSetFromMap(new IdentityHashMap<>());
+        int seedStepSlots = 0;
+        int slotsFilledByModel = 0;
+        int rawStepsSeen = 0;
+        int rawStepsConsumed = 0;
+
         ArrayNode scenarios = objectMapper.createArrayNode();
         for (int i = 0; i < scenarioSeed.size(); i++) {
             JsonNode seedScenario = scenarioSeed.get(i);
@@ -436,6 +446,9 @@ public class LlmServiceBuildSupport {
             JsonNode rawScenario = rawById.get(scenarioId);
             if (rawScenario == null) {
                 rawScenario = i < scenariosRaw.size() ? scenariosRaw.get(i) : NullNode.getInstance();
+            }
+            if (rawScenario.isObject()) {
+                consumedScenarios.add(rawScenario);
             }
 
             ObjectNode scenario = scenarios.addObject();
@@ -456,6 +469,9 @@ public class LlmServiceBuildSupport {
             JsonNode seedSteps = seedScenario.path("steps");
             JsonNode rawSteps = rawScenario.path("steps");
             Map<Integer, JsonNode> rawStepByNo = indexStepsByNo(rawSteps);
+            if (rawSteps.isArray()) {
+                rawStepsSeen += rawSteps.size();
+            }
 
             for (int s = 0; s < seedSteps.size(); s++) {
                 JsonNode seedStep = seedSteps.get(s);
@@ -463,6 +479,13 @@ public class LlmServiceBuildSupport {
                 JsonNode rawStep = rawStepByNo.get(stepNo);
                 if (rawStep == null) {
                     rawStep = rawSteps.isArray() && s < rawSteps.size() ? rawSteps.get(s) : NullNode.getInstance();
+                }
+                seedStepSlots++;
+                if (rawStep.isObject()) {
+                    rawStepsConsumed++;
+                    if (!safeText(rawStep.path("description").asText("")).isBlank()) {
+                        slotsFilledByModel++;
+                    }
                 }
 
                 ObjectNode step = steps.addObject();
@@ -498,7 +521,46 @@ public class LlmServiceBuildSupport {
                 attachStepGuideBundle(step);
             }
         }
+
+        logSeedAxisDrops(scenariosRaw, consumedScenarios, seedStepSlots, slotsFilledByModel,
+                rawStepsSeen, rawStepsConsumed);
         return scenarios;
+    }
+
+    /**
+     * 골격 축 정규화가 버린 응답 분량을 남긴다.
+     *
+     * <p>모델이 골격 밖 시나리오를 만들면 여기서 전량 폐기되는데, 지금까지는 조용히 사라져서
+     * 프롬프트 준수 여부를 측정할 방법이 없었다. 5차 실행 기준으로 STEP② 출력의 약 58%가
+     * 이 경로로 버려지고 있었다. 이 수치가 0에 수렴하는지가 프롬프트 수정의 성공 판정이다.</p>
+     */
+    private void logSeedAxisDrops(
+            JsonNode scenariosRaw,
+            Set<JsonNode> consumedScenarios,
+            int seedStepSlots,
+            int slotsFilledByModel,
+            int rawStepsSeen,
+            int rawStepsConsumed
+    ) {
+        int droppedScenarios = 0;
+        for (JsonNode rawScenario : scenariosRaw) {
+            if (rawScenario.isObject() && !consumedScenarios.contains(rawScenario)) {
+                droppedScenarios++;
+            }
+        }
+        int droppedSteps = Math.max(0, rawStepsSeen - rawStepsConsumed);
+
+        if (droppedScenarios > 0 || droppedSteps > 0) {
+            log.warn(
+                    "[LlmScenario] 골격 밖 응답 폐기. 시나리오 {}/{}개, step {}/{}개."
+                            + " 모델이 골격에 없는 항목을 만드는 만큼 서술 예산이 줄어든다.",
+                    droppedScenarios, scenariosRaw.size(), droppedSteps, rawStepsSeen
+            );
+        }
+        log.info(
+                "[LlmScenario] 골격 채움. {}/{} 칸을 모델 서술로 채웠다 (나머지는 시드 문구).",
+                slotsFilledByModel, seedStepSlots
+        );
     }
 
     private Map<Integer, JsonNode> indexStepsByNo(JsonNode rawSteps) {

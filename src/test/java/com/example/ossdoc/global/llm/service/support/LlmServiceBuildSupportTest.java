@@ -303,4 +303,71 @@ class LlmServiceBuildSupportTest {
                         .put("lines", "10-30"));
         return steps;
     }
+
+    @Test
+    void normalizeScenarioSpecs_ignoresModelSuppliedFqnAndEvidenceLinks() throws Exception {
+        // 프롬프트에서 뺐지만 모델이 습관적으로 넣어도 골격 값이 이겨야 한다.
+        JsonNode raw = objectMapper.readTree("""
+                {
+                  "scenarios": [
+                    {
+                      "scenarioId": "SCN-001",
+                      "steps": [
+                        {
+                          "stepNo": 1,
+                          "description": "빌더에 필수 값을 넣는다.",
+                          "classFqn": "com.evil.Wrong",
+                          "methodFqn": "com.evil.Wrong.nope",
+                          "evidenceLinks": [{"evidenceId": 29, "filePath": "fake/Path.java", "lines": "1-2"}]
+                        }
+                      ]
+                    }
+                  ]
+                }
+                """);
+
+        JsonNode step = support.normalizeScenarioSpecs(raw, structureWithScenarioSeed())
+                .path("scenarios").get(0).path("steps").get(0);
+
+        assertThat(step.path("methodFqn").asText()).isEqualTo("com.acme.Builder.required");
+        assertThat(step.path("classFqn").asText()).isEqualTo("com.acme.Builder");
+        assertThat(step.path("evidenceLinks").get(0).path("filePath").asText())
+                .isEqualTo("src/main/java/com/acme/Builder.java");
+        // 모델 서술 자체는 살아남는다.
+        assertThat(step.path("description").asText()).contains("필수 값");
+    }
+
+    @Test
+    void normalizeScenarioSpecs_dropsScenariosOutsideTheSeedSkeleton() throws Exception {
+        // 5차 실행에서 모델이 골격에 없는 클래스로 시나리오를 만들어 예산을 태웠다.
+        JsonNode raw = objectMapper.readTree("""
+                {
+                  "scenarios": [
+                    {
+                      "scenarioId": "SCN-001",
+                      "steps": [{"stepNo": 1, "description": "빌더를 구성한다."}]
+                    },
+                    {
+                      "scenarioId": "SCN-002",
+                      "steps": [{"stepNo": 1, "description": "파서를 호출한다."}]
+                    },
+                    {
+                      "scenarioId": "SCN-999",
+                      "steps": [{"stepNo": 1, "description": "골격에 없는 시나리오."}]
+                    }
+                  ]
+                }
+                """);
+
+        JsonNode scenarios = support.normalizeScenarioSpecs(raw, structureWithScenarioSeed())
+                .path("scenarios");
+
+        assertThat(scenarios.size()).isEqualTo(2);
+        assertThat(scenarios.get(0).path("scenarioId").asText()).isEqualTo("SCN-001");
+        assertThat(scenarios.get(1).path("scenarioId").asText()).isEqualTo("SCN-002");
+        // SCN-999는 골격에 없으므로 산출물에 남지 않는다.
+        for (JsonNode scenario : scenarios) {
+            assertThat(scenario.path("scenarioId").asText()).isNotEqualTo("SCN-999");
+        }
+    }
 }
