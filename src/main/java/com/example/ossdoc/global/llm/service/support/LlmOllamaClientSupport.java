@@ -311,6 +311,8 @@ public class LlmOllamaClientSupport implements LlmChatClient {
                 if (truncated) {
                     log.warn("[LlmOllama] {} 응답이 num_predict 상한에서 잘렸습니다.", stepName);
                 }
+                // 파싱이 깨졌다는 것 자체가 이상 신호다. 절단이든 중단이든 원본을 남긴다.
+                logPayloadExcerpt(stepName, jsonPayload, truncated ? "num_predict 상한 절단" : "생성 중단 추정");
                 JsonNode recovered = LlmResponseJsonSupport.tryRecoverTruncatedJson(objectMapper, jsonPayload);
                 if (recovered != null) {
                     log.warn("[LlmOllama] {} 잘린 응답을 복원했습니다.", stepName);
@@ -404,16 +406,26 @@ public class LlmOllamaClientSupport implements LlmChatClient {
             );
         }
 
+        // Ollama는 생성이 정상 종료된 경우에만 통계를 채워 준다. 전부 0이면 중단된 것이다.
+        // (6차 실행에서 이 신호를 못 읽어 메모리 문제로 오진했다.)
+        if (outputTokens == 0) {
+            log.warn(
+                    "[LlmOllama] {} 생성 통계가 비어 있습니다(eval_count 없음). 정상 종료가 아닐 수 있습니다."
+                            + " Ollama 서버 로그에서 'cancel task'와 timing 요약 블록 유무를 확인하세요.",
+                    stepName
+            );
+        }
+
         String repetition = detectTailRepetition(jsonPayload);
         if (repetition != null) {
             log.warn("[LlmOllama] {} 응답 말미에 반복 루프 의심. {}", stepName, repetition);
         }
+    }
 
-        // 어디서 끊겼는지는 말미를 봐야 안다. 로그가 터지지 않도록 앞뒤만 잘라 남긴다.
-        if (truncated) {
-            log.warn("[LlmOllama] {} 잘린 응답 앞부분 ▶ {}", stepName, excerpt(jsonPayload, true));
-            log.warn("[LlmOllama] {} 잘린 응답 끝부분 ▶ {}", stepName, excerpt(jsonPayload, false));
-        }
+    /** 어디서 끊겼는지는 말미를 봐야 안다. 로그가 터지지 않도록 앞뒤만 잘라 남긴다. */
+    private void logPayloadExcerpt(String stepName, String jsonPayload, String reason) {
+        log.warn("[LlmOllama] {} 파싱 실패({}) 앞부분 ▶ {}", stepName, reason, excerpt(jsonPayload, true));
+        log.warn("[LlmOllama] {} 파싱 실패({}) 끝부분 ▶ {}", stepName, reason, excerpt(jsonPayload, false));
     }
 
     /**

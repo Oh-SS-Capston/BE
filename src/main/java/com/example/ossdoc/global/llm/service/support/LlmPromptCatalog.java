@@ -61,9 +61,11 @@ public final class LlmPromptCatalog {
             2) scenarios: scenarioSeed의 각 단계에 서술을 채운 결과
             3) methodFlow: 실제 호출 순서(order, title, methodFqn)와 단계별 전제/결과/위험
             골격 유지 규칙:
-            - scenarioSeed에 있는 scenarioId와 stepNo만 그대로 옮긴다. 이 둘이 서술을 붙일 칸을 가리키는 열쇠다.
-            - classFqn, methodFqn, evidenceLinks는 응답에 쓰지 않는다. 골격 값이 그대로 쓰이므로 적어도 버려진다.
-            - 골격에 없는 시나리오나 단계를 만들지 않는다. 만들어도 버려지고 그만큼 서술이 잘린다.
+            - scenarioSeed의 scenarioId, stepNo, methodFqn을 그대로 옮긴다. 이 셋이 서술을 붙일 칸을 가리킨다.
+            - scenarioSeed에 있는 시나리오를 하나도 빠뜨리지 않는다. 첫 시나리오만 쓰고 끝내면 안 된다.
+              골격에 시나리오가 4개면 응답에도 4개가 있어야 한다.
+            - 골격에 없는 시나리오나 단계는 새로 만들지 않는다.
+            - classFqn과 evidenceLinks는 응답에 넣지 않는다. 골격 값이 쓰이므로 옮겨 적어도 버려진다.
             - scenarios는 최대 %d개, scenario 당 steps는 최대 %d개다.
             서술 작성 규칙:
             - 각 step의 description, precondition, action, successSignal, failureSignal, userAction,
@@ -79,7 +81,8 @@ public final class LlmPromptCatalog {
             "entryPoint":"string","expectedOutcome":"string",
             "steps":[{"stepNo":1,"description":"string","precondition":"string","action":"string",
             "successSignal":"string","failureSignal":"string","userAction":"string","dataHandled":"string",
-            "evidenceInterpretation":"string","confidenceReason":"string","confidence":0.0}]}],
+            "evidenceInterpretation":"string","confidenceReason":"string",
+            "methodFqn":"pkg.Type.method","confidence":0.0}]}],
             "methodFlow":[{"order":1,"title":"string","description":"string","precondition":"string",
             "result":"string","risk":"string","evidenceInterpretation":"string","methodFqn":"pkg.Type.method"}]}
             """;
@@ -87,9 +90,10 @@ public final class LlmPromptCatalog {
     public static final String PROMPT_SCENARIOS_COMPACT = """
             역할: 입력의 scenarioSeed 골격에 서술을 채운다. compact 모드다.
             제약:
-            - scenarioSeed의 scenarioId와 stepNo만 그대로 옮긴다. 서술을 붙일 칸을 가리키는 열쇠다.
-            - classFqn, methodFqn, evidenceLinks는 응답에 쓰지 않는다. 적어도 버려진다.
-            - 골격에 없는 시나리오나 단계를 만들지 않는다.
+            - scenarioSeed의 scenarioId, stepNo, methodFqn을 그대로 옮긴다. 서술을 붙일 칸을 가리킨다.
+            - scenarioSeed의 시나리오를 하나도 빠뜨리지 않는다. 첫 시나리오만 쓰고 끝내면 안 된다.
+            - classFqn과 evidenceLinks는 응답에 넣지 않는다. 골격 값이 쓰이므로 버려진다.
+            - 골격에 없는 시나리오나 단계는 새로 만들지 않는다.
             - scenarios 최대 %d개
             - 각 step은 description, action, successSignal, failureSignal, evidenceInterpretation을 우선 채운다.
             - 골격의 summarySeed와 근거 위치를 벗어난 내용은 쓰지 않는다.
@@ -100,7 +104,8 @@ public final class LlmPromptCatalog {
             "entryPoint":"string","expectedOutcome":"string",
             "steps":[{"stepNo":1,"description":"string","precondition":"string","action":"string",
             "successSignal":"string","failureSignal":"string","userAction":"string","dataHandled":"string",
-            "evidenceInterpretation":"string","confidenceReason":"string","confidence":0.0}]}],
+            "evidenceInterpretation":"string","confidenceReason":"string",
+            "methodFqn":"pkg.Type.method","confidence":0.0}]}],
             "methodFlow":[{"order":1,"title":"string","description":"string","precondition":"string",
             "result":"string","risk":"string","evidenceInterpretation":"string","methodFqn":"pkg.Type.method"}]}
             """;
