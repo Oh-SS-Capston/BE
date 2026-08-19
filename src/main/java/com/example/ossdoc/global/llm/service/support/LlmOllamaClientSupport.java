@@ -83,13 +83,15 @@ public class LlmOllamaClientSupport implements LlmChatClient {
         warnIfTimeoutTooShort(stepName, effectiveNumPredict);
 
         log.info(
-                "[LlmOllama] {} 요청. model={}, numCtx={}, numPredict={} (요청 {} / 설정 상한 {})",
+                "[LlmOllama] {} 요청. model={}, numCtx={}, numPredict={} (요청 {} / 설정 상한 {}), temperature={}, seed={}",
                 stepName,
                 model,
                 ollamaConfig.getNumCtx(),
                 effectiveNumPredict,
                 maxTokens,
-                ollamaConfig.getNumPredict()
+                ollamaConfig.getNumPredict(),
+                ollamaConfig.getTemperature(),
+                ollamaConfig.getSeed() >= 0 ? String.valueOf(ollamaConfig.getSeed()) : "random"
         );
 
         String requestBody = buildRequestBody(model, systemPrompt, userMessage, effectiveNumPredict);
@@ -243,6 +245,10 @@ public class LlmOllamaClientSupport implements LlmChatClient {
             options.put("num_ctx", ollamaConfig.getNumCtx());
             options.put("num_predict", numPredict);
             options.put("temperature", ollamaConfig.getTemperature());
+            // 음수는 "시드를 보내지 않음" = Ollama 기본(호출마다 임의 시드)을 뜻한다.
+            if (ollamaConfig.getSeed() >= 0) {
+                options.put("seed", ollamaConfig.getSeed());
+            }
 
             ObjectNode root = objectMapper.createObjectNode();
             root.put("model", model);

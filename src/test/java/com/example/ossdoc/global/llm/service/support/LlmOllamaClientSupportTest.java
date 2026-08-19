@@ -27,6 +27,10 @@ class LlmOllamaClientSupportTest {
     private MockRestServiceServer server;
 
     private LlmOllamaClientSupport newSupport() {
+        return newSupport(0);
+    }
+
+    private LlmOllamaClientSupport newSupport(int seed) {
         RestClient.Builder builder = RestClient.builder().baseUrl("http://localhost:11434");
         server = MockRestServiceServer.bindTo(builder).build();
 
@@ -34,6 +38,7 @@ class LlmOllamaClientSupportTest {
         config.setModel("qwen3.5:9b");
         config.setNumCtx(16384);
         config.setNumPredict(6000);
+        config.setSeed(seed);
 
         return new LlmOllamaClientSupport(builder.build(), config, new ObjectMapper());
     }
@@ -59,6 +64,40 @@ class LlmOllamaClientSupportTest {
 
         assertThat(result.path("cautions").size()).isEqualTo(1);
         assertThat(result.path("cautions").get(0).path("cautionId").asText()).isEqualTo("CAU-001");
+        server.verify();
+    }
+
+    @Test
+    @DisplayName("시드가 0 이상이면 options에 담아 재현 가능한 생성을 요청한다")
+    void sendsFixedSeedInOptions() {
+        LlmOllamaClientSupport support = newSupport(20260818);
+
+        server.expect(once(), requestTo(GENERATE_URL))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("\"seed\":20260818")))
+                .andRespond(withSuccess("""
+                        {"response":"{\\"cautions\\":[]}","done_reason":"stop"}
+                        """, MediaType.APPLICATION_JSON));
+
+        support.call("step", "system", "user", 6000);
+
+        server.verify();
+    }
+
+    @Test
+    @DisplayName("시드가 음수면 options에서 생략해 Ollama 기본 임의 시드를 쓴다")
+    void omitsSeedWhenNegative() {
+        LlmOllamaClientSupport support = newSupport(-1);
+
+        server.expect(once(), requestTo(GENERATE_URL))
+                .andExpect(content().string(org.hamcrest.Matchers.not(
+                        org.hamcrest.Matchers.containsString("\"seed\"")
+                )))
+                .andRespond(withSuccess("""
+                        {"response":"{\\"cautions\\":[]}","done_reason":"stop"}
+                        """, MediaType.APPLICATION_JSON));
+
+        support.call("step", "system", "user", 6000);
+
         server.verify();
     }
 

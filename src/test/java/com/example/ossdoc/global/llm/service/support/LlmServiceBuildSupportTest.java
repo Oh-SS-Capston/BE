@@ -11,11 +11,28 @@ import static org.assertj.core.api.Assertions.assertThat;
 class LlmServiceBuildSupportTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
-    private final LlmServiceBuildSupport support = new LlmServiceBuildSupport(objectMapper);
+    private final LlmServiceBuildSupport support =
+            new LlmServiceBuildSupport(objectMapper, new com.example.ossdoc.global.llm.config.LlmGenerationProperties());
 
     @Test
     void normalizeScenarioSpecs_preservesRichStepFields() throws Exception {
-        JsonNode raw = objectMapper.readTree("""
+        JsonNode raw = richScenarioResponse();
+
+        JsonNode normalized = support.normalizeScenarioSpecs(raw, structureWithMethodSeed());
+
+        JsonNode overview = normalized.path("overview");
+        JsonNode step = normalized.path("scenarios").get(0).path("steps").get(0);
+
+        assertThat(overview.path("architectureSummary").asText()).contains("Worker builds graph facts");
+        assertThat(step.path("action").asText()).contains("createRun");
+        assertThat(step.path("successSignal").asText()).contains("queued");
+        assertThat(step.path("evidenceInterpretation").asText()).contains("request DTO");
+        assertThat(step.path("guideSlots").path("doCall").asText()).contains("createRun");
+        assertThat(step.path("guideNarrative").asText()).contains("Fix the URL");
+    }
+
+    private JsonNode richScenarioResponse() throws Exception {
+        return objectMapper.readTree("""
                 {
                   "overview": {
                     "project": "ossdoc",
@@ -47,18 +64,146 @@ class LlmServiceBuildSupportTest {
                   "methodFlow": []
                 }
                 """);
+    }
 
-        JsonNode normalized = support.normalizeScenarioSpecs(raw, structureWithMethodSeed());
+    @Test
+    void normalizeScenarioSpecs_leavesMissingSlotsEmptyInsteadOfInjectingForbiddenFiller() throws Exception {
+        // 모델이 description만 쓰고 나머지 서술 필드를 누락한 실제 응답 형태.
+        JsonNode raw = objectMapper.readTree("""
+                {
+                  "overview": {"project": "ossdoc"},
+                  "scenarios": [{
+                    "scenarioId": "SCN-001",
+                    "title": "Analyze repository",
+                    "steps": [{"stepNo": 1, "description": "Check the repository URL."}]
+                  }],
+                  "methodFlow": []
+                }
+                """);
 
-        JsonNode overview = normalized.path("overview");
+        JsonNode step = support.normalizeScenarioSpecs(raw, structureWithMethodSeed())
+                .path("scenarios").get(0).path("steps").get(0);
+
+        // 프롬프트가 금지한 문구를 코드가 대신 채워 넣지 않는다.
+        assertThat(step.path("guideNarrative").asText()).doesNotContain("핵심 동작 수행");
+        assertThat(step.path("guideSlots").path("successCheck").asText()).isEmpty();
+        assertThat(step.path("guideSlots").path("failureSymptom").asText()).isEmpty();
+        assertThat(step.path("guideSlots").path("nextAction").asText()).isEmpty();
+
+        // 빈 슬롯이 지표에 그대로 드러난다(before/call만 채워져 2/5).
+        assertThat(step.path("guideQuality").path("slotCoverage").asDouble()).isEqualTo(0.4d);
+        assertThat(step.path("guideQuality").path("forbiddenPhraseRate").asDouble()).isEqualTo(0.0d);
+        assertThat(step.path("guideQuality").path("meetsThreshold").asBoolean()).isFalse();
+    }
+
+    @Test
+    void normalizeScenarioSpecs_reportsFullSlotCoverageWhenModelFillsEveryField() throws Exception {
+        JsonNode normalized = support.normalizeScenarioSpecs(richScenarioResponse(), structureWithMethodSeed());
         JsonNode step = normalized.path("scenarios").get(0).path("steps").get(0);
 
-        assertThat(overview.path("architectureSummary").asText()).contains("Worker builds graph facts");
+        assertThat(step.path("guideQuality").path("slotCoverage").asDouble()).isEqualTo(1.0d);
+    }
+
+    @Test
+    void normalizeScenarioSpecs_keepsSeedSkeletonWhenModelSwapsTheTargetMethod() throws Exception {
+        // 모델이 골격에 없는 메서드로 바꿔치기하고 시나리오 하나를 통째로 빠뜨린 응답.
+        JsonNode raw = objectMapper.readTree("""
+                {
+                  "overview": {"project": "ossdoc"},
+                  "scenarios": [{
+                    "scenarioId": "SCN-001",
+                    "title": "모델이 붙인 제목",
+                    "steps": [{
+                      "stepNo": 1,
+                      "description": "요청을 만든다.",
+                      "action": "createRun을 호출한다.",
+                      "methodFqn": "com.example.Hallucinated.method",
+                      "classFqn": "com.example.Hallucinated",
+                      "evidenceLinks": [{"evidenceId": 3}]
+                    }]
+                  }]
+                }
+                """);
+
+        JsonNode scenarios = support.normalizeScenarioSpecs(raw, structureWithScenarioSeed()).path("scenarios");
+
+        // 골격이 정한 시나리오 수가 유지된다. 모델이 빠뜨린 SCN-002도 살아남는다.
+        assertThat(scenarios.size()).isEqualTo(2);
+        assertThat(scenarios.get(1).path("scenarioId").asText()).isEqualTo("SCN-002");
+
+        JsonNode step = scenarios.get(0).path("steps").get(0);
+        // 서술은 모델 것을 쓰고, 대상 메서드와 근거는 골격이 되돌린다.
         assertThat(step.path("action").asText()).contains("createRun");
-        assertThat(step.path("successSignal").asText()).contains("queued");
-        assertThat(step.path("evidenceInterpretation").asText()).contains("request DTO");
-        assertThat(step.path("guideSlots").path("doCall").asText()).contains("createRun");
-        assertThat(step.path("guideNarrative").asText()).contains("Fix the URL");
+        assertThat(step.path("methodFqn").asText()).isEqualTo("com.acme.Builder.required");
+        assertThat(step.path("classFqn").asText()).isEqualTo("com.acme.Builder");
+        assertThat(step.path("evidenceLinks").get(0).path("filePath").asText())
+                .isEqualTo("src/main/java/com/acme/Builder.java");
+    }
+
+    @Test
+    void normalizeScenarioSpecs_doesNotShareTheSameMethodAcrossDifferentScenarios() throws Exception {
+        // 모델이 두 시나리오 모두 step 1만 보냈다. 예전에는 둘 다 methodFlow[0]을 물려받았다.
+        JsonNode raw = objectMapper.readTree("""
+                {
+                  "overview": {"project": "ossdoc"},
+                  "scenarios": [
+                    {"scenarioId": "SCN-001", "steps": [{"stepNo": 1, "description": "첫 흐름"}]},
+                    {"scenarioId": "SCN-002", "steps": [{"stepNo": 1, "description": "둘째 흐름"}]}
+                  ]
+                }
+                """);
+
+        JsonNode scenarios = support.normalizeScenarioSpecs(raw, structureWithScenarioSeed()).path("scenarios");
+
+        String first = scenarios.get(0).path("steps").get(0).path("methodFqn").asText();
+        String second = scenarios.get(1).path("steps").get(0).path("methodFqn").asText();
+        assertThat(first).isEqualTo("com.acme.Builder.required");
+        assertThat(second).isEqualTo("com.acme.Parser.parse");
+        assertThat(first).isNotEqualTo(second);
+    }
+
+    @Test
+    void fallbackScenarioSpecs_keepsSeedSkeletonInsteadOfCollapsingToOneScenario() {
+        JsonNode out = support.fallbackScenarioSpecs(structureWithScenarioSeed(), objectMapper.createObjectNode());
+
+        assertThat(out.path("fallbackApplied").asBoolean()).isTrue();
+        assertThat(out.path("scenarios").size()).isEqualTo(2);
+        // 모델 서술이 없으면 골격의 summarySeed가 description이 된다.
+        assertThat(out.path("scenarios").get(0).path("steps").get(0).path("description").asText())
+                .contains("필수 옵션");
+    }
+
+    private ObjectNode structureWithScenarioSeed() {
+        ObjectNode structure = structureWithMethodSeed();
+        ArrayNode scenarioSeed = structure.putArray("scenarioSeed");
+
+        ObjectNode first = scenarioSeed.addObject();
+        first.put("scenarioId", "SCN-001");
+        first.put("title", "대표 호출 흐름");
+        first.put("intent", "핵심 API를 순서대로 호출해 기본 기능을 완성한다.");
+        first.putArray("steps").addObject()
+                .put("stepNo", 1)
+                .put("classFqn", "com.acme.Builder")
+                .put("methodFqn", "com.acme.Builder.required")
+                .put("summarySeed", "필수 옵션을 등록한다.")
+                .put("filePath", "src/main/java/com/acme/Builder.java")
+                .put("startLine", 10)
+                .put("endLine", 20);
+
+        ObjectNode second = scenarioSeed.addObject();
+        second.put("scenarioId", "SCN-002");
+        second.put("title", "Parser 사용 흐름");
+        second.put("intent", "Parser의 공개 메서드를 순서대로 사용한다.");
+        second.putArray("steps").addObject()
+                .put("stepNo", 1)
+                .put("classFqn", "com.acme.Parser")
+                .put("methodFqn", "com.acme.Parser.parse")
+                .put("summarySeed", "입력 인자를 해석한다.")
+                .put("filePath", "src/main/java/com/acme/Parser.java")
+                .put("startLine", 30)
+                .put("endLine", 55);
+
+        return structure;
     }
 
     @Test
@@ -83,6 +228,38 @@ class LlmServiceBuildSupportTest {
         assertThat(card.path("whatItDoes").asText()).contains("createRun");
         assertThat(card.path("guideSlots").path("failureSymptom").asText()).contains("Invalid URL");
         assertThat(card.path("usageScenario").path("evidenceInterpretation").asText()).contains("request DTO");
+    }
+
+    @Test
+    void buildCoreMethodCards_keepsTargetSuitabilityGateWhileMergingScenarioText() {
+        ArrayNode scenarios = objectMapper.createArrayNode();
+        scenarios.addObject()
+                .put("scenarioId", "SCN-001")
+                .set("steps", scenarioSteps());
+
+        // 예제 경로는 targetSuitability 0점이라 서술이 아무리 좋아도 임계를 넘으면 안 된다.
+        ArrayNode methodSeed = objectMapper.createArrayNode();
+        methodSeed.addObject()
+                .put("fqn", "com.example.ossdoc.domain.run.service.RepoRunService.createRun")
+                .put("classFqn", "com.example.ossdoc.domain.run.service.RepoRunService")
+                .put("className", "RepoRunService")
+                .put("methodName", "createRun")
+                .put("summarySeed", "Creates a repository analysis run.")
+                .put("signatureHint", "RepoRunCreateRequest -> RepoRunCreateResponse")
+                .put("filePath", "src/main/java/example/RepoRunService.java")
+                .put("startLine", 10)
+                .put("endLine", 30);
+
+        JsonNode card = support.buildCoreMethodCards(
+                methodSeed, objectMapper.createArrayNode(), objectMapper.createArrayNode(), scenarios
+        ).get(0);
+
+        // 시나리오 서술은 살아 있고,
+        assertThat(card.path("guideSlots").path("failureSymptom").asText()).contains("Invalid URL");
+        // P1-3 지표도 함께 남아 있어야 한다. 빠지면 qualityGate가 1.0으로 간주해 필터가 죽는다.
+        assertThat(card.path("guideQuality").path("targetSuitabilityScore").asDouble()).isEqualTo(0.0d);
+        assertThat(card.path("guideQuality").path("meetsThreshold").asBoolean()).isFalse();
+        assertThat(card.path("guideQuality").has("slotEvidenceConfidence")).isTrue();
     }
 
     private ObjectNode structureWithMethodSeed() {

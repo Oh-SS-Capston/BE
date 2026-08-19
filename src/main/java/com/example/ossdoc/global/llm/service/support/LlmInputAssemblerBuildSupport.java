@@ -1,5 +1,6 @@
 package com.example.ossdoc.global.llm.service.support;
 
+import com.example.ossdoc.global.llm.config.LlmGenerationProperties;
 import com.example.ossdoc.global.llm.dto.request.LlmRequest;
 import com.example.ossdoc.global.llm.model.CoreMethodSeed;
 import com.example.ossdoc.global.llm.model.CoreTypeSeed;
@@ -45,8 +46,12 @@ public class LlmInputAssemblerBuildSupport {
     private static final int MAX_EXTENSION_POINTS = 20;
     private static final int MAX_DIRECTORIES = 24;
     private static final int MAX_EVIDENCE_PER_CAUTION = 5;
+    /** 단계가 이보다 적으면 시나리오로 만들지 않는다. 1단계짜리는 흐름이 아니다. */
+    private static final int MIN_SCENARIO_STEPS = 2;
 
     private final ObjectMapper objectMapper;
+    private final LlmGenerationProperties llmGenerationProperties;
+
     /**
      * symbol_source_index를 symbolId 기준으로 인덱싱한다.
      */
@@ -1122,14 +1127,229 @@ public class LlmInputAssemblerBuildSupport {
             return out;
         }
 
-        // 없으면 핵심 메서드 이름 패턴으로 유도
+        // 없으면 핵심 메서드 이름 패턴으로 유도한다.
+        // 이 경로는 근거가 아니라 추측이다. 아래 4개 묶음은 인자 파서 계열의 어휘라
+        // 다른 형태의 라이브러리에서는 매칭되지 않거나 엉뚱한 메서드를 집는다.
+        // (junit 실측: 4개 중 2개만 매칭됐고 그 2개도 서로 이어지지 않는 호출이었다)
+        // 그래서 각 단계에 derived 표식을 남겨, 호출 순서 근거가 필요한 곳에서 구분할 수 있게 한다.
         ArrayNode flow = objectMapper.createArrayNode();
         int order = 1;
         order = appendFlowStep(flow, order, "옵션 정의", "필수/선택 옵션을 먼저 구성합니다.", findByKeyword(coreMethods, "add", "required", "builder", "set"));
         order = appendFlowStep(flow, order, "파싱 실행", "입력 인자를 파서에 전달해 결과 객체를 만듭니다.", findByKeyword(coreMethods, "parse", "build", "create"));
         order = appendFlowStep(flow, order, "결과 조회", "파싱 결과에서 옵션 존재 여부와 값을 확인합니다.", findByKeyword(coreMethods, "get", "has", "value"));
         appendFlowStep(flow, order, "도움말/예외 처리", "오류 상황에서는 도움말 출력 및 예외 처리를 연결합니다.", findByKeyword(coreMethods, "help", "print", "format"));
+        for (JsonNode step : flow) {
+            ((ObjectNode) step).put("derived", true);
+        }
         return flow;
+    }
+
+    /**
+     * 시나리오 골격 시드를 생성한다.
+     *
+     * <p>시나리오는 지금까지 유일하게 시드 없이 모델이 맨땅에서 만들어내는 산출물이었다.
+     * 그 결과 실행마다 편차가 컸다 — 한 실행에서는 12개 step 중 8개가 필드 하나 없는
+     * 빈 객체였고, 다른 실행에서는 8개 step 전부 description만 있었다. 반면 시드가 있는
+     * methodFlow는 두 실행에서 바이트 단위로 동일했다. 골격은 코드가 확정하고
+     * 모델은 서술만 채우게 해 이 편차를 없앤다.</p>
+     *
+     * <p>대상은 라이브러리형 오픈소스다. 라이브러리 사용자에게 시나리오란 공개 API를
+     * 옆으로 이어 부르는 순서이지, 호출 깊이를 따라 내려가는 경로가 아니다.
+     * 그래서 골격의 기본 단위는 <b>타입</b>이다 — 한 타입의 공개 메서드를 순서대로 쓰는 흐름은
+     * 라이브러리 문서가 실제로 조직되는 방식과 같고, 저장소 종류를 가리지 않는다.</p>
+     *
+     * <p>{@code methodFlowSeed}는 api_map이 실제 호출 순서를 준 경우에만 첫 시나리오가 된다.
+     * 이름 키워드로 유도된({@code derived}) 흐름은 근거가 아니라 추측이므로 쓰지 않는다.
+     * junit 실측에서 그 경로는 4단계 중 2개가 비었고, 남은 2개도 서로 이어지지 않는
+     * 호출이라 모델이 스스로 고른 흐름보다 못했다.</p>
+     */
+    public JsonNode buildScenarioSeed(JsonNode methodFlowSeed, List<CoreMethodSeed> coreMethods) {
+        int maxScenarios = llmGenerationProperties.getMaxScenarios();
+        int maxSteps = llmGenerationProperties.getMaxStepsPerScenario();
+
+        ArrayNode out = objectMapper.createArrayNode();
+        if (maxScenarios <= 0 || maxSteps <= 0) {
+            return out;
+        }
+
+        // 같은 메서드가 여러 시나리오에 중복 등장하면 단계가 서로 구분되지 않는다.
+        Set<String> usedFqn = new LinkedHashSet<>();
+        appendFlowScenario(out, methodFlowSeed, maxSteps, usedFqn);
+        appendClassScenarios(out, coreMethods, maxScenarios, maxSteps, usedFqn);
+        return out;
+    }
+
+    /**
+     * 시나리오 단계로 삼을 수 없는 메서드인지 판정한다.
+     *
+     * <p>{@code java.lang.Object} 오버라이드는 어느 저장소에서나 같은 의미이고
+     * 라이브러리 사용 절차의 단계가 아니다. 이름 기반 판정은 여기까지만 한다 —
+     * getter나 factory를 이름으로 걸러내면 그것이 곧 특정 라이브러리 형태에 대한
+     * 과적합이 된다(어떤 라이브러리에서는 getter가 공개 API의 본체다).</p>
+     */
+    private boolean isNonScenarioMethod(String methodName) {
+        String name = safeText(methodName);
+        return "hashCode".equals(name) || "equals".equals(name) || "toString".equals(name);
+    }
+
+    /**
+     * api_map이 실제 호출 순서를 준 경우에만 대표 호출 흐름 시나리오를 만든다.
+     *
+     * <p>이름 키워드로 유도된 흐름({@code derived})은 쓰지 않는다. 단계 수가
+     * {@link #MIN_SCENARIO_STEPS}에 못 미치는 흐름도 만들지 않는다 — 단계가 하나뿐인 것은
+     * 흐름이 아니고, 시나리오 자리만 차지해 더 나은 후보를 밀어낸다.</p>
+     */
+    private void appendFlowScenario(ArrayNode out, JsonNode methodFlowSeed, int maxSteps, Set<String> usedFqn) {
+        if (methodFlowSeed == null || !methodFlowSeed.isArray() || methodFlowSeed.isEmpty()) {
+            return;
+        }
+
+        ArrayNode steps = objectMapper.createArrayNode();
+        for (int i = 0; i < methodFlowSeed.size() && steps.size() < maxSteps; i++) {
+            JsonNode flow = methodFlowSeed.get(i);
+            if (flow.path("derived").asBoolean(false)) {
+                return;
+            }
+            String methodFqn = safeText(flow.path("methodFqn").asText(""));
+            if (methodFqn.isBlank() || isNonScenarioMethod(extractMethodName(methodFqn))) {
+                continue;
+            }
+            if (containsFqn(steps, methodFqn)) {
+                continue;
+            }
+            ObjectNode step = steps.addObject();
+            step.put("stepNo", steps.size());
+            putIfText(step, "classFqn", firstNonBlank(
+                    flow.path("classFqn").asText(""),
+                    extractOwnerFqn(methodFqn)
+            ));
+            step.put("methodFqn", methodFqn);
+            putIfText(step, "summarySeed", flow.path("description").asText(""));
+            copySourceAnchor(step, flow.path("filePath").asText(""),
+                    asNullableInt(flow.path("startLine")), asNullableInt(flow.path("endLine")));
+        }
+
+        if (steps.size() < MIN_SCENARIO_STEPS) {
+            return;
+        }
+        for (JsonNode step : steps) {
+            usedFqn.add(step.path("methodFqn").asText(""));
+        }
+        ObjectNode scenario = out.addObject();
+        scenario.put("scenarioId", String.format("SCN-%03d", out.size()));
+        scenario.put("title", "대표 호출 흐름");
+        scenario.put("intent", "핵심 API를 순서대로 호출해 기본 기능을 완성한다.");
+        scenario.set("steps", steps);
+    }
+
+    /**
+     * 남은 시나리오 자리를 타입별 사용 흐름으로 채운다.
+     *
+     * <p>라이브러리에서 한 타입의 공개 메서드를 순서대로 쓰는 것은 실제 사용 형태이고
+     * 라이브러리 문서가 조직되는 방식이기도 하다. 저장소 종류에 의존하지 않는 축이다.</p>
+     *
+     * <p>단계를 {@link #MIN_SCENARIO_STEPS}개 이상 낼 수 있는 타입만 후보가 된다.
+     * 이 자격 검사를 통과한 뒤에는 importance가 순위를 정한다. 자격을 개수로 두고
+     * 순위를 importance로 두는 이유는, 개수를 순위로 쓰면 getter만 잔뜩 있는 설정 인터페이스가
+     * 핵심 타입을 밀어내기 때문이다.</p>
+     */
+    private void appendClassScenarios(
+            ArrayNode out,
+            List<CoreMethodSeed> coreMethods,
+            int maxScenarios,
+            int maxSteps,
+            Set<String> usedFqn
+    ) {
+        if (coreMethods == null || coreMethods.isEmpty()) {
+            return;
+        }
+
+        Map<String, List<CoreMethodSeed>> byClass = new LinkedHashMap<>();
+        for (CoreMethodSeed method : coreMethods) {
+            String classFqn = safeText(method.classFqn());
+            String fqn = safeText(method.fqn());
+            if (classFqn.isBlank() || fqn.isBlank()) {
+                continue;
+            }
+            if (isNonScenarioMethod(method.methodName()) || usedFqn.contains(fqn)) {
+                continue;
+            }
+            List<CoreMethodSeed> bucket = byClass.computeIfAbsent(classFqn, key -> new ArrayList<>());
+            // 오버로드는 fqn이 같다. 단계로는 한 번만 쓴다.
+            boolean duplicate = bucket.stream().anyMatch(m -> fqn.equals(m.fqn()));
+            if (!duplicate) {
+                bucket.add(method);
+            }
+        }
+
+        List<Map.Entry<String, List<CoreMethodSeed>>> candidates = new ArrayList<>();
+        for (Map.Entry<String, List<CoreMethodSeed>> entry : byClass.entrySet()) {
+            if (entry.getValue().size() >= MIN_SCENARIO_STEPS) {
+                candidates.add(entry);
+            }
+        }
+        candidates.sort(Comparator
+                .comparingInt((Map.Entry<String, List<CoreMethodSeed>> e) ->
+                        e.getValue().stream().mapToInt(CoreMethodSeed::importance).max().orElse(0))
+                .reversed()
+                .thenComparing(e -> -e.getValue().size()));
+
+        for (Map.Entry<String, List<CoreMethodSeed>> entry : candidates) {
+            if (out.size() >= maxScenarios) {
+                return;
+            }
+
+            List<CoreMethodSeed> methods = new ArrayList<>(entry.getValue());
+            methods.sort(Comparator.comparingInt(CoreMethodSeed::importance).reversed());
+
+            ArrayNode steps = objectMapper.createArrayNode();
+            for (CoreMethodSeed method : methods) {
+                if (steps.size() >= maxSteps) {
+                    break;
+                }
+                usedFqn.add(method.fqn());
+                ObjectNode step = steps.addObject();
+                step.put("stepNo", steps.size());
+                step.put("classFqn", method.classFqn());
+                step.put("methodFqn", method.fqn());
+                putIfText(step, "summarySeed", method.summarySeed());
+                putIfText(step, "signatureHint", method.signatureHint());
+                copySourceAnchor(step, method.filePath(), method.startLine(), method.endLine());
+            }
+
+            String className = extractSimpleName(entry.getKey());
+            ObjectNode scenario = out.addObject();
+            scenario.put("scenarioId", String.format("SCN-%03d", out.size()));
+            scenario.put("title", className + " 사용 흐름");
+            scenario.put("intent", className + "의 공개 메서드를 순서대로 사용해 기능을 구성한다.");
+            scenario.set("steps", steps);
+        }
+    }
+
+    private boolean containsFqn(ArrayNode steps, String methodFqn) {
+        for (JsonNode step : steps) {
+            if (methodFqn.equals(step.path("methodFqn").asText(""))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 근거 위치를 시드 단계에 옮긴다. 사용자에게 보여줄 수 없는 경로는 싣지 않는다.
+     */
+    private void copySourceAnchor(ObjectNode target, String filePath, Integer startLine, Integer endLine) {
+        String path = safeText(filePath);
+        if (path.isBlank() || !isUserFacingSourcePath(path)) {
+            return;
+        }
+        target.put("filePath", path);
+        if (startLine != null) {
+            target.put("startLine", startLine);
+        }
+        if (endLine != null) {
+            target.put("endLine", endLine);
+        }
     }
 
     private CoreMethodSeed findByKeyword(List<CoreMethodSeed> methods, String... keywords) {

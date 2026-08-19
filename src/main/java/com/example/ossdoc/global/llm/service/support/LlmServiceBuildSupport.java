@@ -5,6 +5,7 @@ import com.example.ossdoc.global.llm.exception.LlmException;
 import com.example.ossdoc.global.llm.exception.code.LlmErrorCode;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.example.ossdoc.global.llm.config.LlmGenerationProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.NullNode;
@@ -36,9 +37,10 @@ import java.util.function.Supplier;
 public class LlmServiceBuildSupport {
 
     // 시나리오/문서 조합 시 사용하는 출력 제한값
-    private static final int MAX_CAUTIONS = 20;
-    private static final int MAX_SCENARIOS = 4;
-    private static final int MAX_STEPS_PER_SCENARIO = 8;
+    //
+    // caution/scenario/step 상한은 ossdoc.llm.generation.* 설정에서 읽는다.
+    // 프롬프트에 "최대 N개"라고 써도 로컬 9B 모델은 이를 무시하므로(실측: 8을 요구했으나 20개 생성),
+    // 실제 개수를 결정하는 것은 여기의 상한이다. 설정과 실동작이 어긋나지 않도록 같은 값을 쓴다.
     private static final int MAX_CORE_CLASSES = 20;
     private static final int MAX_CORE_METHODS = 40;
     private static final int MAX_METHOD_FLOW = 16;
@@ -95,6 +97,7 @@ public class LlmServiceBuildSupport {
     private static final String TARGET_MARKER = "/target/";
 
     private final ObjectMapper objectMapper;
+    private final LlmGenerationProperties llmGenerationProperties;
     /**
      * coreClassSeed에서 클래스 FQN과 소스 경로 매핑을 구성한다.
      */
@@ -246,7 +249,7 @@ public class LlmServiceBuildSupport {
             }
         }
 
-        for (int i = 0; i < cautionsRaw.size() && cautions.size() < MAX_CAUTIONS; i++) {
+        for (int i = 0; i < cautionsRaw.size() && cautions.size() < llmGenerationProperties.getMaxCautions(); i++) {
             JsonNode rawItem = cautionsRaw.get(i);
             if (!rawItem.isObject()) {
                 continue;
@@ -306,7 +309,8 @@ public class LlmServiceBuildSupport {
      */
     public JsonNode normalizeScenarioSpecs(JsonNode raw, JsonNode structure) {
         JsonNode scenariosRaw = extractArrayByKey(raw, "scenarios");
-        if (scenariosRaw == null || !scenariosRaw.isArray()) {
+        if (scenariosRaw == null || !scenariosRaw.isArray() || scenariosRaw.isEmpty()) {
+            // 응답에 시나리오가 아예 없으면 compact 재시도 기회를 남긴다.
             throw new LlmException(LlmErrorCode.RESPONSE_PARSE_FAILED);
         }
 
@@ -318,8 +322,14 @@ public class LlmServiceBuildSupport {
                 ? (ArrayNode) out.path("methodFlow")
                 : objectMapper.createArrayNode();
 
+        JsonNode scenarioSeed = structure.path("scenarioSeed");
+        if (scenarioSeed.isArray() && !scenarioSeed.isEmpty()) {
+            out.set("scenarios", buildScenariosFromSeed(scenarioSeed, scenariosRaw, methodSeedByFqn));
+            return out;
+        }
+
         ArrayNode scenarios = out.putArray("scenarios");
-        for (int i = 0; i < scenariosRaw.size() && scenarios.size() < MAX_SCENARIOS; i++) {
+        for (int i = 0; i < scenariosRaw.size() && scenarios.size() < llmGenerationProperties.getMaxScenarios(); i++) {
             JsonNode rawScenario = scenariosRaw.get(i);
             if (!rawScenario.isObject()) {
                 continue;
@@ -335,7 +345,7 @@ public class LlmServiceBuildSupport {
             ArrayNode steps = scenario.putArray("steps");
             JsonNode rawSteps = rawScenario.path("steps");
             if (rawSteps.isArray()) {
-                for (int s = 0; s < rawSteps.size() && steps.size() < MAX_STEPS_PER_SCENARIO; s++) {
+                for (int s = 0; s < rawSteps.size() && steps.size() < llmGenerationProperties.getMaxStepsPerScenario(); s++) {
                     JsonNode rawStep = rawSteps.get(s);
                     if (!rawStep.isObject()) {
                         continue;
@@ -389,6 +399,122 @@ public class LlmServiceBuildSupport {
     }
 
     /**
+     * 시나리오 골격(scenarioSeed)을 축으로 모델 서술을 덮어 시나리오를 만든다.
+     *
+     * <p>모델 응답을 축으로 삼으면 시나리오 개수/순서/대상 메서드가 실행마다 흔들리고,
+     * 누락된 단계는 {@code methodFlow}의 같은 인덱스를 가져다 쓰게 되어 서로 다른
+     * 시나리오의 step 1이 모두 같은 메서드를 참조하는 문제가 있었다.
+     * 골격을 축으로 삼으면 구조는 코드가 보장하고 모델은 서술만 담당한다.</p>
+     *
+     * <p>필드별 우선순위가 다르다. scenarioId/classFqn/methodFqn/근거 위치는 골격이 이기고,
+     * 서술 필드는 모델이 이긴다. 모델이 대상을 바꿔치기해도 골격이 되돌린다.</p>
+     */
+    private ArrayNode buildScenariosFromSeed(
+            JsonNode scenarioSeed,
+            JsonNode scenariosRaw,
+            Map<String, JsonNode> methodSeedByFqn
+    ) {
+        Map<String, JsonNode> rawById = new HashMap<>();
+        for (JsonNode rawScenario : scenariosRaw) {
+            if (!rawScenario.isObject()) {
+                continue;
+            }
+            String id = safeText(rawScenario.path("scenarioId").asText(""));
+            if (!id.isBlank()) {
+                rawById.putIfAbsent(id, rawScenario);
+            }
+        }
+
+        ArrayNode scenarios = objectMapper.createArrayNode();
+        for (int i = 0; i < scenarioSeed.size(); i++) {
+            JsonNode seedScenario = scenarioSeed.get(i);
+            String scenarioId = firstNonBlank(
+                    seedScenario.path("scenarioId").asText(""),
+                    String.format("SCN-%03d", i + 1)
+            );
+            // scenarioId로 먼저 맞추고, 모델이 ID를 바꿨으면 같은 순서의 응답으로 맞춘다.
+            JsonNode rawScenario = rawById.get(scenarioId);
+            if (rawScenario == null) {
+                rawScenario = i < scenariosRaw.size() ? scenariosRaw.get(i) : NullNode.getInstance();
+            }
+
+            ObjectNode scenario = scenarios.addObject();
+            scenario.put("scenarioId", scenarioId);
+            scenario.put("title", firstNonBlank(
+                    rawScenario.path("title").asText(""),
+                    seedScenario.path("title").asText(""),
+                    "대표 사용 시나리오"
+            ));
+            scenario.put("intent", firstNonBlank(
+                    rawScenario.path("intent").asText(""),
+                    seedScenario.path("intent").asText(""),
+                    "핵심 API를 순서대로 호출해 기능을 완성한다."
+            ));
+            copyTextFields(rawScenario, scenario, SCENARIO_RICH_TEXT_FIELDS);
+
+            ArrayNode steps = scenario.putArray("steps");
+            JsonNode seedSteps = seedScenario.path("steps");
+            JsonNode rawSteps = rawScenario.path("steps");
+            Map<Integer, JsonNode> rawStepByNo = indexStepsByNo(rawSteps);
+
+            for (int s = 0; s < seedSteps.size(); s++) {
+                JsonNode seedStep = seedSteps.get(s);
+                int stepNo = seedStep.path("stepNo").asInt(s + 1);
+                JsonNode rawStep = rawStepByNo.get(stepNo);
+                if (rawStep == null) {
+                    rawStep = rawSteps.isArray() && s < rawSteps.size() ? rawSteps.get(s) : NullNode.getInstance();
+                }
+
+                ObjectNode step = steps.addObject();
+                step.put("stepNo", stepNo);
+                step.put("description", firstNonBlank(
+                        rawStep.path("description").asText(""),
+                        seedStep.path("summarySeed").asText(""),
+                        "핵심 메서드를 호출한다."
+                ));
+                copyTextFields(rawStep, step, STEP_RICH_TEXT_FIELDS);
+
+                String methodFqn = firstNonBlank(
+                        seedStep.path("methodFqn").asText(""),
+                        rawStep.path("methodFqn").asText("")
+                );
+                String classFqn = firstNonBlank(
+                        seedStep.path("classFqn").asText(""),
+                        rawStep.path("classFqn").asText(""),
+                        ownerFromMethodFqn(methodFqn)
+                );
+                putIfText(step, "classFqn", classFqn);
+                putIfText(step, "methodFqn", methodFqn);
+
+                // 근거 위치는 골격이 우선이다. 모델이 지어낸 evidenceId를 신뢰하지 않는다.
+                ArrayNode evidenceLinks = evidenceLinksFromSeed(seedStep);
+                if (evidenceLinks.isEmpty()) {
+                    evidenceLinks = normalizeEvidenceLinks(rawStep.path("evidenceLinks"), MAX_EVIDENCE_LINKS);
+                }
+                if (evidenceLinks.isEmpty() && !methodFqn.isBlank()) {
+                    evidenceLinks = evidenceLinksFromSeed(methodSeedByFqn.getOrDefault(methodFqn, NullNode.getInstance()));
+                }
+                step.set("evidenceLinks", evidenceLinks);
+                attachStepGuideBundle(step);
+            }
+        }
+        return scenarios;
+    }
+
+    private Map<Integer, JsonNode> indexStepsByNo(JsonNode rawSteps) {
+        Map<Integer, JsonNode> out = new HashMap<>();
+        if (rawSteps == null || !rawSteps.isArray()) {
+            return out;
+        }
+        for (JsonNode rawStep : rawSteps) {
+            if (rawStep.isObject() && rawStep.path("stepNo").canConvertToInt()) {
+                out.putIfAbsent(rawStep.path("stepNo").asInt(), rawStep);
+            }
+        }
+        return out;
+    }
+
+    /**
      * 주의사항 생성 실패 시 seed 기반 fallback을 생성한다.
      */
     public JsonNode fallbackCautions(JsonNode structure) {
@@ -397,7 +523,7 @@ public class LlmServiceBuildSupport {
         JsonNode seed = structure.path("cautionSeed").path("cautions");
 
         if (seed.isArray()) {
-            for (int i = 0; i < seed.size() && cautions.size() < MAX_CAUTIONS; i++) {
+            for (int i = 0; i < seed.size() && cautions.size() < llmGenerationProperties.getMaxCautions(); i++) {
                 JsonNode item = seed.get(i);
                 ObjectNode caution = cautions.addObject();
                 caution.put("cautionId", String.format("CAU-%03d", cautions.size()));
@@ -440,6 +566,19 @@ public class LlmServiceBuildSupport {
         ObjectNode out = objectMapper.createObjectNode();
         out.set("overview", normalizeOverview(NullNode.getInstance(), structure));
         out.set("methodFlow", normalizeMethodFlow(NullNode.getInstance(), structure.path("methodFlowSeed")));
+
+        // 골격이 있으면 모델 서술만 빠진 형태로 되돌린다. 시나리오 구조는 그대로 남는다.
+        JsonNode scenarioSeed = structure.path("scenarioSeed");
+        if (scenarioSeed.isArray() && !scenarioSeed.isEmpty()) {
+            out.set("scenarios", buildScenariosFromSeed(
+                    scenarioSeed,
+                    objectMapper.createArrayNode(),
+                    indexMethodSeedByFqn(structure.path("coreMethodSeed"))
+            ));
+            out.put("fallbackApplied", true);
+            return out;
+        }
+
         ArrayNode scenarios = out.putArray("scenarios");
 
         ObjectNode scenario = scenarios.addObject();
@@ -452,7 +591,7 @@ public class LlmServiceBuildSupport {
         ArrayNode steps = scenario.putArray("steps");
 
         ArrayNode flow = out.path("methodFlow").isArray() ? (ArrayNode) out.path("methodFlow") : objectMapper.createArrayNode();
-        for (int i = 0; i < flow.size() && i < MAX_STEPS_PER_SCENARIO; i++) {
+        for (int i = 0; i < flow.size() && i < llmGenerationProperties.getMaxStepsPerScenario(); i++) {
             JsonNode flowStep = flow.get(i);
             ObjectNode step = steps.addObject();
             step.put("stepNo", i + 1);
@@ -657,7 +796,9 @@ public class LlmServiceBuildSupport {
     private double computeForbiddenPhraseRate(String narrative) {
         String text = safeText(narrative);
         if (text.isBlank()) {
-            return 1.0d;
+            // 슬롯이 전부 비면 금지 표현도 0건이다. 여기서 1.0을 주면 "금지 표현 100%"라는
+            // 사실과 다른 값이 산출물에 남고, 빈 슬롯 페널티를 slotCoverage와 이중으로 매긴다.
+            return 0.0d;
         }
         int count = 0;
         for (String phrase : GUIDE_FORBIDDEN_PHRASES) {
@@ -1045,6 +1186,7 @@ public class LlmServiceBuildSupport {
             card.put("fqn", fqn);
             card.put("summaryRaw", guide.summaryRaw());
             attachMethodGuideBundle(card, guide, scenarioStep);
+            mergeGuideOnlyQualityFields(card, guide);
             String guideNarrative = card.path("guideNarrative").asText(guide.narrative());
             card.put("summaryNarrative", guideNarrative);
             card.put("summaryPreview", guideNarrative);
@@ -1054,27 +1196,6 @@ public class LlmServiceBuildSupport {
             card.put("whatItDoesFull", guideNarrative);
             card.put("whatItDoesTruncated", false);
             card.put("whenToUse", whenToUse);
-
-            ObjectNode guideSlots = card.putObject("guideSlots");
-            guideSlots.put("beforeCall", guide.slots().beforeCall());
-            guideSlots.put("doCall", guide.slots().doCall());
-            guideSlots.put("successCheck", guide.slots().successCheck());
-            guideSlots.put("failureSymptom", guide.slots().failureSymptom());
-            guideSlots.put("nextAction", guide.slots().nextAction());
-
-            ObjectNode guideQuality = card.putObject("guideQuality");
-            guideQuality.put("actionabilityScore", guide.quality().actionabilityScore());
-            guideQuality.put("slotCoverage", guide.quality().slotCoverage());
-            guideQuality.put("evidenceCoverage", guide.quality().evidenceCoverage());
-            guideQuality.put("forbiddenPhraseRate", guide.quality().forbiddenPhraseRate());
-            guideQuality.put("repetitionRate", guide.quality().repetitionRate());
-            guideQuality.put("targetSuitabilityScore", guide.quality().targetSuitabilityScore());
-            guideQuality.put("slotEvidenceConfidence", guide.quality().slotEvidenceConfidence());
-            guideQuality.put("threshold", ACTIONABILITY_THRESHOLD);
-            // P1-3: meetsThreshold = actionability 충족 AND targetSuitability 충족(합성/예제 제외)
-            guideQuality.put("meetsThreshold", guide.quality().actionabilityScore() >= ACTIONABILITY_THRESHOLD
-                    && guide.quality().targetSuitabilityScore() >= 1.0);
-            card.put("actionabilityScore", guide.quality().actionabilityScore());
 
             ObjectNode slotEvidence = card.putObject("slotEvidence");
             writeSlotEvidence(slotEvidence, guide.slotEvidence());
@@ -1101,6 +1222,35 @@ public class LlmServiceBuildSupport {
             }
         }
         return out;
+    }
+
+    /**
+     * ApiDocGuideSupport에서만 계산되는 지표를 메서드 카드에 얹는다.
+     *
+     * <p>예전에는 {@code attachMethodGuideBundle} 바로 다음에서 guideSlots/guideQuality를
+     * {@code putObject}로 통째로 다시 써서, 방금 병합한 시나리오 서술이 전부 사라졌다.
+     * STEP②가 아무리 좋은 서술을 만들어도 STEP④ 산출물에는 결정론적 기본 문구만 남았고,
+     * {@code attachMethodGuideBundle}의 슬롯 병합은 사실상 죽은 코드였다.
+     * 이제는 덮어쓰지 않고 빠진 값만 채운다.</p>
+     *
+     * <p>{@code targetSuitabilityScore}는 이 경로에서만 계산된다. 빠뜨리면
+     * {@code buildApiDocQualityGate}가 기본값 1.0으로 읽어(해당 코드의 asDouble 기본값)
+     * 합성/예제 대상을 걸러내는 P1-3 조건이 조용히 무력화된다.</p>
+     */
+    private void mergeGuideOnlyQualityFields(ObjectNode card, ApiDocGuideSupport.GuideView guide) {
+        JsonNode qualityNode = card.path("guideQuality");
+        if (!qualityNode.isObject()) {
+            return;
+        }
+        ObjectNode quality = (ObjectNode) qualityNode;
+        double targetSuitability = guide.quality().targetSuitabilityScore();
+        quality.put("targetSuitabilityScore", targetSuitability);
+        // slotEvidence 본문은 guide 값을 쓰므로 신뢰도 라벨도 같은 출처로 맞춘다.
+        quality.put("slotEvidenceConfidence", guide.quality().slotEvidenceConfidence());
+        // P1-3: meetsThreshold = actionability 충족 AND targetSuitability 충족(합성/예제 제외)
+        quality.put("meetsThreshold",
+                quality.path("actionabilityScore").asInt(0) >= ACTIONABILITY_THRESHOLD
+                        && targetSuitability >= 1.0);
     }
 
     private void attachMethodGuideBundle(
@@ -1621,6 +1771,8 @@ public class LlmServiceBuildSupport {
     ) {
         ObjectNode context = objectMapper.createObjectNode();
         context.set("overviewSeed", structure.path("overviewSeed"));
+        // scenarioSeed가 이 단계의 출력 골격이다. 모델은 여기에 서술만 채운다.
+        context.set("scenarioSeed", structure.path("scenarioSeed"));
         context.set("coreClassSeed", takeFirst(structure.path("coreClassSeed"), 8));
         context.set("coreMethodSeed", takeFirst(structure.path("coreMethodSeed"), 14));
         context.set("methodFlowSeed", takeFirst(structure.path("methodFlowSeed"), 6));
@@ -2046,12 +2198,18 @@ public class LlmServiceBuildSupport {
         return value;
     }
 
+    /**
+     * 문장 공백만 정리한다. 값이 없으면 빈 문자열을 그대로 돌려준다.
+     *
+     * <p>예전에는 빈 슬롯을 "핵심 동작 수행"으로 채웠는데 두 가지 문제가 있었다.
+     * 첫째, 이 문구는 프롬프트가 금지한 표현이라({@code GUIDE_FORBIDDEN_PHRASES})
+     * 코드가 스스로 주입하고 {@code computeForbiddenPhraseRate}가 그걸 다시 감점했다.
+     * 둘째, 빈 슬롯이 사라지면서 {@code computeSlotCoverage}가 항상 1.0을 반환해
+     * 점수 가중치의 45%가 상수가 됐다(실측: 두 차례 실행 20개 step 전부 1.0).
+     * 없는 값은 없는 채로 두고 지표가 그것을 드러내게 한다.</p>
+     */
     private String normalizeSentence(String text) {
-        String normalized = safeText(text).replaceAll("\\s+", " ").trim();
-        if (normalized.isBlank()) {
-            return "핵심 동작 수행";
-        }
-        return normalized;
+        return safeText(text).replaceAll("\\s+", " ").trim();
     }
 
     private String toJson(Object obj) {
