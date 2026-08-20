@@ -46,6 +46,9 @@ public class LlmServiceBuildSupport {
     // 프롬프트에 "최대 N개"라고 써도 로컬 9B 모델은 이를 무시하므로(실측: 8을 요구했으나 20개 생성),
     // 실제 개수를 결정하는 것은 여기의 상한이다. 설정과 실동작이 어긋나지 않도록 같은 값을 쓴다.
     private static final int MAX_CORE_CLASSES = 20;
+
+    /** 한 항목에 붙일 관련 시나리오 상한. 기존 코드가 쓰던 3을 상수로 승격했다. */
+    private static final int MAX_RELATED_SCENARIOS = 3;
     private static final int MAX_CORE_METHODS = 40;
     private static final int MAX_METHOD_FLOW = 16;
     private static final int MAX_EVIDENCE_LINKS = 8;
@@ -1181,14 +1184,12 @@ public class LlmServiceBuildSupport {
             return;
         }
 
-        List<String> allScenarioIds = new ArrayList<>();
         Map<String, Set<String>> scenarioIdsByClassFqn = new LinkedHashMap<>();
         for (JsonNode scenario : scenarios) {
             String scenarioId = scenario.path("scenarioId").asText("");
             if (scenarioId.isBlank()) {
                 continue;
             }
-            allScenarioIds.add(scenarioId);
             JsonNode steps = scenario.path("steps");
             if (!steps.isArray()) {
                 continue;
@@ -1214,10 +1215,12 @@ public class LlmServiceBuildSupport {
             }
             ObjectNode classObj = (ObjectNode) classNode;
             String fqn = classObj.path("fqn").asText("");
-            Set<String> related = scenarioIdsByClassFqn.getOrDefault(fqn, Set.of());
-            List<String> ids = related.isEmpty() ? allScenarioIds : new ArrayList<>(related);
+            // 매칭되는 시나리오가 없으면 빈 배열로 둔다. 예전에는 전체 시나리오 ID 앞 3개를
+            // fallback으로 넣었는데, 실측에서 coreClasses 20개 중 16개가 이 경로로
+            // "관련 없는 시나리오"를 달고 나갔다. 근거 없는 연결을 지어내지 않는다.
+            List<String> ids = new ArrayList<>(scenarioIdsByClassFqn.getOrDefault(fqn, Set.of()));
             ArrayNode relatedScenarios = classObj.putArray("relatedScenarios");
-            for (int i = 0; i < ids.size() && i < 3; i++) {
+            for (int i = 0; i < ids.size() && i < MAX_RELATED_SCENARIOS; i++) {
                 relatedScenarios.add(ids.get(i));
             }
         }
@@ -1249,6 +1252,7 @@ public class LlmServiceBuildSupport {
      */
     public ArrayNode buildSubsystemDocs(JsonNode coreClasses, JsonNode scenarioSpecs, JsonNode refinedRules) {
         Map<String, ObjectNode> byPackage = new LinkedHashMap<>();
+        Map<String, Set<String>> scenarioIdsByPackage = new LinkedHashMap<>();
         if (coreClasses.isArray()) {
             for (JsonNode type : coreClasses) {
                 String packageName = type.path("packageName").asText("");
@@ -1265,15 +1269,16 @@ public class LlmServiceBuildSupport {
                     return node;
                 });
                 byPackage.get(key).withArray("topSymbols").add("type:" + type.path("fqn").asText(""));
+                // 멤버 클래스가 이미 갖고 있는 실제 연결을 모은다.
+                // 호출 순서상 fillCoreClassRelatedScenarios가 먼저 돌아
+                // coreClasses에는 이미 올바른 relatedScenarios가 들어 있다.
+                for (JsonNode id : type.path("relatedScenarios")) {
+                    String scenarioId = safeText(id.asText(""));
+                    if (!scenarioId.isBlank()) {
+                        scenarioIdsByPackage.computeIfAbsent(key, k -> new LinkedHashSet<>()).add(scenarioId);
+                    }
+                }
             }
-        }
-
-        ArrayNode scenarios = scenarioSpecs.path("scenarios").isArray()
-                ? (ArrayNode) scenarioSpecs.path("scenarios")
-                : objectMapper.createArrayNode();
-        List<String> scenarioIds = new ArrayList<>();
-        for (int i = 0; i < scenarios.size(); i++) {
-            scenarioIds.add(scenarios.get(i).path("scenarioId").asText(""));
         }
 
         ArrayNode rules = refinedRules.path("rules").isArray()
@@ -1290,9 +1295,14 @@ public class LlmServiceBuildSupport {
             if (index++ >= MAX_CORE_CLASSES) {
                 break;
             }
+            // 이 서브시스템에 속한 클래스가 실제로 닿는 시나리오만 단다.
+            // 예전에는 전체 시나리오 ID 앞 3개를 모든 서브시스템에 똑같이 뿌려서,
+            // 서브시스템 12개가 전부 같은 값을 갖고 있었다.
+            String subsystemKey = subsystem.path("label").asText("");
             ArrayNode relatedScenarios = subsystem.withArray("relatedScenarios");
-            for (int i = 0; i < scenarioIds.size() && i < 3; i++) {
-                relatedScenarios.add(scenarioIds.get(i));
+            List<String> ids = new ArrayList<>(scenarioIdsByPackage.getOrDefault(subsystemKey, Set.of()));
+            for (int i = 0; i < ids.size() && i < MAX_RELATED_SCENARIOS; i++) {
+                relatedScenarios.add(ids.get(i));
             }
             ArrayNode relatedRules = subsystem.withArray("ruleIds");
             for (int i = 0; i < ruleIds.size() && i < 4; i++) {
@@ -1691,8 +1701,16 @@ public class LlmServiceBuildSupport {
             entry.put("subsystem", shortenText(method.path("classFqn").asText("core"), 80));
             if (method.has("apiFlowRef")) entry.set("apiFlowRef", method.path("apiFlowRef").deepCopy());
             if (method.has("flowTraceSummary")) entry.put("flowTraceSummary", method.path("flowTraceSummary").asText(""));
+            // 이 자리에 "SCN-001" 리터럴이 박혀 있었다. 32개 엔트리 전부가 같은 값을 달고
+            // 나가서, 시나리오가 아무리 좋아져도 이 필드는 영원히 변하지 않았다.
+            // attachUsageScenario가 카드에 usageScenario.scenarioId를 이미 복사해 두므로
+            // 새 인자 없이 실제 값을 읽을 수 있다. 조인이 안 된 카드는 빈 배열로 둔다 —
+            // 없는 연결을 지어내지 않는다.
             ArrayNode relatedScenarios = entry.putArray("relatedScenarios");
-            relatedScenarios.add("SCN-001");
+            String usageScenarioId = safeText(method.path("usageScenario").path("scenarioId").asText(""));
+            if (!usageScenarioId.isBlank()) {
+                relatedScenarios.add(usageScenarioId);
+            }
         }
         return out;
     }
@@ -2095,11 +2113,28 @@ public class LlmServiceBuildSupport {
             JsonNode scenarioSpecs,
             JsonNode refinedRules
     ) {
-        List<String> scenarioIds = collectIds(scenarioSpecs.path("scenarios"), "scenarioId");
         List<String> ruleIds = collectIds(refinedRules.path("rules"), "ruleId");
 
-        // coreClass fqn → super-cluster displayName 매핑
+        // 이 두 줄은 계산만 되고 한 번도 읽힐지 않는 죽은 코드였다.
+        // 설계자가 서브시스템별 실제 연결을 넣으려고 통로를 뚫어 둔 것으로 보이는데
+        // 연결하지 않았고, 그 사이 relatedScenarios는 전체 시나리오 앞 3개를
+        // 모든 서브시스템에 똑같이 넣고 있었다. 이제 원래 용도대로 쓴다.
         Map<String, String> packageToSuperLabel = buildPackageToSuperLabel(superSubsystems);
+        Map<String, Set<String>> scenarioIdsBySuperLabel = new LinkedHashMap<>();
+        if (coreClasses != null && coreClasses.isArray()) {
+            for (JsonNode type : coreClasses) {
+                String label = resolveSuperLabel(packageToSuperLabel, type.path("packageName").asText(""));
+                if (label == null || label.isBlank()) {
+                    continue;
+                }
+                for (JsonNode id : type.path("relatedScenarios")) {
+                    String scenarioId = safeText(id.asText(""));
+                    if (!scenarioId.isBlank()) {
+                        scenarioIdsBySuperLabel.computeIfAbsent(label, k -> new LinkedHashSet<>()).add(scenarioId);
+                    }
+                }
+            }
+        }
 
         ArrayNode out = objectMapper.createArrayNode();
         if (!superSubsystems.isArray()) return out;
@@ -2141,10 +2176,12 @@ public class LlmServiceBuildSupport {
                 }
             }
 
-            // relatedScenarios (전체 시나리오를 공유, 최대 3개)
+            // relatedScenarios: 이 모듈에 속한 클래스가 실제로 닿는 시나리오만.
             ArrayNode relatedScenarios = item.putArray("relatedScenarios");
-            for (int j = 0; j < scenarioIds.size() && j < 3; j++) {
-                relatedScenarios.add(scenarioIds.get(j));
+            List<String> supScenarioIds =
+                    new ArrayList<>(scenarioIdsBySuperLabel.getOrDefault(displayName, Set.of()));
+            for (int j = 0; j < supScenarioIds.size() && j < MAX_RELATED_SCENARIOS; j++) {
+                relatedScenarios.add(supScenarioIds.get(j));
             }
 
             // ruleIds (전체 규칙을 공유, 최대 4개)
@@ -2178,6 +2215,38 @@ public class LlmServiceBuildSupport {
             label.put("memberCount", sup.path("memberCount").asInt(0));
         }
         return out;
+    }
+
+    /**
+     * 클래스의 패키지가 어느 super-cluster에 속하는지 최장 접두사로 찾는다.
+     *
+     * <p>{@code packageRoots}는 {@code org.junit.jupiter.api}처럼 전체 패키지명인데
+     * 클래스의 패키지는 {@code org.junit.jupiter.api.extension}처럼 더 깊다.
+     * 정확 일치로 찾으면 대부분 미스가 나고, {@code topPackageKey}로 자르면
+     * {@code org.junit.jupiter}가 되어 아예 어긋난다. 그래서 접두사로 맞춘다.</p>
+     *
+     * <p>여러 super-cluster가 같은 root를 공유하는 경우가 있는데
+     * ({@code org.junit.jupiter.api}가 engine과 params 양쪽에 등장한다)
+     * {@code buildPackageToSuperLabel}의 {@code putIfAbsent}가 먼저 등록된 쪽을 남긴다.
+     * 기존 동작이므로 여기서 바꾸지 않는다.</p>
+     */
+    private String resolveSuperLabel(Map<String, String> packageToSuperLabel, String packageName) {
+        String pkg = safeText(packageName);
+        if (pkg.isBlank() || packageToSuperLabel.isEmpty()) {
+            return "";
+        }
+        String bestRoot = "";
+        for (Map.Entry<String, String> entry : packageToSuperLabel.entrySet()) {
+            String root = safeText(entry.getKey());
+            if (root.isBlank()) {
+                continue;
+            }
+            boolean matches = pkg.equals(root) || pkg.startsWith(root + ".");
+            if (matches && root.length() > bestRoot.length()) {
+                bestRoot = root;
+            }
+        }
+        return bestRoot.isBlank() ? "" : packageToSuperLabel.get(bestRoot);
     }
 
     private Map<String, String> buildPackageToSuperLabel(JsonNode superSubsystems) {

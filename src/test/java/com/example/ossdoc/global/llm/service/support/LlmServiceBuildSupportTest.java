@@ -553,4 +553,60 @@ class LlmServiceBuildSupportTest {
         assertThat(guide.quality().slotCoverage()).isEqualTo(0.4d);
         assertThat(guide.quality().forbiddenPhraseRate()).isZero();
     }
+
+    // ------------------------------------------------------------------
+    // 전파 회복: 날조된 시나리오 연결 제거
+    // ------------------------------------------------------------------
+
+    @Test
+    void apiEntries_useRealScenarioIdInsteadOfHardcodedLiteral() {
+        ArrayNode cards = objectMapper.createArrayNode();
+        ObjectNode joined = cards.addObject();
+        joined.put("fqn", "com.example.Foo.parse");
+        joined.putObject("usageScenario").put("scenarioId", "SCN-003");
+        ObjectNode unjoined = cards.addObject();
+        unjoined.put("fqn", "com.example.Foo.other");
+
+        ArrayNode entries = support.buildApiEntriesCompat(cards);
+
+        // 예전에는 둘 다 "SCN-001" 리터럴을 받았다.
+        assertThat(entries.get(0).path("relatedScenarios").get(0).asText()).isEqualTo("SCN-003");
+        assertThat(entries.get(1).path("relatedScenarios")).isEmpty();
+    }
+
+    @Test
+    void coreClasses_leaveRelatedScenariosEmptyWhenNoMatch() throws Exception {
+        ArrayNode coreClasses = objectMapper.createArrayNode();
+        coreClasses.addObject().put("fqn", "com.example.Matched");
+        coreClasses.addObject().put("fqn", "com.example.Unrelated");
+
+        JsonNode specs = objectMapper.readTree("""
+                {"scenarios":[{"scenarioId":"SCN-001","steps":[
+                  {"classFqn":"com.example.Matched","methodFqn":"com.example.Matched.run"}]}]}
+                """);
+
+        support.fillCoreClassRelatedScenarios(coreClasses, specs);
+
+        assertThat(coreClasses.get(0).path("relatedScenarios").get(0).asText()).isEqualTo("SCN-001");
+        // 예전에는 전체 시나리오 ID 앞 3개를 fallback으로 넣어
+        // 실측 coreClasses 20개 중 16개가 관련 없는 연결을 달고 나갔다.
+        assertThat(coreClasses.get(1).path("relatedScenarios")).isEmpty();
+    }
+
+    @Test
+    void subsystemDocs_useMemberClassLinksInsteadOfSharingAllScenarios() throws Exception {
+        JsonNode coreClasses = objectMapper.readTree("""
+                [{"fqn":"com.example.a.Foo","packageName":"com.example.a","relatedScenarios":["SCN-001"]},
+                 {"fqn":"com.example.b.Bar","packageName":"com.example.b","relatedScenarios":[]}]
+                """);
+
+        ArrayNode docs = support.buildSubsystemDocs(
+                coreClasses, objectMapper.createObjectNode(), objectMapper.createObjectNode());
+
+        // 서브시스템마다 실제로 닿는 시나리오만 달린다.
+        // 예전에는 12개 서브시스템이 전부 같은 ID 3개를 갖고 있었다.
+        assertThat(docs).hasSize(2);
+        assertThat(docs.get(0).path("relatedScenarios").get(0).asText()).isEqualTo("SCN-001");
+        assertThat(docs.get(1).path("relatedScenarios")).isEmpty();
+    }
 }
