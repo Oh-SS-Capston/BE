@@ -44,13 +44,51 @@ public class LlmScenarioContextSupport {
     /**
      * overview 호출용 컨텍스트. 시나리오 골격은 싣지 않는다.
      * 개요는 프로젝트 수준 시드만 있으면 되고, 골격을 실으면 모델이 시나리오를 쓰기 시작한다.
+     *
+     * <p>항목 수만 제한하고 항목 내용을 통째로 실었더니 실측 13,411자가 나갔다.
+     * caution 하나에 guideSlots·slotEvidence·guideNarrative·guideQuality가 딸려 오는데
+     * 전부 개요 문장을 쓰는 데 필요 없는 것들이다(각각 1,966 / 1,764 / 1,450 / 1,242자).
+     * 그 결과 프롬프트 5,958토큰을 써서 출력 169토큰을 냈고, 7.2분 중 86%가 프롬프트 처리였다.</p>
+     *
+     * <p>개요에 실제로 쓰이는 필드만 투영한다. 항목 <b>개수</b>가 아니라 항목 <b>크기</b>가
+     * 비용을 결정한다는 것이 이 단계에서 배운 것이다.</p>
      */
     public String buildOverviewContext(JsonNode structure, JsonNode refinedRules) {
         ObjectNode context = objectMapper.createObjectNode();
         context.set("overviewSeed", structure.path("overviewSeed"));
-        context.set("coreClassSeed", takeFirst(structure.path("coreClassSeed"), 8));
-        context.set("cautions", takeFirst(refinedRules.path("cautions"), 6));
+        context.set("coreClassSeed", projectFields(structure.path("coreClassSeed"), 8,
+                "fqn", "className", "role", "usage"));
+        context.set("cautions", projectFields(refinedRules.path("cautions"), 6,
+                "cautionId", "title", "message", "relatedClass"));
         return toJson(context);
+    }
+
+    /**
+     * 배열에서 앞 {@code limit}개를 가져오되 지정한 키만 남긴다.
+     * 개수 제한만으로는 항목 하나가 무거울 때 아무 소용이 없다.
+     */
+    private ArrayNode projectFields(JsonNode source, int limit, String... keys) {
+        ArrayNode out = objectMapper.createArrayNode();
+        if (!source.isArray()) {
+            return out;
+        }
+        for (int i = 0; i < source.size() && out.size() < limit; i++) {
+            JsonNode item = source.get(i);
+            if (!item.isObject()) {
+                continue;
+            }
+            ObjectNode projected = out.addObject();
+            for (String key : keys) {
+                JsonNode value = item.path(key);
+                if (!value.isMissingNode() && !value.isNull()) {
+                    projected.set(key, value);
+                }
+            }
+            if (projected.isEmpty()) {
+                out.remove(out.size() - 1);
+            }
+        }
+        return out;
     }
 
     /**
@@ -178,16 +216,6 @@ public class LlmScenarioContextSupport {
         return out;
     }
 
-    private ArrayNode takeFirst(JsonNode arrayNode, int limit) {
-        ArrayNode out = objectMapper.createArrayNode();
-        if (!arrayNode.isArray()) {
-            return out;
-        }
-        for (int i = 0; i < arrayNode.size() && i < limit; i++) {
-            out.add(arrayNode.get(i));
-        }
-        return out;
-    }
 
     private void addIfText(Set<String> target, String value) {
         if (value != null && !value.isBlank()) {

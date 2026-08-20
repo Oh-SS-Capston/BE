@@ -633,6 +633,16 @@ public class LlmServiceBuildSupport {
         for (JsonNode step : seedScenario.path("steps")) {
             collectSymbolNames(allowed, step.path("classFqn").asText(""));
             collectSymbolNames(allowed, step.path("methodFqn").asText(""));
+            // signatureHint의 반환·파라미터 타입도 근거다. 이게 빠져 있어서 SCN-002에서
+            // DiscoverySelectors.parse()의 반환 타입을 설명한 문장 9건이 전부 "골격 밖"으로
+            // 잡혔다. 골격 step은 호출 대상 클래스만 싣기 때문에, 반환값을 설명하는
+            // 정상 서술이 구조적으로 오탐이 되던 것이다.
+            //
+            // 여기서 CAMEL_CASE_SYMBOL을 그대로 쓴다. signatureHint는
+            // "DiscoverySelectorIdentifier -> DiscoverySelector" 같은 형태라
+            // collectSymbolNames의 [.#] split으로는 쪼개지지 않는다. 무엇보다
+            // 탐지와 허용이 같은 규칙을 써야 비대칭 오탐이 생기지 않는다.
+            collectCamelCaseSymbols(allowed, step.path("signatureHint").asText(""));
         }
 
         Map<String, Integer> offSkeleton = new LinkedHashMap<>();
@@ -660,6 +670,17 @@ public class LlmServiceBuildSupport {
                         + " (hallucination 지표가 아니라 방황 위치 이동 여부만 잰다)",
                 builtScenario.path("scenarioId").asText(""), scannedChars, total, offSkeleton
         );
+    }
+
+    /** 탐지와 같은 규칙으로 심볼을 뽑아 허용 집합에 넣는다. 규칙이 갈리면 오탐이 생긴다. */
+    private void collectCamelCaseSymbols(Set<String> target, String text) {
+        if (text == null || text.isBlank()) {
+            return;
+        }
+        Matcher matcher = CAMEL_CASE_SYMBOL.matcher(text);
+        while (matcher.find()) {
+            target.add(matcher.group());
+        }
     }
 
     /** FQN에서 사람이 서술에 쓸 법한 이름(단순 타입명, 메서드명)을 뽑아 허용 집합에 넣는다. */

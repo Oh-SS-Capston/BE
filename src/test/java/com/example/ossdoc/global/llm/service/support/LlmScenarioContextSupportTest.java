@@ -140,4 +140,30 @@ class LlmScenarioContextSupportTest {
         assertThat(context.has("scenarioSeed")).isFalse();
         assertThat(context.path("overviewSeed").path("purpose").asText()).isEqualTo("HTTP 클라이언트");
     }
+
+    @Test
+    @DisplayName("개요 컨텍스트는 개요에 쓰이는 필드만 실는다")
+    void overviewContextProjectsOnlyNeededFields() throws Exception {
+        // 실측 caution 하나의 모양: 개요에 불필요한 묶음이 달려 온다.
+        JsonNode rules = objectMapper.readTree("""
+                {"cautions":[{"cautionId":"CAU-001","title":"파싱 오류 주의",
+                  "message":"형식이 틀리면 예외가 발생한다","relatedClass":"okhttp3.MediaType",
+                  "guideSlots":{"beforeCall":"긴 문장","doCall":"긴 문장","successCheck":"긴 문장"},
+                  "guideNarrative":"슬롯을 이어 붙인 긴 문장",
+                  "guideQuality":{"actionabilityScore":100,"slotCoverage":1.0},
+                  "slotEvidence":{"beforeCall":"a.java:1","doCall":"a.java:2"}}]}
+                """);
+
+        String json = support.buildOverviewContext(structureWithSeeds(), rules);
+        JsonNode caution = objectMapper.readTree(json).path("cautions").get(0);
+
+        assertThat(caution.path("title").asText()).isEqualTo("파싱 오류 주의");
+        assertThat(caution.path("message").asText()).contains("예외");
+        // 개요 문장을 쓰는 데 안 쓰이는 묶음은 실리지 않는다.
+        // 이것들 때문에 프롬프트 5,958토큰을 써서 출력 169토큰을 냈다.
+        assertThat(caution.has("guideSlots")).isFalse();
+        assertThat(caution.has("guideNarrative")).isFalse();
+        assertThat(caution.has("guideQuality")).isFalse();
+        assertThat(caution.has("slotEvidence")).isFalse();
+    }
 }

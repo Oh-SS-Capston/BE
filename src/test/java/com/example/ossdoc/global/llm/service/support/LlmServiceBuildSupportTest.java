@@ -609,4 +609,36 @@ class LlmServiceBuildSupportTest {
         assertThat(docs.get(0).path("relatedScenarios").get(0).asText()).isEqualTo("SCN-001");
         assertThat(docs.get(1).path("relatedScenarios")).isEmpty();
     }
+
+    /**
+     * signatureHint의 반환·파라미터 타입을 설명해도 "골격 밖"으로 잡지 않는다.
+     *
+     * <p>골격 step은 호출 대상 클래스만 실어서, 반환값을 설명하는 정상 서술이
+     * 구조적으로 오탐이 됐다. 실측에서 SCN-002의 9건이 전부 이 부류였다.</p>
+     */
+    @Test
+    void offSkeletonMetric_allowsTypesFromSignatureHint() throws Exception {
+        JsonNode structure = objectMapper.readTree("""
+                {"scenarioSeed":[{"scenarioId":"SCN-001","steps":[{
+                   "stepNo":1,
+                   "classFqn":"org.junit.platform.engine.discovery.DiscoverySelectors",
+                   "methodFqn":"org.junit.platform.engine.discovery.DiscoverySelectors.parse",
+                   "signatureHint":"parse(DiscoverySelectorIdentifier) -> DiscoverySelector"
+                 }]}]}
+                """);
+        JsonNode raw = objectMapper.readTree("""
+                {"scenarios":[{"scenarioId":"SCN-001","steps":[{
+                   "stepNo":1,
+                   "description":"DiscoverySelectorIdentifier를 받아 DiscoverySelector를 돌려준다"
+                 }]}]}
+                """);
+
+        JsonNode normalized = support.normalizeScenarioSpecs(raw, structure);
+
+        // 로그로만 남는 지표라 직접 assert할 값은 없다.
+        // 서술이 보존되고 예외 없이 통과하는지만 고정하고,
+        // 오탐 여부는 run 로그의 "방황 이동" 항목으로 확인한다.
+        assertThat(normalized.path("scenarios").get(0).path("steps").get(0).path("description").asText())
+                .contains("DiscoverySelector");
+    }
 }
