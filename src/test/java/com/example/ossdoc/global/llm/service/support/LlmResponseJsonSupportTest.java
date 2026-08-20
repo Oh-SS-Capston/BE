@@ -68,6 +68,44 @@ class LlmResponseJsonSupportTest {
     }
 
     @Test
+    @DisplayName("복원 내역은 덧붙인 닫는 구분자 수를 센다 (길이 차이로 재지 않는다)")
+    void reportsWhatRepairActuallyDid() {
+        // 객체 > 배열 > 객체 로 세 겹이 열린 채 문자열 한가운데서 끊긴 응답.
+        String truncated = "{\"cautions\":[{\"cautionId\":\"CAU-001\",\"title\":\"미완성";
+
+        LlmResponseJsonSupport.TruncationRepair repair =
+                LlmResponseJsonSupport.repairTruncatedJson(truncated);
+
+        assertThat(repair.closersAppended()).isEqualTo(3);
+        assertThat(repair.unterminatedString()).isTrue();
+        assertThat(repair.preambleDroppedChars()).isZero();
+        assertThat(repair.repaired()).isTrue();
+        // 복원은 항목을 버리지 않고 닫으므로 결과가 원본보다 짧아질 수 없다.
+        // 예전 "폐기 N자" 지표가 음수를 찍던 원인이다.
+        assertThat(repair.json().length()).isGreaterThanOrEqualTo(truncated.length());
+    }
+
+    @Test
+    @DisplayName("JSON 앞에 붙은 서두는 폐기 길이로 센다")
+    void countsPreambleAsDropped() {
+        LlmResponseJsonSupport.TruncationRepair repair =
+                LlmResponseJsonSupport.repairTruncatedJson("여기 결과입니다: {\"a\":1}");
+
+        assertThat(repair.preambleDroppedChars()).isEqualTo("여기 결과입니다: ".length());
+        assertThat(repair.closersAppended()).isZero();
+        assertThat(repair.json()).isEqualTo("{\"a\":1}");
+    }
+
+    @Test
+    @DisplayName("정상 종료한 JSON은 복원 흔적이 없다")
+    void reportsNoRepairForCompleteJson() {
+        LlmResponseJsonSupport.TruncationRepair repair =
+                LlmResponseJsonSupport.repairTruncatedJson("{\"a\":1}");
+
+        assertThat(repair.repaired()).isFalse();
+    }
+
+    @Test
     @DisplayName("404는 재시도 대상이 아니고 429/5xx는 재시도 대상이다")
     void classifiesRetryableStatuses() {
         assertThat(LlmResponseJsonSupport.isRetryableStatus(404)).isFalse();

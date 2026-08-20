@@ -39,10 +39,14 @@ public class LlmOllamaClientSupport implements LlmChatClient {
     private static final double CHARS_PER_TOKEN_ESTIMATE = 3.0;
 
     /**
-     * 생성 속도 기준값(tok/s). qwen3.5:9b Q4_K_M / CPU 100%에서 실측 3.7 tok/s.
-     * 타임아웃이 num_predict를 감당할 수 있는지 사전 점검하는 데만 쓴다.
+     * 생성 속도 기준값(tok/s). 타임아웃이 num_predict를 감당할 수 있는지 사전 점검하는 데만 쓴다.
+     *
+     * <p>8차 baseline 실측: 컨텍스트 5,640토큰에서 3.18 tok/s, 12,489토큰에서 2.35 tok/s.
+     * 생성 속도는 상수가 아니라 <b>컨텍스트 길이에 따라 느려진다</b>(어텐션 비용).
+     * 사전 경고는 늦게 뜨는 것보다 일찍 뜨는 편이 안전하므로 느린 쪽 값을 쓴다.
+     * 이전 값 3.7은 컨텍스트가 짧던 시절 수치라 지금은 타임아웃을 과소평가한다.</p>
      */
-    private static final double BASELINE_TOKENS_PER_SECOND = 3.7;
+    private static final double BASELINE_TOKENS_PER_SECOND = 2.35;
 
     /**
      * 실측 자/토큰. 진단 로그에서 "이 토큰수면 본문이 몇 자여야 하는가"의 기준선으로만 쓴다.
@@ -58,6 +62,9 @@ public class LlmOllamaClientSupport implements LlmChatClient {
 
     /** 절단 지점 확인용 발췌 길이. 로그 한 줄이 터지지 않을 만큼만 남긴다. */
     private static final int EXCERPT_CHARS = 600;
+
+    /** 벽시계에서 이 비율 이상이 구간별로 설명되지 않으면 경고한다. */
+    private static final double UNACCOUNTED_WARN_PERCENT = 15.0;
 
     private final RestClient ollamaRestClient;
     private final OllamaConfig ollamaConfig;
@@ -313,10 +320,12 @@ public class LlmOllamaClientSupport implements LlmChatClient {
                 }
                 // 파싱이 깨졌다는 것 자체가 이상 신호다. 절단이든 중단이든 원본을 남긴다.
                 logPayloadExcerpt(stepName, jsonPayload, truncated ? "num_predict 상한 절단" : "생성 중단 추정");
+                LlmResponseJsonSupport.TruncationRepair repair =
+                        LlmResponseJsonSupport.repairTruncatedJson(jsonPayload);
                 JsonNode recovered = LlmResponseJsonSupport.tryRecoverTruncatedJson(objectMapper, jsonPayload);
                 if (recovered != null) {
                     log.warn("[LlmOllama] {} 잘린 응답을 복원했습니다.", stepName);
-                    logRecoveryLoss(stepName, jsonPayload, recovered);
+                    logRepair(stepName, jsonPayload, repair);
                     return recovered;
                 }
                 throw parseFail;
@@ -330,26 +339,93 @@ public class LlmOllamaClientSupport implements LlmChatClient {
     }
 
     /**
-     * 생성 속도/로딩 시간을 남긴다.
-     * CPU 환경에서 파라미터를 조정하려면 실제 tok/s를 봐야 한다.
+     * 한 호출의 벽시계 시간을 구간별로 분해해 남긴다.
+     *
+     * <p>지금까지는 생성 구간(eval)과 모델 로딩만 찍었기 때문에, 벽시계 50분 중
+     * 생성으로 설명되는 22분을 뺀 나머지가 어디로 갔는지 말할 수 없었다.
+     * 후보는 프롬프트 재처리(prompt_eval), 모델 로딩, 그 어느 쪽도 아닌 잔여이고
+     * 처방이 서로 다르다 — 프롬프트가 범인이면 컨텍스트를 줄여야 하고,
+     * 로딩이면 모델 상주를 손대야 하며, 잔여가 크면 측정 밖 요인을 더 찾아야 한다.</p>
+     *
+     * <p>특히 시나리오를 여러 호출로 쪼개면 프롬프트가 호출 수만큼 재처리된다.
+     * 그 전환이 이득인지 손해인지는 prompt_eval 구간을 보지 않고는 판정할 수 없다.
+     * 바꾸기 전에 기준선을 남기려고 먼저 넣는다.</p>
      */
     private void logGenerationStats(String stepName, JsonNode root) {
         long promptTokens = root.path("prompt_eval_count").asLong(0);
         long outputTokens = root.path("eval_count").asLong(0);
         long evalNanos = root.path("eval_duration").asLong(0);
+        long promptEvalNanos = root.path("prompt_eval_duration").asLong(0);
         long loadNanos = root.path("load_duration").asLong(0);
+        long totalNanos = root.path("total_duration").asLong(0);
+
         double tokensPerSecond = evalNanos > 0
                 ? outputTokens / (evalNanos / 1_000_000_000.0)
                 : 0.0;
+        double promptTokensPerSecond = promptEvalNanos > 0
+                ? promptTokens / (promptEvalNanos / 1_000_000_000.0)
+                : 0.0;
 
         log.info(
-                "[LlmOllama] {} 완료. 입력 {}토큰, 출력 {}토큰, 생성속도 {} tok/s, 모델로딩 {}초",
+                "[LlmOllama] {} 완료. 입력 {}토큰, 출력 {}토큰,"
+                        + " 생성속도 {} tok/s, 프롬프트처리속도 {} tok/s, 모델로딩 {}초",
                 stepName,
                 promptTokens,
                 outputTokens,
                 String.format("%.2f", tokensPerSecond),
+                String.format("%.2f", promptTokensPerSecond),
                 String.format("%.1f", loadNanos / 1_000_000_000.0)
         );
+
+        logWallClockBreakdown(stepName, totalNanos, loadNanos, promptEvalNanos, evalNanos);
+    }
+
+    /**
+     * 벽시계를 로딩 / 프롬프트 / 생성 / 잔여로 나눠 비율까지 남긴다.
+     *
+     * <p>{@code total_duration}이 없거나 0이면 정상 종료가 아니므로 분해하지 않는다.
+     * 잔여가 큰 경우만 경고로 올린다 — 세 구간으로 설명되지 않는 시간은
+     * 프롬프트 길이나 num_predict를 줄여도 사라지지 않는 종류의 비용이라 따로 봐야 한다.</p>
+     */
+    private void logWallClockBreakdown(
+            String stepName,
+            long totalNanos,
+            long loadNanos,
+            long promptEvalNanos,
+            long evalNanos
+    ) {
+        if (totalNanos <= 0) {
+            return;
+        }
+        long otherNanos = Math.max(0, totalNanos - loadNanos - promptEvalNanos - evalNanos);
+        double otherPercent = percentOf(otherNanos, totalNanos);
+
+        String summary = String.format(
+                "[LlmOllama] %s 시간 분해. 총 %.1f분 = 로딩 %.1f분(%.0f%%)"
+                        + " + 프롬프트 %.1f분(%.0f%%) + 생성 %.1f분(%.0f%%) + 잔여 %.1f분(%.0f%%)",
+                stepName,
+                totalNanos / 60_000_000_000.0,
+                loadNanos / 60_000_000_000.0, percentOf(loadNanos, totalNanos),
+                promptEvalNanos / 60_000_000_000.0, percentOf(promptEvalNanos, totalNanos),
+                evalNanos / 60_000_000_000.0, percentOf(evalNanos, totalNanos),
+                otherNanos / 60_000_000_000.0, otherPercent
+        );
+
+        if (otherPercent >= UNACCOUNTED_WARN_PERCENT) {
+            log.warn(summary);
+            log.warn(
+                    "[LlmOllama] {} 벽시계의 {}%가 로딩/프롬프트/생성 어느 구간에도 잡히지 않습니다."
+                            + " 프롬프트 길이나 num_predict를 줄여도 이 시간은 줄지 않습니다.",
+                    stepName,
+                    String.format("%.0f", otherPercent)
+            );
+        } else {
+            log.info(summary);
+        }
+    }
+
+    private static double percentOf(long part, long total) {
+        return total > 0 ? (part * 100.0) / total : 0.0;
     }
 
     /**
@@ -429,30 +505,26 @@ public class LlmOllamaClientSupport implements LlmChatClient {
     }
 
     /**
-     * 절단 복원이 버린 분량을 남긴다.
+     * 절단 복원이 실제로 무엇을 고쳤는지 남긴다.
      *
-     * <p>복원은 괄호/따옴표 균형을 맞추려고 마지막 미완성 항목을 통째로 버린다.
-     * 버린 양이 크면 "상한이 모자란 것"이 아니라 "쓴 것을 우리가 버린 것"이므로
-     * 처방이 완전히 달라진다.</p>
+     * <p>이전 버전은 "폐기 N자"를 길이 차이로 구했는데 전제와 단위가 둘 다 틀렸다.
+     * 복원은 미완성 항목을 버리지 않고 닫는 구분자를 덧붙이므로 결과가 원본보다 길어지고,
+     * 비교 대상도 Jackson이 재직렬화한 문자열이라 애초에 같은 단위가 아니었다.
+     * 8차 baseline에서 "폐기 -6자 (-0.0%)"가 찍혀 드러났다.</p>
+     *
+     * <p>대신 복원이 센 값을 그대로 쓴다. {@code closersAppended}가 크면 응답이 그만큼
+     * 깊이 열린 채 끝났다는 뜻이라 "상한이 모자랐다"의 직접 증거가 된다.</p>
      */
-    private void logRecoveryLoss(String stepName, String jsonPayload, JsonNode recovered) {
-        try {
-            int keptChars = objectMapper.writeValueAsString(recovered).length();
-            int lostChars = jsonPayload.length() - keptChars;
-            double lostRatio = jsonPayload.length() > 0
-                    ? (double) lostChars / jsonPayload.length()
-                    : 0.0;
-            log.warn(
-                    "[LlmOllama] {} 복원 손실. 파싱대상 {}자 → 보존 {}자, 폐기 {}자 ({}%)",
-                    stepName,
-                    jsonPayload.length(),
-                    keptChars,
-                    lostChars,
-                    String.format("%.1f", lostRatio * 100)
-            );
-        } catch (JsonProcessingException e) {
-            log.warn("[LlmOllama] {} 복원 손실 측정 실패.", stepName);
-        }
+    private void logRepair(String stepName, String jsonPayload, LlmResponseJsonSupport.TruncationRepair repair) {
+        log.warn(
+                "[LlmOllama] {} 복원 내역. 파싱대상 {}자 → 닫는 구분자 {}개 추가"
+                        + "(응답이 그만큼 열린 채 끝남), 서두 폐기 {}자, 문자열 중간 절단 {}",
+                stepName,
+                jsonPayload.length(),
+                repair.closersAppended(),
+                repair.preambleDroppedChars(),
+                repair.unterminatedString() ? "예" : "아니오"
+        );
     }
 
     /**

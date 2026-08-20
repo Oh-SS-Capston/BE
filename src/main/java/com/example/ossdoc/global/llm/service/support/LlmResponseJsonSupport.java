@@ -92,6 +92,31 @@ public final class LlmResponseJsonSupport {
     }
 
     /**
+     * 절단 복원이 실제로 무엇을 했는지 담는다.
+     *
+     * <p>이건 <b>길이 차이로는 알 수 없다</b>. 복원은 미완성 항목을 버리는 게 아니라
+     * 닫는 구분자를 덧붙이므로 결과가 원본보다 길어지고, 여기에 Jackson 재직렬화 길이까지
+     * 섞어 빼면 "폐기 -6자" 같은 음수가 나온다(8차 baseline에서 실제로 그렇게 찍혔다).
+     * 그래서 복원 과정에서 직접 센다.</p>
+     *
+     * @param json                 복원된 JSON 문자열
+     * @param preambleDroppedChars 첫 여는 구분자 앞에서 버린 서두 길이
+     * @param closersAppended      덧붙인 닫는 구분자 수 = 응답이 그만큼 열린 채 끝났다는 뜻
+     * @param unterminatedString   문자열 리터럴 한가운데서 끊겼는지
+     */
+    public record TruncationRepair(
+            String json,
+            int preambleDroppedChars,
+            int closersAppended,
+            boolean unterminatedString
+    ) {
+        /** 손댈 곳이 하나라도 있었는지. 정상 종료한 응답과 구분하는 데 쓴다. */
+        public boolean repaired() {
+            return preambleDroppedChars > 0 || closersAppended > 0 || unterminatedString;
+        }
+    }
+
+    /**
      * 문자열/이스케이프 상태를 추적하며 닫히지 않은 배열·객체를 닫아준다.
      *
      * <p>여는 괄호를 스택으로 추적해 <b>연 순서의 역순</b>으로 닫는다.
@@ -100,6 +125,14 @@ public final class LlmResponseJsonSupport {
      * LLM 응답은 대부분 "객체 안의 배열 안의 객체" 구조라 이 순서가 중요하다.</p>
      */
     public static String recoverPotentiallyTruncatedJson(String payload) {
+        return repairTruncatedJson(payload).json();
+    }
+
+    /**
+     * 복원 결과와 함께 "무엇을 고쳤는지"를 돌려준다.
+     * 진단 로그가 길이 비교 대신 이 값을 쓰게 하려는 입구다.
+     */
+    public static TruncationRepair repairTruncatedJson(String payload) {
         String input = payload == null ? "" : payload.trim();
         int objectStart = input.indexOf('{');
         int arrayStart = input.indexOf('[');
@@ -112,7 +145,7 @@ public final class LlmResponseJsonSupport {
             start = Math.min(objectStart, arrayStart);
         }
         if (start < 0) {
-            return "";
+            return new TruncationRepair("", input.length(), 0, false);
         }
 
         StringBuilder sb = new StringBuilder();
@@ -155,13 +188,15 @@ public final class LlmResponseJsonSupport {
         if (inString) {
             sb.append('"');
         }
+        int closersAppended = openDelimiters.size();
         while (!openDelimiters.isEmpty()) {
             sb.append(openDelimiters.pop() == '{' ? '}' : ']');
         }
-        return sb.toString()
+        String json = sb.toString()
                 .replaceAll(",\\s*}", "}")
                 .replaceAll(",\\s*]", "]")
                 .trim();
+        return new TruncationRepair(json, start, closersAppended, inString);
     }
 
     /**
