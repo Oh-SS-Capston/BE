@@ -175,7 +175,6 @@ public class LlmServiceBuildSupport {
                     methodName,
                     methodFqn,
                     summaryRaw,
-                    inferWhenToUse(methodName),
                     List.of(),
                     filePath,
                     startLine,
@@ -1336,7 +1335,6 @@ public class LlmServiceBuildSupport {
             String fqn = seed.path("fqn").asText("");
             String methodName = seed.path("methodName").asText("");
             String classFqn = seed.path("classFqn").asText("");
-            String whenToUse = inferWhenToUse(methodName);
             List<String> methodCautions = cautionByMethod.getOrDefault(fqn, List.of());
             JsonNode scenarioStep = scenarioStepByMethod.getOrDefault(fqn, NullNode.getInstance());
             ApiDocSummarySupport.SummaryView summary = ApiDocSummarySupport.fromMethodSeed(
@@ -1350,7 +1348,6 @@ public class LlmServiceBuildSupport {
                     methodName,
                     fqn,
                     summary.summaryRaw(),
-                    whenToUse,
                     methodCautions,
                     seed.path("filePath").asText(""),
                     seed.path("startLine").canConvertToInt() ? seed.path("startLine").asInt() : null,
@@ -1363,7 +1360,14 @@ public class LlmServiceBuildSupport {
             card.put("summaryRaw", guide.summaryRaw());
             attachMethodGuideBundle(card, guide, scenarioStep);
             mergeGuideOnlyQualityFields(card, guide);
-            String guideNarrative = card.path("guideNarrative").asText(guide.narrative());
+            // 슬롯이 비면 narrative도 비고, 그때 fallback 대상은 summaryRaw다.
+            // 그런데 미조인 카드의 summaryRaw 대부분이 이름 규칙 채움말이었으므로
+            // 그대로 떨어뜨릴 수 없다. guide.summaryRaw()는 이미 정화된 값이라
+            // 채움말이면 빈 문자열이고, 비는 것이 사실에 맞는 상태다.
+            String guideNarrative = firstNonBlank(
+                    card.path("guideNarrative").asText(""),
+                    guide.narrative(),
+                    guide.summaryRaw());
             card.put("summaryNarrative", guideNarrative);
             card.put("summaryPreview", guideNarrative);
             card.put("summaryTruncated", false);
@@ -1371,7 +1375,6 @@ public class LlmServiceBuildSupport {
             card.put("whatItDoesPreview", guideNarrative);
             card.put("whatItDoesFull", guideNarrative);
             card.put("whatItDoesTruncated", false);
-            card.put("whenToUse", whenToUse);
 
             ObjectNode slotEvidence = card.putObject("slotEvidence");
             writeSlotEvidence(slotEvidence, guide.slotEvidence());
@@ -1538,23 +1541,6 @@ public class LlmServiceBuildSupport {
             out.put(method, step.path("order").asInt(0));
         }
         return out;
-    }
-
-    private String inferWhenToUse(String methodName) {
-        String lower = safeText(methodName).toLowerCase(Locale.ROOT);
-        if (lower.contains("parse")) {
-            return "옵션 정의가 끝난 뒤 실제 입력(args)을 해석할 때";
-        }
-        if (lower.contains("add") || lower.contains("required") || lower.contains("builder")) {
-            return "애플리케이션 시작 시 옵션 스키마를 정의할 때";
-        }
-        if (lower.contains("get") || lower.contains("has")) {
-            return "파싱 완료 후 값을 읽거나 분기 처리할 때";
-        }
-        if (lower.contains("help") || lower.contains("print")) {
-            return "오류 처리 또는 사용법 안내를 출력할 때";
-        }
-        return "핵심 흐름 중 해당 기능이 필요할 때";
     }
 
     private String extractInputs(String signatureHint) {

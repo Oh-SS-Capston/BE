@@ -509,4 +509,48 @@ class LlmServiceBuildSupportTest {
         JsonNode specs = objectMapper.readTree(java.nio.file.Files.readString(path));
         return support.buildScenarioSpecsQualityGate(specs.path("scenarios"), specs.path("overview"));
     }
+
+    /**
+     * 근거 없는 메서드는 빈 칸으로 남는다. 채움말로 메우지 않는다.
+     *
+     * <p>이전에는 메서드 이름 철자로 5칸을 전부 채우는 바람에 {@code getAncestors}에
+     * "parse 실행이 끝난 결과 객체를 준비하고" 같은 설명이 붙었고, 그 탓에
+     * slotCoverage가 항상 1.0이라 품질 게이트가 절대 떨어지지 않았다.</p>
+     */
+    @Test
+    void buildGuide_leavesSlotsEmptyWhenNoEvidence() {
+        ApiDocGuideSupport.GuideView guide = ApiDocGuideSupport.buildGuide(
+                "com.example.Foo", "getAncestors", "com.example.Foo.getAncestors",
+                "실행 결과에서 값 존재 여부를 확인하거나 값을 읽을 때 호출합니다.",   // inferMethodUsage 채움말
+                java.util.List.of(),
+                "src/main/java/com/example/Foo.java", 10, 40);
+
+        assertThat(guide.slots().beforeCall()).isEmpty();
+        assertThat(guide.slots().doCall()).isEmpty();          // summaryRaw가 채움말이라 비운다
+        assertThat(guide.slots().successCheck()).isEmpty();
+        assertThat(guide.slots().failureSymptom()).isEmpty();  // caution이 없다
+        assertThat(guide.slots().nextAction()).isEmpty();
+        assertThat(guide.summaryRaw()).isEmpty();
+        assertThat(guide.narrative()).isEmpty();
+
+        assertThat(guide.quality().slotCoverage()).isZero();
+        // evidence 앵커 0.25만 남아 55점. threshold 70 미달이라 게이트가 잡는다.
+        assertThat(guide.quality().actionabilityScore()).isEqualTo(55);
+    }
+
+    @Test
+    void buildGuide_keepsEvidenceBackedSummaryAndCaution() {
+        ApiDocGuideSupport.GuideView guide = ApiDocGuideSupport.buildGuide(
+                "com.example.Foo", "parse", "com.example.Foo.parse",
+                "입력 문자열을 분석해 MediaType 인스턴스를 만든다.",              // javadoc 유래 = 근거 있음
+                java.util.List.of("형식이 잘못되면 예외가 발생한다."),                        // STEP① caution = 근거 있음
+                "src/main/java/com/example/Foo.java", 10, 40);
+
+        assertThat(guide.slots().doCall()).contains("MediaType 인스턴스");
+        assertThat(guide.slots().failureSymptom()).contains("예외가 발생");
+        // 이름 규칙 슬롯은 근거가 없으므로 여전히 비어 있다.
+        assertThat(guide.slots().beforeCall()).isEmpty();
+        assertThat(guide.quality().slotCoverage()).isEqualTo(0.4d);
+        assertThat(guide.quality().forbiddenPhraseRate()).isZero();
+    }
 }
