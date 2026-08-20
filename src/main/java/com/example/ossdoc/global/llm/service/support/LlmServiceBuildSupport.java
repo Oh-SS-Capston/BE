@@ -97,10 +97,24 @@ public class LlmServiceBuildSupport {
             "evidenceInterpretation",
             "confidenceReason"
     );
-    private static final List<String> GUIDE_FORBIDDEN_PHRASES = List.of(
-            "핵심 동작 수행",
-            "입력 조건 기반 로직"
-    );
+    /**
+     * targetSuitability를 측정할 수 없는 경로임을 나타내는 값.
+     *
+     * <p>{@code attachGuideBundle}은 rules/cautions/step이 공유하는 경로라
+     * 메서드 문맥(methodName/classFqn/filePath)을 항상 갖고 있지 않다.
+     * 억지로 계산해 넣는 대신 <b>guideQuality에 아예 쓰지 않고</b>,
+     * 집계하는 {@code buildApiDocQualityGate}가 부재를 "측정 불가"로 읽게 한다.
+     * 예전에는 부재를 1.0(적합)으로 읽어 P1-3 필터가 조용히 항상 통과했다.</p>
+     */
+    private static final double TARGET_SUITABILITY_NOT_MEASURED = -1.0d;
+
+    /**
+     * 시나리오 서술 채움률 기준선.
+     *
+     * <p>0.9로 둔 근거는 실측이다 — 호출 분해 전(SINGLE) 0.41, 분해 후(PER_SCENARIO) 0.97이라
+     * 두 상태를 확실히 가른다. 완주를 요구하되 한두 칸의 미충족은 허용하는 선이다.</p>
+     */
+    private static final double SCENARIO_NARRATIVE_THRESHOLD = 0.9d;
 
     private static final String MAIN_JAVA_MARKER = "/src/main/java/";
     private static final String MAIN_KOTLIN_MARKER = "/src/main/kotlin/";
@@ -965,82 +979,32 @@ public class LlmServiceBuildSupport {
         putIfText(slotEvidence, "nextAction", evidenceAnchor);
         slotEvidence.put("slotEvidenceConfidence", "method_level");
 
-        double slotCoverage = computeSlotCoverage(before, call, success, failure, next);
-        double evidenceCoverage = evidenceAnchor.isBlank() ? 0.0d : 1.0d;
-        double forbiddenRate = computeForbiddenPhraseRate(narrative);
-        double repetitionRate = computeRepetitionRate(before, call, success, failure, next);
-        double weighted = 0.45d * slotCoverage
-                + 0.25d * evidenceCoverage
-                + 0.15d * (1.0d - forbiddenRate)
-                + 0.15d * (1.0d - repetitionRate);
-        int actionabilityScore = Math.max(0, Math.min(100, (int) Math.round(weighted * 100.0d)));
+        // 산식은 ApiDocGuideSupport 한 곳에만 둔다. 여기 복제본이 targetSuitability를
+        // 빠뜨리는 바람에 buildApiDocQualityGate가 기본값 1.0으로 읽어 P1-3 필터가
+        // rules/cautions 경로에서 통째로 무력화돼 있었다.
+        ApiDocGuideSupport.GuideSlots guideSlots =
+                new ApiDocGuideSupport.GuideSlots(before, call, success, failure, next);
+        ApiDocGuideSupport.GuideQuality scored = ApiDocGuideSupport.scoreSlots(
+                guideSlots, evidenceAnchor, TARGET_SUITABILITY_NOT_MEASURED, "method_level");
+        int actionabilityScore = scored.actionabilityScore();
 
         target.put("guideNarrative", narrative);
         target.put("actionabilityScore", actionabilityScore);
 
         ObjectNode quality = target.putObject("guideQuality");
         quality.put("actionabilityScore", actionabilityScore);
-        quality.put("slotCoverage", round2(slotCoverage));
-        quality.put("evidenceCoverage", round2(evidenceCoverage));
-        quality.put("forbiddenPhraseRate", round2(forbiddenRate));
-        quality.put("repetitionRate", round2(repetitionRate));
+        quality.put("slotCoverage", round2(scored.slotCoverage()));
+        quality.put("evidenceCoverage", round2(scored.evidenceCoverage()));
+        quality.put("forbiddenPhraseRate", round2(scored.forbiddenPhraseRate()));
+        quality.put("repetitionRate", round2(scored.repetitionRate()));
         quality.put("slotEvidenceConfidence", "method_level");
         quality.put("threshold", ACTIONABILITY_THRESHOLD);
-        quality.put("meetsThreshold", actionabilityScore >= ACTIONABILITY_THRESHOLD);
+        // 채움말이 하나라도 섞이면 점수와 무관하게 탈락시킨다. 근거 없는 문구를 담은 항목이
+        // "기준 통과"로 표시되면 게이트가 위반을 측정하는 게 아니라 허가하는 도구가 된다.
+        quality.put("meetsThreshold",
+                actionabilityScore >= ACTIONABILITY_THRESHOLD && scored.forbiddenPhraseRate() == 0.0d);
     }
 
-    /**
-     * 5개 슬롯이 얼마나 채워졌는지(0~1) 계산한다.
-     */
-    private double computeSlotCoverage(String before, String call, String success, String failure, String next) {
-        int filled = 0;
-        for (String value : List.of(before, call, success, failure, next)) {
-            if (!safeText(value).isBlank()) {
-                filled++;
-            }
-        }
-        return (double) filled / 5.0d;
-    }
-
-    /**
-     * 금지 표현 포함 비율을 계산한다.
-     */
-    private double computeForbiddenPhraseRate(String narrative) {
-        String text = safeText(narrative);
-        if (text.isBlank()) {
-            // 슬롯이 전부 비면 금지 표현도 0건이다. 여기서 1.0을 주면 "금지 표현 100%"라는
-            // 사실과 다른 값이 산출물에 남고, 빈 슬롯 페널티를 slotCoverage와 이중으로 매긴다.
-            return 0.0d;
-        }
-        int count = 0;
-        for (String phrase : GUIDE_FORBIDDEN_PHRASES) {
-            if (text.contains(phrase)) {
-                count++;
-            }
-        }
-        return Math.min(1.0d, count / 2.0d);
-    }
-
-    /**
-     * 슬롯 문장의 중복 비율을 계산한다.
-     */
-    private double computeRepetitionRate(String before, String call, String success, String failure, String next) {
-        Map<String, Integer> frequency = new LinkedHashMap<>();
-        for (String value : List.of(before, call, success, failure, next)) {
-            String key = safeText(value).replaceAll("\\s+", " ").toLowerCase(Locale.ROOT);
-            if (key.isBlank()) {
-                continue;
-            }
-            frequency.put(key, frequency.getOrDefault(key, 0) + 1);
-        }
-        int duplicates = 0;
-        for (int count : frequency.values()) {
-            if (count > 1) {
-                duplicates += (count - 1);
-            }
-        }
-        return Math.min(1.0d, (double) duplicates / 5.0d);
-    }
 
     /**
      * evidenceIds 배열을 UI 표시용 앵커 문자열로 변환한다.
@@ -1749,13 +1713,27 @@ public class LlmServiceBuildSupport {
 
     /**
      * API 카드의 실전 가이드 품질 점수를 집계한다.
+     * 메서드 대상이므로 P1-3 합성/예제 판정을 적용한다.
      */
     public ObjectNode buildApiDocQualityGate(JsonNode coreMethods) {
+        return buildApiDocQualityGate(coreMethods, true);
+    }
+
+    /**
+     * 가이드 품질 점수를 집계한다.
+     *
+     * @param applyTargetSuitability P1-3 합성/예제 판정을 적용할지.
+     *        메서드 카드는 true. rules/cautions는 "메서드 대상"이 아니므로 false다 —
+     *        규칙에 합성 메서드 판정을 적용하는 것 자체가 의미 왜곡이고,
+     *        false로 두면 그 사실이 {@code targetSuitabilityApplied}로 산출물에 남는다.
+     */
+    public ObjectNode buildApiDocQualityGate(JsonNode coreMethods, boolean applyTargetSuitability) {
         ObjectNode out = objectMapper.createObjectNode();
         out.put("threshold", ACTIONABILITY_THRESHOLD);
         out.put("metric", "actionabilityScore");
 
         if (!coreMethods.isArray() || coreMethods.isEmpty()) {
+            out.put("itemCount", 0);
             out.put("methodCount", 0);
             out.put("averageActionabilityScore", 0.0d);
             out.put("minActionabilityScore", 0);
@@ -1764,6 +1742,9 @@ public class LlmServiceBuildSupport {
             out.put("evidenceCoverageAvg", 0.0d);
             out.put("forbiddenPhraseRateAvg", 0.0d);
             out.put("repetitionRateAvg", 0.0d);
+            out.put("targetSuitabilityApplied", applyTargetSuitability);
+            out.put("targetSuitabilityMeasuredCount", 0);
+            out.put("targetSuitabilityMissingCount", 0);
             out.put("targetSuitabilityAvg", 0.0d);
             out.put("narrativeDiversityAvg", 0.0d);
             out.put("meetsThreshold", false);
@@ -1780,6 +1761,8 @@ public class LlmServiceBuildSupport {
         double repetitionRateSum = 0.0d;
         double targetSuitabilitySum = 0.0d;
         double narrativeDiversitySum = 0.0d;
+        int suitabilityMeasuredCount = 0;
+        int suitabilityMissing = 0;
 
         for (int i = 0; i < coreMethods.size(); i++) {
             JsonNode method = coreMethods.get(i);
@@ -1789,25 +1772,42 @@ public class LlmServiceBuildSupport {
             double evidenceCoverage = quality.path("evidenceCoverage").asDouble(0.0d);
             double forbiddenRate = quality.path("forbiddenPhraseRate").asDouble(0.0d);
             double repetitionRate = quality.path("repetitionRate").asDouble(0.0d);
-            // P1-3: targetSuitability + narrativeDiversity (= 1 - repetitionRate)
-            double targetSuitability = quality.path("targetSuitabilityScore").asDouble(1.0d);
             double narrativeDiversity = 1.0d - repetitionRate;
+
+            // 부재를 1.0으로 읽지 않는다. 예전에는 asDouble(1.0d)였는데,
+            // targetSuitabilityScore를 생산하지 않는 경로(attachGuideBundle)의 결과가
+            // 전부 "적합"으로 간주되어 P1-3 필터가 조용히 항상 통과했다.
+            boolean suitabilityMeasured = quality.path("targetSuitabilityScore").isNumber();
+            double targetSuitability = suitabilityMeasured
+                    ? quality.path("targetSuitabilityScore").asDouble()
+                    : 0.0d;
 
             count++;
             totalScore += score;
             minScore = Math.min(minScore, score);
-            // P1-3: meetsThreshold = actionability 기준 AND targetSuitability 충족
-            if (score < ACTIONABILITY_THRESHOLD || targetSuitability < 1.0d) {
+            boolean fillerFree = forbiddenRate == 0.0d;
+            boolean suitabilityOk = !applyTargetSuitability
+                    || (suitabilityMeasured && targetSuitability >= 1.0d);
+            if (score < ACTIONABILITY_THRESHOLD || !fillerFree || !suitabilityOk) {
                 belowThreshold++;
+            }
+            if (applyTargetSuitability && !suitabilityMeasured) {
+                suitabilityMissing++;
             }
             slotCoverageSum += slotCoverage;
             evidenceCoverageSum += evidenceCoverage;
             forbiddenRateSum += forbiddenRate;
             repetitionRateSum += repetitionRate;
-            targetSuitabilitySum += targetSuitability;
+            if (suitabilityMeasured) {
+                targetSuitabilitySum += targetSuitability;
+                suitabilityMeasuredCount++;
+            }
             narrativeDiversitySum += narrativeDiversity;
         }
 
+        out.put("itemCount", count);
+        // methodCount는 하위호환용으로 남긴다. refined_rules에서는 실제로
+        // rules + cautions 개수라 이름이 오독을 부른다. itemCount를 쓴다.
         out.put("methodCount", count);
         out.put("averageActionabilityScore", round2((double) totalScore / count));
         out.put("minActionabilityScore", minScore == Integer.MAX_VALUE ? 0 : minScore);
@@ -1816,7 +1816,13 @@ public class LlmServiceBuildSupport {
         out.put("evidenceCoverageAvg", round2(evidenceCoverageSum / count));
         out.put("forbiddenPhraseRateAvg", round2(forbiddenRateSum / count));
         out.put("repetitionRateAvg", round2(repetitionRateSum / count));
-        out.put("targetSuitabilityAvg", round2(targetSuitabilitySum / count));
+        out.put("targetSuitabilityApplied", applyTargetSuitability);
+        out.put("targetSuitabilityMeasuredCount", suitabilityMeasuredCount);
+        out.put("targetSuitabilityMissingCount", suitabilityMissing);
+        // 측정된 항목만으로 평균을 낸다. 미측정을 1.0으로 셔서 더하면
+        // 측정하지 않은 것이 평균을 올리는 이상한 지표가 된다.
+        out.put("targetSuitabilityAvg",
+                suitabilityMeasuredCount == 0 ? 0.0d : round2(targetSuitabilitySum / suitabilityMeasuredCount));
         out.put("narrativeDiversityAvg", round2(narrativeDiversitySum / count));
         out.put("meetsThreshold", belowThreshold == 0);
         return out;
@@ -1830,6 +1836,94 @@ public class LlmServiceBuildSupport {
     }
 
     /**
+     * 시나리오 서술의 채움률을 집계한다.
+     *
+     * <p>STEP②는 5개 산출물 중 유일하게 품질 게이트가 없었다. 호출 분해로 서술 칸 채움을
+     * 36/88에서 85/88로 올렸는데 그 값이 어디에도 기록되지 않아, 개선을 로그로만 확인하고
+     * 산출물로는 증명할 수 없었다.</p>
+     *
+     * <p><b>guideSlots를 세면 안 된다.</b> {@code attachStepGuideBundle}의 폴백 체인
+     * ({@code precondition→description}, {@code userAction→evidenceInterpretation})이 빈칸을
+     * 가려서, 서술이 36/88이던 실행에서도 step의 {@code slotCoverage}는 1.0이었다.
+     * 그래서 {@link #STEP_RICH_TEXT_FIELDS}의 원본 필드를 직접 센다.</p>
+     *
+     * <p>채운 칸 수와 별개로 {@code fillerFieldCount}를 함께 낸다. 채운 것과 제대로 채운 것은
+     * 다르다 — 실측에서 85칸 중 1칸이 채움말이었다. 채움 수만 세면 모델이 채움말로 88칸을
+     * 메웠을 때 100%로 보이고, 그건 지금 고치고 있는 바로 그 실패를 새 게이트에 다시 만드는 것이다.</p>
+     */
+    public ObjectNode buildScenarioSpecsQualityGate(JsonNode scenarios, JsonNode overview) {
+        ObjectNode out = objectMapper.createObjectNode();
+        out.put("threshold", SCENARIO_NARRATIVE_THRESHOLD);
+        out.put("metric", "narrativeFieldCoverage");
+
+        // description + STEP_RICH_TEXT_FIELDS 8개 = 9필드. 전부 PROMPT_SCENARIO_ONE의
+        // 출력 스키마에 있는 필드다. 수기 집계 때는 confidenceReason을 빼고 8필드로 셌기 때문에
+        // 예전 보고값(36/88, 85/88)과 분모가 다르다. 비율은 같은 결론을 준다(36% vs 92%).
+        List<String> fields = new ArrayList<>();
+        fields.add("description");
+        fields.addAll(STEP_RICH_TEXT_FIELDS);
+
+        Map<String, Integer> filledByField = new LinkedHashMap<>();
+        for (String field : fields) {
+            filledByField.put(field, 0);
+        }
+
+        int scenarioCount = 0;
+        int stepCount = 0;
+        int filled = 0;
+        int fillerCount = 0;
+
+        if (scenarios != null && scenarios.isArray()) {
+            for (JsonNode scenario : scenarios) {
+                scenarioCount++;
+                for (JsonNode step : scenario.path("steps")) {
+                    stepCount++;
+                    for (String field : fields) {
+                        String value = step.path(field).asText("");
+                        if (safeText(value).isBlank()) {
+                            continue;
+                        }
+                        filled++;
+                        filledByField.merge(field, 1, Integer::sum);
+                        if (ApiDocGuideSupport.isFiller(value)) {
+                            fillerCount++;
+                        }
+                    }
+                }
+            }
+        }
+
+        int total = stepCount * fields.size();
+        double coverage = total == 0 ? 0.0d : (double) filled / total;
+
+        int overviewFilled = 0;
+        if (overview != null && overview.isObject()) {
+            for (JsonNode value : overview) {
+                if (!safeText(value.asText("")).isBlank()) {
+                    overviewFilled++;
+                }
+            }
+        }
+
+        out.put("scenarioCount", scenarioCount);
+        out.put("stepCount", stepCount);
+        out.put("narrativeFieldTotal", total);
+        out.put("narrativeFieldFilled", filled);
+        out.put("narrativeFieldCoverage", round2(coverage));
+        out.put("fillerFieldCount", fillerCount);
+        out.put("overviewFieldFilled", overviewFilled);
+
+        ObjectNode byField = out.putObject("fieldCoverageByName");
+        for (Map.Entry<String, Integer> entry : filledByField.entrySet()) {
+            byField.put(entry.getKey(), entry.getValue());
+        }
+
+        // 채움말이 섞이면 채움률과 무관하게 통과시키지 않는다.
+        out.put("meetsThreshold", coverage >= SCENARIO_NARRATIVE_THRESHOLD && fillerCount == 0);
+        return out;
+    }
+
+    /**
      * 정제 규칙(rules/cautions)의 가이드 품질 점수를 집계한다.
      */
     public ObjectNode buildRefinedRuleQualityGate(JsonNode rules, JsonNode cautions) {
@@ -1840,7 +1934,8 @@ public class LlmServiceBuildSupport {
         if (cautions != null && cautions.isArray()) {
             merged.addAll((ArrayNode) cautions);
         }
-        ObjectNode gate = buildApiDocQualityGate(merged);
+        // rules/cautions는 메서드 대상이 아니므로 합성/예제 판정을 적용하지 않는다.
+        ObjectNode gate = buildApiDocQualityGate(merged, false);
         gate.put("ruleCount", countArray(rules));
         gate.put("cautionCount", countArray(cautions));
         return gate;

@@ -212,6 +212,28 @@ public class LlmService {
             JsonNode refinedRules,
             List<LlmRequest.EvidenceSnippet> evidence
     ) {
+        JsonNode specs = generateScenarioSpecsByMode(structure, refinedRules, evidence);
+
+        // 게이트는 여기 한 곳에서만 붙인다. 두 모드와 fallback이 전부 이 함수를 통과하므로
+        // 같은 단위로 기록되어야 A/B 비교가 성립한다.
+        if (specs instanceof ObjectNode out) {
+            out.set("qualityGate", llmServiceBuildSupport.buildScenarioSpecsQualityGate(
+                    out.path("scenarios"), out.path("overview")));
+            log.info("[LlmService] {} 서술 채움 {}/{} ({}%), 채움말 {}칸.",
+                    STEP2_SCENARIO_SPECS,
+                    out.path("qualityGate").path("narrativeFieldFilled").asInt(),
+                    out.path("qualityGate").path("narrativeFieldTotal").asInt(),
+                    String.format("%.0f", out.path("qualityGate").path("narrativeFieldCoverage").asDouble() * 100),
+                    out.path("qualityGate").path("fillerFieldCount").asInt());
+        }
+        return specs;
+    }
+
+    private JsonNode generateScenarioSpecsByMode(
+            JsonNode structure,
+            JsonNode refinedRules,
+            List<LlmRequest.EvidenceSnippet> evidence
+    ) {
         if (llmGenerationProperties.getScenarioCallMode() == ScenarioCallMode.PER_SCENARIO) {
             return generateScenarioSpecsPerScenario(structure, refinedRules, evidence);
         }

@@ -370,4 +370,143 @@ class LlmServiceBuildSupportTest {
             assertThat(scenario.path("scenarioId").asText()).isNotEqualTo("SCN-999");
         }
     }
+
+    // ------------------------------------------------------------------
+    // 게이트 실질화 회귀 테스트
+    // ------------------------------------------------------------------
+
+    /**
+     * 이 프로젝트에서 가장 오래 숨어 있던 버그를 고정한다.
+     *
+     * <p>{@code buildApiDocQualityGate}가 {@code targetSuitabilityScore} 부재를
+     * {@code asDouble(1.0d)}로 읽어 "적합"으로 간주했고, 그 필드를 생산하지
+     * 않는 rules/cautions 경로가 통째로 P1-3 필터를 우회하고 있었다.
+     * 기존 테스트는 {@code buildCoreMethodCards} 경로만 보아 이걸 못 잡았다.</p>
+     */
+    @Test
+    void qualityGate_doesNotTreatMissingTargetSuitabilityAsPass() {
+        ArrayNode items = objectMapper.createArrayNode();
+        ObjectNode item = items.addObject();
+        item.put("actionabilityScore", 100);
+        ObjectNode quality = item.putObject("guideQuality");
+        quality.put("actionabilityScore", 100);
+        quality.put("slotCoverage", 1.0d);
+        quality.put("evidenceCoverage", 1.0d);
+        quality.put("forbiddenPhraseRate", 0.0d);
+        quality.put("repetitionRate", 0.0d);
+        // targetSuitabilityScore를 일부러 넣지 않는다 = attachGuideBundle 경로의 모양
+
+        ObjectNode gate = support.buildApiDocQualityGate(items, true);
+
+        assertThat(gate.path("targetSuitabilityMissingCount").asInt()).isEqualTo(1);
+        assertThat(gate.path("belowThresholdCount").asInt()).isEqualTo(1);
+        assertThat(gate.path("meetsThreshold").asBoolean()).isFalse();
+        // 미측정을 1.0으로 셔서 평균을 올리지 않는다.
+        assertThat(gate.path("targetSuitabilityAvg").asDouble()).isEqualTo(0.0d);
+    }
+
+    @Test
+    void qualityGate_skipsTargetSuitabilityForRules() {
+        ArrayNode rules = objectMapper.createArrayNode();
+        ObjectNode rule = rules.addObject();
+        rule.put("actionabilityScore", 100);
+        ObjectNode quality = rule.putObject("guideQuality");
+        quality.put("actionabilityScore", 100);
+        quality.put("forbiddenPhraseRate", 0.0d);
+
+        ObjectNode gate = support.buildRefinedRuleQualityGate(rules, objectMapper.createArrayNode());
+
+        // 규칙은 메서드 대상이 아니므로 합성/예제 판정을 적용하지 않고,
+        // 그 사실을 산출물에 명시한다.
+        assertThat(gate.path("targetSuitabilityApplied").asBoolean()).isFalse();
+        assertThat(gate.path("belowThresholdCount").asInt()).isZero();
+        assertThat(gate.path("itemCount").asInt()).isEqualTo(1);
+    }
+
+    @Test
+    void qualityGate_failsWhenSlotContainsFiller() {
+        ArrayNode items = objectMapper.createArrayNode();
+        ObjectNode item = items.addObject();
+        item.put("actionabilityScore", 97);
+        ObjectNode quality = item.putObject("guideQuality");
+        quality.put("actionabilityScore", 97);
+        quality.put("forbiddenPhraseRate", 0.2d);
+        quality.put("targetSuitabilityScore", 1.0d);
+
+        ObjectNode gate = support.buildApiDocQualityGate(items, true);
+
+        // 점수는 threshold(70)를 넘지만 채움말이 섞여 있으므로 통과시키지 않는다.
+        assertThat(gate.path("belowThresholdCount").asInt()).isEqualTo(1);
+        assertThat(gate.path("meetsThreshold").asBoolean()).isFalse();
+    }
+
+    @Test
+    void scenarioGate_reportsNarrativeCoverageAndFiller() throws Exception {
+        JsonNode scenarios = objectMapper.readTree("""
+                [{"scenarioId":"SCN-001","steps":[
+                  {"stepNo":1,"description":"문자열을 파싱한다","precondition":"입력이 준비된다",
+                   "action":"parse를 호출한다","successSignal":"객체가 반환된다",
+                   "failureSignal":"예외가 발생한다","userAction":"입력을 고친다",
+                   "dataHandled":"문자열","evidenceInterpretation":"MediaType 의 핵심 기능을 연결할 때 호출합니다."},
+                  {"stepNo":2,"description":"값을 읽는다"}
+                ]}]
+                """);
+
+        ObjectNode gate = support.buildScenarioSpecsQualityGate(scenarios, objectMapper.createObjectNode());
+
+        assertThat(gate.path("stepCount").asInt()).isEqualTo(2);
+        assertThat(gate.path("narrativeFieldTotal").asInt()).isEqualTo(18);   // step 2개 x 9필드
+        assertThat(gate.path("narrativeFieldFilled").asInt()).isEqualTo(9);
+        // 채운 9칸 중 1칸이 채움말이다. 채운 것과 제대로 채운 것은 다르다.
+        assertThat(gate.path("fillerFieldCount").asInt()).isEqualTo(1);
+        assertThat(gate.path("meetsThreshold").asBoolean()).isFalse();
+    }
+
+    /**
+     * 실측 산출물로 게이트를 검증한다. <b>이 프로젝트에서 가장 강한 검증이다.</b>
+     *
+     * <p>같은 저장소(junit-framework)를 SINGLE 모드와 PER_SCENARIO 모드로 각각 돌린
+     * 실제 산출물이 디스크에 남아 있다(36/88, 85/88). 새 게이트가 그 두 값을
+     * 재현하는지를 LLM 호출 없이 확인한다. 재현하지 못하면 계기판을 믿을 수 없다.</p>
+     *
+     * <p>산출물이 없는 환경(CI 등)에서는 건너뛴다. 실측 고정 입력은 개발 머신에만
+     * 존재하므로 이 테스트를 필수로 두면 CI가 깨진다.</p>
+     */
+    @Test
+    void scenarioGate_reproducesMeasuredCoverageFromStoredArtifacts() throws Exception {
+        java.nio.file.Path base = java.nio.file.Path.of(
+                "C:", "data", "ossdoc", "run_20260815_94b1aaa5", "artifacts");
+        java.nio.file.Path single = base.resolve("llm_run8_baseline").resolve("scenario_specs.json");
+        java.nio.file.Path perScenario = base.resolve("llm_run9_perscenario").resolve("scenario_specs.json");
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                java.nio.file.Files.isRegularFile(single) && java.nio.file.Files.isRegularFile(perScenario),
+                "실측 산출물이 없는 환경입니다");
+
+        ObjectNode singleGate = gateOf(single);
+        ObjectNode perScenarioGate = gateOf(perScenario);
+
+        assertThat(singleGate.path("stepCount").asInt()).isEqualTo(11);
+        assertThat(perScenarioGate.path("stepCount").asInt()).isEqualTo(11);
+
+        // 서술 8필드 + description = 9. 11 step x 9 = 99칸이지만 실측 보고는
+        // description을 뺄 8필드 기준 88칸이었다. 둘 다 같은 분모를 쓰므로 비율로 비교한다.
+        double singleCoverage = singleGate.path("narrativeFieldCoverage").asDouble();
+        double perScenarioCoverage = perScenarioGate.path("narrativeFieldCoverage").asDouble();
+
+        assertThat(singleCoverage).isLessThan(0.6d);
+        assertThat(perScenarioCoverage).isGreaterThan(0.9d);
+        assertThat(perScenarioCoverage - singleCoverage).isGreaterThan(0.4d);
+
+        // 게이트가 두 상태를 실제로 가른다.
+        assertThat(singleGate.path("meetsThreshold").asBoolean()).isFalse();
+
+        // PER_SCENARIO도 채움말 1칸 때문에 통과하지 못한다 — 채운 것과
+        // 제대로 채운 것을 가르는 게 fillerFieldCount의 존재 이유다.
+        assertThat(perScenarioGate.path("fillerFieldCount").asInt()).isEqualTo(1);
+    }
+
+    private ObjectNode gateOf(java.nio.file.Path path) throws Exception {
+        JsonNode specs = objectMapper.readTree(java.nio.file.Files.readString(path));
+        return support.buildScenarioSpecsQualityGate(specs.path("scenarios"), specs.path("overview"));
+    }
 }
