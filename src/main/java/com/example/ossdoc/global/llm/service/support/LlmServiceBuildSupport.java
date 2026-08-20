@@ -28,6 +28,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * LlmService의 출력 정규화/문서 조합 로직을 분리한 지원 컴포넌트.
@@ -71,6 +73,13 @@ public class LlmServiceBuildSupport {
             "expectedOutcome",
             "confidenceReason"
     );
+    /**
+     * 서술에서 코드 심볼로 볼 토큰. humps가 둘 이상인 CamelCase만 잡는다.
+     * 한 겹까지 허용하면 한국어 사이에 섞인 일반 명사와 {@code API} 같은 약어를 오탐한다.
+     */
+    private static final Pattern CAMEL_CASE_SYMBOL =
+            Pattern.compile("\\b[A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+\\b");
+
     private static final List<String> STEP_RICH_TEXT_FIELDS = List.of(
             "precondition",
             "action",
@@ -307,6 +316,63 @@ public class LlmServiceBuildSupport {
     }
 
     /**
+     * PER_SCENARIO 모드: overview와 methodFlow만 담은 껍데기를 만든다.
+     *
+     * <p>{@code scenarios}는 빈 배열로 두고 호출자가 시나리오별 호출 결과를 하나씩 채운다.
+     * methodFlow는 시드 결정론이라 LLM 호출이 필요 없다 — {@code methodFlowSeed}가
+     * 이미 실제 호출 순서를 갖고 있고, SINGLE 모드에서도 모델 응답보다 시드가 우선이다.</p>
+     */
+    public ObjectNode buildScenarioSpecsShell(JsonNode overviewRaw, JsonNode structure) {
+        ObjectNode out = objectMapper.createObjectNode();
+        out.set("overview", normalizeOverview(overviewRaw, structure));
+        out.set("methodFlow", normalizeMethodFlow(NullNode.getInstance(), structure.path("methodFlowSeed")));
+        out.putArray("scenarios");
+        return out;
+    }
+
+    /**
+     * PER_SCENARIO 모드: 골격 한 장과 그 호출의 응답으로 시나리오 하나를 만든다.
+     *
+     * <p>SINGLE 모드와 같은 {@link #buildScenariosFromSeed}를 원소 하나짜리 배열로 태운다.
+     * 근거 우선순위(골격이 이기고 서술은 모델이 이긴다)와 폐기 계측을 그대로 쓰기 위해서다.
+     * 두 모드의 산출물이 같은 코드를 통과해야 A/B 비교가 성립한다.</p>
+     *
+     * @throws LlmException 응답에 시나리오가 없으면 compact 재시도 기회를 남긴다.
+     */
+    public JsonNode normalizeOneScenario(JsonNode seedScenario, JsonNode raw, JsonNode structure) {
+        JsonNode scenariosRaw = extractArrayByKey(raw, "scenarios");
+        if (scenariosRaw == null || !scenariosRaw.isArray() || scenariosRaw.isEmpty()) {
+            throw new LlmException(LlmErrorCode.RESPONSE_PARSE_FAILED);
+        }
+        ArrayNode seedOnly = objectMapper.createArrayNode();
+        seedOnly.add(seedScenario);
+
+        ArrayNode built = buildScenariosFromSeed(
+                seedOnly,
+                scenariosRaw,
+                indexMethodSeedByFqn(structure.path("coreMethodSeed"))
+        );
+        return built.isEmpty() ? NullNode.getInstance() : built.get(0);
+    }
+
+    /**
+     * PER_SCENARIO 모드 실패 시: 모델 응답 없이 골격만으로 시나리오 하나를 만든다.
+     * 시나리오 하나가 실패해도 나머지는 살아남는다는 것이 분해의 이점이므로,
+     * 여기서 전체를 포기하지 않고 그 한 장만 시드 문구로 되돌린다.
+     */
+    public JsonNode fallbackOneScenario(JsonNode seedScenario, JsonNode structure) {
+        ArrayNode seedOnly = objectMapper.createArrayNode();
+        seedOnly.add(seedScenario);
+
+        ArrayNode built = buildScenariosFromSeed(
+                seedOnly,
+                objectMapper.createArrayNode(),
+                indexMethodSeedByFqn(structure.path("coreMethodSeed"))
+        );
+        return built.isEmpty() ? NullNode.getInstance() : built.get(0);
+    }
+
+    /**
      * 시나리오 LLM 응답을 계약 스키마로 정규화한다.
      */
     public JsonNode normalizeScenarioSpecs(JsonNode raw, JsonNode structure) {
@@ -520,6 +586,10 @@ public class LlmServiceBuildSupport {
                 step.set("evidenceLinks", evidenceLinks);
                 attachStepGuideBundle(step);
             }
+
+            // 두 모드가 같은 경로에서 재야 A/B가 성립한다. SINGLE은 시나리오마다 한 번씩,
+            // PER_SCENARIO는 호출마다 한 번씩 찍혀 같은 단위로 비교된다.
+            logOffSkeletonSymbolMentions(seedScenario, scenario);
         }
 
         logSeedAxisDrops(scenariosRaw, consumedScenarios, seedStepSlots, slotsFilledByModel,
@@ -528,11 +598,91 @@ public class LlmServiceBuildSupport {
     }
 
     /**
+     * 서술이 이 시나리오 골격 밖의 심볼을 얼마나 끌어오는지 센다.
+     *
+     * <p><b>이것은 hallucination 지표가 아니다.</b> 재는 것은 "골격 밖 방황이 시나리오 바깥에서
+     * 안으로 위치를 옮겼는가"뿐이다. PER_SCENARIO로 쪼개면 프롬프트에 시나리오가 한 장뿐이라
+     * {@code logSeedAxisDrops}의 폐기 수가 구조적으로 0에 수렴하는데, 그때 방황이 사라진 건지
+     * 시나리오 <i>안쪽</i>으로 들어간 건지 구분할 지표가 없어진다. 그 자리를 메운다.</p>
+     *
+     * <p>못 잡는 것이 분명히 있다. "앞서 생성한 객체를 이어서" 같은 대명사적 서술은 심볼을
+     * 쓰지 않으므로 0으로 센다. 그건 이 지표가 아니라 {@code excludedByOtherScenarios}로
+     * 막는다. 이 값이 낮다고 "지어내지 않았다"로 읽으면 안 된다.</p>
+     *
+     * <p>탐지는 humps가 둘 이상인 CamelCase로 한정한다({@code MediaType}, {@code VintageExecutor}).
+     * 한국어 산문과 {@code API} 같은 약어를 오탐하지 않는 선이다.</p>
+     */
+    private void logOffSkeletonSymbolMentions(JsonNode seedScenario, ObjectNode builtScenario) {
+        Set<String> allowed = new HashSet<>();
+        for (JsonNode step : seedScenario.path("steps")) {
+            collectSymbolNames(allowed, step.path("classFqn").asText(""));
+            collectSymbolNames(allowed, step.path("methodFqn").asText(""));
+        }
+
+        Map<String, Integer> offSkeleton = new LinkedHashMap<>();
+        int scannedChars = 0;
+        for (String field : SCENARIO_RICH_TEXT_FIELDS) {
+            scannedChars += countMentions(builtScenario.path(field).asText(""), allowed, offSkeleton);
+        }
+        for (JsonNode step : builtScenario.path("steps")) {
+            scannedChars += countMentions(step.path("description").asText(""), allowed, offSkeleton);
+            for (String field : STEP_RICH_TEXT_FIELDS) {
+                scannedChars += countMentions(step.path(field).asText(""), allowed, offSkeleton);
+            }
+        }
+
+        if (offSkeleton.isEmpty()) {
+            log.info(
+                    "[LlmScenario] 방황 이동 없음. {} 서술 {}자에 골격 밖 심볼 언급 0건.",
+                    builtScenario.path("scenarioId").asText(""), scannedChars
+            );
+            return;
+        }
+        int total = offSkeleton.values().stream().mapToInt(Integer::intValue).sum();
+        log.warn(
+                "[LlmScenario] 방황 이동 감지. {} 서술 {}자에 골격 밖 심볼 {}건: {}."
+                        + " (hallucination 지표가 아니라 방황 위치 이동 여부만 잰다)",
+                builtScenario.path("scenarioId").asText(""), scannedChars, total, offSkeleton
+        );
+    }
+
+    /** FQN에서 사람이 서술에 쓸 법한 이름(단순 타입명, 메서드명)을 뽑아 허용 집합에 넣는다. */
+    private void collectSymbolNames(Set<String> target, String fqn) {
+        if (fqn == null || fqn.isBlank()) {
+            return;
+        }
+        for (String part : fqn.split("[.#]")) {
+            if (!part.isBlank()) {
+                target.add(part);
+            }
+        }
+    }
+
+    /** 텍스트에서 CamelCase 심볼을 찾아 허용 집합 밖인 것만 센다. 반환값은 훑은 글자 수다. */
+    private int countMentions(String text, Set<String> allowed, Map<String, Integer> offSkeleton) {
+        if (text == null || text.isBlank()) {
+            return 0;
+        }
+        Matcher matcher = CAMEL_CASE_SYMBOL.matcher(text);
+        while (matcher.find()) {
+            String symbol = matcher.group();
+            if (!allowed.contains(symbol)) {
+                offSkeleton.merge(symbol, 1, Integer::sum);
+            }
+        }
+        return text.length();
+    }
+
+    /**
      * 골격 축 정규화가 버린 응답 분량을 남긴다.
      *
      * <p>모델이 골격 밖 시나리오를 만들면 여기서 전량 폐기되는데, 지금까지는 조용히 사라져서
      * 프롬프트 준수 여부를 측정할 방법이 없었다. 5차 실행 기준으로 STEP② 출력의 약 58%가
      * 이 경로로 버려지고 있었다. 이 수치가 0에 수렴하는지가 프롬프트 수정의 성공 판정이다.</p>
+     *
+     * <p>PER_SCENARIO 모드에서는 프롬프트에 시나리오가 한 장뿐이라 이 값이 구조적으로 낮아진다.
+     * 그것만 보고 "방황이 사라졌다"고 읽으면 안 된다 — 짝이 되는 지표가
+     * {@link #logOffSkeletonSymbolMentions}다.</p>
      */
     private void logSeedAxisDrops(
             JsonNode scenariosRaw,

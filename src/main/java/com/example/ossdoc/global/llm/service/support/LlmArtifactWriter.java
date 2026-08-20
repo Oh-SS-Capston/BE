@@ -13,6 +13,7 @@ import org.springframework.stereotype.Component;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Optional;
 
 /**
  * LLM 산출물 저장 경로 분기.
@@ -46,6 +47,31 @@ public class LlmArtifactWriter {
             return;
         }
         writeLocalOnly(run.getRunId(), kind, relativePath, content);
+    }
+
+    /**
+     * 이전 실행이 남긴 로컬 산출물을 읽는다.
+     *
+     * <p>실험 반복용이다. STEP①은 프롬프트가 고정된 동안 결정론적이라
+     * (8차 baseline에서 5차와 바이트 동일함을 확인했다) 매 실행마다 40분을 다시 쓸 이유가 없다.
+     * 없으면 {@code Optional.empty()}를 돌려 호출자가 정상 생성으로 넘어가게 한다.</p>
+     *
+     * <p>읽기 실패를 예외로 올리지 않는 이유는 이게 <b>최적화</b>이기 때문이다.
+     * 캐시가 깨졌으면 생성하면 그만이고, 실험이 멈출 이유는 없다.</p>
+     */
+    public Optional<JsonNode> readLocal(String runId, String relativePath) {
+        try {
+            Path in = workspaceManager.artifactsDir(workspaceManager.workspaceRoot(runId))
+                    .resolve(relativePath);
+            if (!Files.isRegularFile(in)) {
+                return Optional.empty();
+            }
+            return Optional.of(objectMapper.readTree(Files.readString(in)));
+        } catch (Exception e) {
+            log.warn("[LlmArtifactWriter] 로컬 산출물 재사용 실패 — path={}, message={}. 새로 생성합니다.",
+                    relativePath, e.getMessage());
+            return Optional.empty();
+        }
     }
 
     /**

@@ -10,14 +10,18 @@ import com.example.ossdoc.global.llm.entity.LlmScenarioCache;
 import com.example.ossdoc.global.llm.exception.LlmException;
 import com.example.ossdoc.global.llm.exception.code.LlmErrorCode;
 import com.example.ossdoc.global.llm.config.LlmGenerationProperties;
+import com.example.ossdoc.global.llm.config.LlmGenerationProperties.ScenarioCallMode;
 import com.example.ossdoc.global.llm.config.LlmOutputProperties;
 import com.example.ossdoc.global.llm.model.LlmContextBundle;
 import com.example.ossdoc.global.llm.service.support.LlmArtifactWriter;
 import com.example.ossdoc.global.llm.service.support.LlmChatClient;
 import com.example.ossdoc.global.llm.service.support.LlmPromptCatalog;
+import com.example.ossdoc.global.llm.service.support.LlmScenarioContextSupport;
 import com.example.ossdoc.global.llm.service.support.LlmServiceBuildSupport;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -25,6 +29,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -63,6 +68,7 @@ public class LlmService {
     private final LlmScenarioCacheService llmScenarioCacheService;
     private final LlmChatClient llmChatClient;
     private final LlmServiceBuildSupport llmServiceBuildSupport;
+    private final LlmScenarioContextSupport llmScenarioContextSupport;
     private final LlmGenerationProperties llmGenerationProperties;
     private final LlmOutputProperties llmOutputProperties;
 
@@ -82,7 +88,8 @@ public class LlmService {
                 ? List.of()
                 : bundle.evidenceBundle();
 
-        JsonNode refinedRules = generateCautions(structure, evidence);
+        JsonNode refinedRules = reusableCautions(request.getRunId())
+                .orElseGet(() -> generateCautions(structure, evidence));
         llmArtifactWriter.write(
                 run, ArtifactKind.LLM_REFINED_RULES, ARTIFACT_SCHEMA_VERSION, PATH_REFINED_RULES, refinedRules
         );
@@ -136,6 +143,35 @@ public class LlmService {
     }
 
     /**
+     * step ① 재사용 스위치가 켜져 있고 이전 산출물이 남아 있으면 그것을 쓴다.
+     *
+     * <p>step ②를 여러 번 비교하는 동안 step ①은 매번 같은 결과를 40분에 걸쳐 다시 만든다.
+     * 그 시간이 실험 횟수를 제약하고 있어 건너뛸 수 있게 한다.</p>
+     *
+     * <p>조용히 건너뛰지 않는다. 재사용된 실행의 로그를 나중에 읽고
+     * "step ①이 40분 만에 끝났다"로 오독하면 그 자체가 잘못된 실측이 된다.</p>
+     */
+    private Optional<JsonNode> reusableCautions(String runId) {
+        if (!llmGenerationProperties.isReuseCautions()) {
+            return Optional.empty();
+        }
+        if (!llmOutputProperties.isLocalOnly()) {
+            log.warn("[LlmService] reuse-cautions는 local-only 모드에서만 동작합니다. STEP①을 새로 생성합니다.");
+            return Optional.empty();
+        }
+        Optional<JsonNode> cached = llmArtifactWriter.readLocal(runId, PATH_REFINED_RULES);
+        cached.ifPresentOrElse(
+                node -> log.warn(
+                        "[LlmService] {} 재사용 — 이전 산출물을 그대로 씁니다(caution {}개)."
+                                + " 이 실행의 STEP① 시간/토큰은 측정값이 아닙니다.",
+                        STEP1_REFINED_RULES, node.path("cautions").size()
+                ),
+                () -> log.info("[LlmService] reuse-cautions가 켜져 있지만 이전 산출물이 없어 새로 생성합니다.")
+        );
+        return cached;
+    }
+
+    /**
      * Step 1: rule 후보를 caution/rules 계약으로 정규화한다.
      */
     private JsonNode generateCautions(JsonNode structure, List<LlmRequest.EvidenceSnippet> evidence) {
@@ -167,8 +203,96 @@ public class LlmService {
     /**
      * Step 2: 프로젝트 개요 + 대표 시나리오 + 메서드 사용 순서를 생성한다.
      * api_flow toggle ON이면 진입점 호출 경로 요약을 컨텍스트에 추가한다.
+     *
+     * <p>{@code ossdoc.llm.generation.scenario-call-mode}로 호출 분해 방식을 고른다.
+     * 두 모드의 산출물은 같은 정규화 경로를 통과하므로 설정 한 줄로 A/B가 된다.</p>
      */
     private JsonNode generateScenarioSpecs(
+            JsonNode structure,
+            JsonNode refinedRules,
+            List<LlmRequest.EvidenceSnippet> evidence
+    ) {
+        if (llmGenerationProperties.getScenarioCallMode() == ScenarioCallMode.PER_SCENARIO) {
+            return generateScenarioSpecsPerScenario(structure, refinedRules, evidence);
+        }
+        return generateScenarioSpecsSingle(structure, refinedRules, evidence);
+    }
+
+    /**
+     * PER_SCENARIO 모드: overview 1회 + 시나리오마다 1회.
+     *
+     * <p>모델이 "몇 장을 썼는지"를 관리할 필요가 없다는 것이 핵심이다. 순회는 이 for문이 하고
+     * 모델은 한 장만 본다. 시나리오 하나가 실패해도 그 장만 시드 문구로 떨어지고 나머지는 남는다.</p>
+     *
+     * <p>골격이 비어 있으면 채울 칸이 없으므로 SINGLE 모드로 되돌린다.
+     * 골격 없이 쪼개면 시나리오 수를 모델이 정하게 되어 분해의 전제가 무너진다.</p>
+     */
+    private JsonNode generateScenarioSpecsPerScenario(
+            JsonNode structure,
+            JsonNode refinedRules,
+            List<LlmRequest.EvidenceSnippet> evidence
+    ) {
+        JsonNode scenarioSeed = structure.path("scenarioSeed");
+        if (!scenarioSeed.isArray() || scenarioSeed.isEmpty()) {
+            log.warn("[LlmService] {} 골격이 비어 PER_SCENARIO를 쓸 수 없습니다. SINGLE로 처리합니다.",
+                    STEP2_SCENARIO_SPECS);
+            return generateScenarioSpecsSingle(structure, refinedRules, evidence);
+        }
+
+        String overviewContext = llmScenarioContextSupport.buildOverviewContext(structure, refinedRules);
+        log.info("[LlmService] {} overview 호출 (contextChars={})",
+                STEP2_SCENARIO_SPECS, overviewContext.length());
+        JsonNode overviewRaw = generateWithRetryPlan(
+                STEP2_SCENARIO_SPECS + " overview",
+                applyLanguagePolicy(LlmPromptCatalog.PROMPT_OVERVIEW),
+                applyLanguagePolicy(LlmPromptCatalog.PROMPT_OVERVIEW),
+                overviewContext,
+                llmGenerationProperties.getTokensOverview(),
+                CONTEXT_LIMIT_SCENARIOS_COMPACT,
+                raw -> raw,
+                NullNode::getInstance
+        );
+
+        ObjectNode out = llmServiceBuildSupport.buildScenarioSpecsShell(
+                overviewRaw.path("overview"), structure);
+        ArrayNode scenarios = (ArrayNode) out.path("scenarios");
+
+        for (int i = 0; i < scenarioSeed.size(); i++) {
+            JsonNode seedScenario = scenarioSeed.get(i);
+            String scenarioId = seedScenario.path("scenarioId").asText(String.format("SCN-%03d", i + 1));
+            String stepLabel = STEP2_SCENARIO_SPECS + " " + scenarioId;
+
+            String context = llmScenarioContextSupport.buildOneScenarioContext(
+                    structure, refinedRules, evidence, scenarioSeed, i);
+            log.info("[LlmService] {} ({}/{}, contextChars={}, seedSteps={})",
+                    stepLabel, i + 1, scenarioSeed.size(), context.length(),
+                    seedScenario.path("steps").size());
+
+            String prompt = applyLanguagePolicy(String.format(LlmPromptCatalog.PROMPT_SCENARIO_ONE, scenarioId));
+            JsonNode scenario = generateWithRetryPlan(
+                    stepLabel,
+                    prompt,
+                    prompt,
+                    context,
+                    llmGenerationProperties.getTokensPerScenario(),
+                    CONTEXT_LIMIT_SCENARIOS_COMPACT,
+                    raw -> llmServiceBuildSupport.normalizeOneScenario(seedScenario, raw, structure),
+                    () -> llmServiceBuildSupport.fallbackOneScenario(seedScenario, structure)
+            );
+            if (scenario != null && scenario.isObject()) {
+                scenarios.add(scenario);
+            }
+        }
+
+        log.info("[LlmService] {} PER_SCENARIO 완료. 호출 {}회(개요 1 + 시나리오 {}), 시나리오 {}개 생성.",
+                STEP2_SCENARIO_SPECS, scenarioSeed.size() + 1, scenarioSeed.size(), scenarios.size());
+        return out;
+    }
+
+    /**
+     * SINGLE 모드: 한 호출로 골격 전체를 채운다. 5차까지의 방식이자 A/B 기준선이다.
+     */
+    private JsonNode generateScenarioSpecsSingle(
             JsonNode structure,
             JsonNode refinedRules,
             List<LlmRequest.EvidenceSnippet> evidence
