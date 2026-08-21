@@ -124,8 +124,14 @@ ossdoc:
       #
       # 2였던 이유는 "모델이 3번째 시나리오부터 열화된다"였는데, 골격이 그 열화를 막으므로
       # 근거가 사라져 되돌린다. junit 실측 시뮬레이션: 2→step 4개 / 4→11개 / 6→20개.
-      # 6은 tokens-scenarios 5,000을 넘겨 절단되므로 4로 둔다.
-      max-scenarios: ${LLM_MAX_SCENARIOS:4}
+      #
+      # 4 → 6. "6은 tokens-scenarios 5,000을 넘겨 절단된다"는 이전 근거는 SINGLE 모드
+      # (한 호출이 시나리오 전부를 쓰던 시절) 조건이라 PER_SCENARIO에는 적용되지 않는다.
+      # 지금은 호출당 tokens-per-scenario=1600이 상한이므로 시나리오 수와 절단은 무관하다.
+      # 4는 distinct 메서드 2개 이상인 클래스 6개 중 4개만 통과시켜
+      # ParallelExecutionConfiguration(6장)과 ClassSource(8장)를 골격에서 떨어뜨렸고,
+      # 그 결과 api_docs 조인이 17/40에 머물렀다. 6이면 31/40이 된다(예측, run B에서 검증).
+      max-scenarios: ${LLM_MAX_SCENARIOS:6}
       # 한 타입의 공개 메서드 수가 이보다 적으면 그만큼만 쓴다. 억지로 채우지 않는다.
       max-steps-per-scenario: ${LLM_MAX_STEPS_PER_SCENARIO:6}
       # 단계별 출력 상한. num_predict와 min()으로 clamp된다.
