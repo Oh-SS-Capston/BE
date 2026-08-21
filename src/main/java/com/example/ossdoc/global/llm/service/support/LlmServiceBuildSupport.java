@@ -1741,18 +1741,47 @@ public class LlmServiceBuildSupport {
      * 메서드 대상이므로 P1-3 합성/예제 판정을 적용한다.
      */
     public ObjectNode buildApiDocQualityGate(JsonNode coreMethods) {
-        return buildApiDocQualityGate(coreMethods, true);
+        return buildApiDocQualityGate(coreMethods, true, true);
+    }
+
+    /**
+     * 가이드 품질 점수를 집계한다. 서술 가능 여부 분리는 적용하지 않는다.
+     *
+     * @deprecated 메서드 카드에는 3-arg를 쓴다. 이 오버로드는 호출부 호환용으로만 남아 있다.
+     */
+    @Deprecated
+    public ObjectNode buildApiDocQualityGate(JsonNode coreMethods, boolean applyTargetSuitability) {
+        return buildApiDocQualityGate(coreMethods, applyTargetSuitability, false);
     }
 
     /**
      * 가이드 품질 점수를 집계한다.
      *
+     * <p><b>서술을 가질 수 없는 항목을 분모에서 빼지 않는다.</b> {@code itemCount}는 언제나
+     * 받은 항목 전체이고, 채점 대상이 그보다 적으면 {@code unscorableItemCount}와
+     * {@code unscorableReason}이 <b>같은 객체 안에</b> 함께 나온다. 불편한 항목을 분모에서
+     * 덜어내 좋아 보이게 만드는 것은 이 게이트가 고치려던 실패 그 자체다.</p>
+     *
+     * <p>축을 나누는 이유는 따로 있다. 저장소에 따라 일정 수의 카드는 무엇을 해도 서술을
+     * 가질 수 없다(클래스에 메서드가 하나뿐이라 흐름이 성립하지 않는 경우). 그 수가
+     * {@code belowThresholdCount}에 섞여 있으면 게이트가 절대 초록이 될 수 없고,
+     * 그러면 항상 만점이던 시절과 똑같이 정보량이 0이 된다. 실측에서 junit-framework는
+     * 40장 중 10장이 여기 해당했고, 그 10장 때문에 {@code max-scenarios} 개선(미달 15→2)이
+     * 25→12로 가려져 있었다.</p>
+     *
      * @param applyTargetSuitability P1-3 합성/예제 판정을 적용할지.
      *        메서드 카드는 true. rules/cautions는 "메서드 대상"이 아니므로 false다 —
      *        규칙에 합성 메서드 판정을 적용하는 것 자체가 의미 왜곡이고,
      *        false로 두면 그 사실이 {@code targetSuitabilityApplied}로 산출물에 남는다.
+     * @param applyNarratability 서술 가능/불가를 나눠 잴지. 메서드 카드는 true,
+     *        rules/cautions는 판정 대상 자체가 아니므로 false다. 적용 여부는
+     *        {@code narratabilityApplied}로 산출물에 남는다.
      */
-    public ObjectNode buildApiDocQualityGate(JsonNode coreMethods, boolean applyTargetSuitability) {
+    public ObjectNode buildApiDocQualityGate(
+            JsonNode coreMethods,
+            boolean applyTargetSuitability,
+            boolean applyNarratability
+    ) {
         ObjectNode out = objectMapper.createObjectNode();
         out.put("threshold", ACTIONABILITY_THRESHOLD);
         out.put("metric", "actionabilityScore");
@@ -1772,9 +1801,22 @@ public class LlmServiceBuildSupport {
             out.put("targetSuitabilityMissingCount", 0);
             out.put("targetSuitabilityAvg", 0.0d);
             out.put("narrativeDiversityAvg", 0.0d);
+            out.put("narratabilityApplied", applyNarratability);
+            out.put("scoredItemCount", 0);
+            out.put("unscorableItemCount", 0);
+            out.putObject("unscorableReason");
             out.put("meetsThreshold", false);
             return out;
         }
+
+        // 서술을 가질 수 있는 클래스 집합. 판정 규칙은 골격 생성과 공유한다
+        // (ScenarioNarratabilitySupport) — 두 벌이 되면 게이트가 거짓말을 시작한다.
+        Set<String> narratableClasses = applyNarratability
+                ? ScenarioNarratabilitySupport.narratableClassFqns(toMethodRefs(coreMethods))
+                : Set.of();
+
+        int itemCount = coreMethods.size();
+        Map<String, Integer> unscorableReason = new LinkedHashMap<>();
 
         int count = 0;
         int totalScore = 0;
@@ -1791,6 +1833,19 @@ public class LlmServiceBuildSupport {
 
         for (int i = 0; i < coreMethods.size(); i++) {
             JsonNode method = coreMethods.get(i);
+
+            if (applyNarratability) {
+                ScenarioNarratabilitySupport.MethodRef ref = toMethodRef(method);
+                if (!ScenarioNarratabilitySupport.isNarratable(ref, narratableClasses)) {
+                    // 점수를 매기지 않는다. 다만 사라지지도 않는다 — 아래에서
+                    // unscorableItemCount/unscorableReason으로 같은 객체 안에 남는다.
+                    unscorableReason.merge(
+                            ScenarioNarratabilitySupport.unscorableReason(ref, narratableClasses),
+                            1, Integer::sum);
+                    continue;
+                }
+            }
+
             JsonNode quality = method.path("guideQuality");
             int score = quality.path("actionabilityScore").asInt(method.path("actionabilityScore").asInt(0));
             double slotCoverage = quality.path("slotCoverage").asDouble(0.0d);
@@ -1830,17 +1885,28 @@ public class LlmServiceBuildSupport {
             narrativeDiversitySum += narrativeDiversity;
         }
 
-        out.put("itemCount", count);
+        // itemCount는 언제나 받은 항목 전체다. 채점 대상이 줄어도 여기는 줄지 않는다 —
+        // 분모에서 덜어내 좋아 보이게 만드는 것이 이 게이트가 고치려던 실패다.
+        out.put("itemCount", itemCount);
         // methodCount는 하위호환용으로 남긴다. refined_rules에서는 실제로
         // rules + cautions 개수라 이름이 오독을 부른다. itemCount를 쓴다.
-        out.put("methodCount", count);
-        out.put("averageActionabilityScore", round2((double) totalScore / count));
+        out.put("methodCount", itemCount);
+        out.put("narratabilityApplied", applyNarratability);
+        out.put("scoredItemCount", count);
+        out.put("unscorableItemCount", itemCount - count);
+        ObjectNode reason = out.putObject("unscorableReason");
+        for (Map.Entry<String, Integer> entry : unscorableReason.entrySet()) {
+            reason.put(entry.getKey(), entry.getValue());
+        }
+
+        // 아래 평균은 전부 채점 대상(scoredItemCount) 기준이다.
+        out.put("averageActionabilityScore", count == 0 ? 0.0d : round2((double) totalScore / count));
         out.put("minActionabilityScore", minScore == Integer.MAX_VALUE ? 0 : minScore);
         out.put("belowThresholdCount", belowThreshold);
-        out.put("slotCoverageAvg", round2(slotCoverageSum / count));
-        out.put("evidenceCoverageAvg", round2(evidenceCoverageSum / count));
-        out.put("forbiddenPhraseRateAvg", round2(forbiddenRateSum / count));
-        out.put("repetitionRateAvg", round2(repetitionRateSum / count));
+        out.put("slotCoverageAvg", count == 0 ? 0.0d : round2(slotCoverageSum / count));
+        out.put("evidenceCoverageAvg", count == 0 ? 0.0d : round2(evidenceCoverageSum / count));
+        out.put("forbiddenPhraseRateAvg", count == 0 ? 0.0d : round2(forbiddenRateSum / count));
+        out.put("repetitionRateAvg", count == 0 ? 0.0d : round2(repetitionRateSum / count));
         out.put("targetSuitabilityApplied", applyTargetSuitability);
         out.put("targetSuitabilityMeasuredCount", suitabilityMeasuredCount);
         out.put("targetSuitabilityMissingCount", suitabilityMissing);
@@ -1848,8 +1914,9 @@ public class LlmServiceBuildSupport {
         // 측정하지 않은 것이 평균을 올리는 이상한 지표가 된다.
         out.put("targetSuitabilityAvg",
                 suitabilityMeasuredCount == 0 ? 0.0d : round2(targetSuitabilitySum / suitabilityMeasuredCount));
-        out.put("narrativeDiversityAvg", round2(narrativeDiversitySum / count));
-        out.put("meetsThreshold", belowThreshold == 0);
+        out.put("narrativeDiversityAvg", count == 0 ? 0.0d : round2(narrativeDiversitySum / count));
+        // 채점 대상이 하나도 없으면 통과시키지 않는다. 잴 것이 없는 것과 통과는 다르다.
+        out.put("meetsThreshold", count > 0 && belowThreshold == 0);
         return out;
     }
 
@@ -1959,11 +2026,36 @@ public class LlmServiceBuildSupport {
         if (cautions != null && cautions.isArray()) {
             merged.addAll((ArrayNode) cautions);
         }
-        // rules/cautions는 메서드 대상이 아니므로 합성/예제 판정을 적용하지 않는다.
-        ObjectNode gate = buildApiDocQualityGate(merged, false);
+        // rules/cautions는 메서드 대상이 아니므로 합성/예제 판정도, 서술 가능 판정도
+        // 적용하지 않는다. 규칙에 "이 클래스에 메서드가 몇 개냐"를 묻는 것 자체가 무의미하다.
+        ObjectNode gate = buildApiDocQualityGate(merged, false, false);
         gate.put("ruleCount", countArray(rules));
         gate.put("cautionCount", countArray(cautions));
         return gate;
+    }
+
+    /**
+     * 카드 JSON을 서술 가능 판정용 최소 표현으로 옮긴다.
+     *
+     * <p>{@code fqn}은 {@code com.foo.Bar.baz} 형태라 마지막 마디가 메서드 이름이다.
+     * 카드에 {@code methodName}이 따로 있으면 그것을 먼저 쓴다.</p>
+     */
+    private ScenarioNarratabilitySupport.MethodRef toMethodRef(JsonNode method) {
+        String fqn = safeText(method.path("fqn").asText(""));
+        String methodName = safeText(method.path("methodName").asText(""));
+        if (methodName.isBlank() && fqn.contains(".")) {
+            methodName = fqn.substring(fqn.lastIndexOf('.') + 1);
+        }
+        return new ScenarioNarratabilitySupport.MethodRef(
+                safeText(method.path("classFqn").asText("")), fqn, methodName);
+    }
+
+    private List<ScenarioNarratabilitySupport.MethodRef> toMethodRefs(JsonNode coreMethods) {
+        List<ScenarioNarratabilitySupport.MethodRef> refs = new ArrayList<>();
+        for (JsonNode method : coreMethods) {
+            refs.add(toMethodRef(method));
+        }
+        return refs;
     }
 
     /**

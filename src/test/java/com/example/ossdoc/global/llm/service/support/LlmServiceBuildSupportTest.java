@@ -505,6 +505,160 @@ class LlmServiceBuildSupportTest {
         assertThat(perScenarioGate.path("fillerFieldCount").asInt()).isEqualTo(1);
     }
 
+    /**
+     * <b>철칙: 서술을 가질 수 없는 항목을 분모에서 빼지 않는다.</b>
+     *
+     * <p>이 게이트는 두 축으로 나뉜다. 채점 대상이 전체보다 적으면 그 차이가 왜 생겼는지가
+     * <b>같은 객체 안에</b> 반드시 함께 나와야 한다. 불편한 항목을 분모에서 덜어내
+     * 좋아 보이게 만드는 것이 이 게이트가 고치려던 실패 그 자체이므로, 그 재발을
+     * 주석이 아니라 테스트로 막는다. 나중에 누가 축2를 떨어뜨리면 여기서 걸린다.</p>
+     */
+    @Test
+    void apiDocGate_neverHidesUnscorableItemsFromTheDenominator() throws Exception {
+        // Alpha는 메서드 2개(서술 가능), Beta는 1개, Gamma는 hashCode뿐.
+        JsonNode cards = objectMapper.readTree(
+                "[{\"classFqn\":\"com.foo.Alpha\",\"fqn\":\"com.foo.Alpha.open\",\"methodName\":\"open\","
+                        + "\"guideQuality\":{\"actionabilityScore\":100,\"slotCoverage\":1.0,\"evidenceCoverage\":1.0,"
+                        + "\"forbiddenPhraseRate\":0.0,\"repetitionRate\":0.0,\"targetSuitabilityScore\":1.0}},"
+                        + "{\"classFqn\":\"com.foo.Alpha\",\"fqn\":\"com.foo.Alpha.close\",\"methodName\":\"close\","
+                        + "\"guideQuality\":{\"actionabilityScore\":100,\"slotCoverage\":1.0,\"evidenceCoverage\":1.0,"
+                        + "\"forbiddenPhraseRate\":0.0,\"repetitionRate\":0.0,\"targetSuitabilityScore\":1.0}},"
+                        + "{\"classFqn\":\"com.foo.Beta\",\"fqn\":\"com.foo.Beta.only\",\"methodName\":\"only\","
+                        + "\"guideQuality\":{\"actionabilityScore\":55,\"slotCoverage\":0.0,\"evidenceCoverage\":1.0,"
+                        + "\"forbiddenPhraseRate\":0.0,\"repetitionRate\":0.0,\"targetSuitabilityScore\":1.0}},"
+                        + "{\"classFqn\":\"com.foo.Gamma\",\"fqn\":\"com.foo.Gamma.hashCode\",\"methodName\":\"hashCode\","
+                        + "\"guideQuality\":{\"actionabilityScore\":55,\"slotCoverage\":0.0,\"evidenceCoverage\":1.0,"
+                        + "\"forbiddenPhraseRate\":0.0,\"repetitionRate\":0.0,\"targetSuitabilityScore\":1.0}}]");
+
+        ObjectNode gate = support.buildApiDocQualityGate(cards);
+
+        // 전체 수는 절대 줄지 않는다.
+        assertThat(gate.path("itemCount").asInt()).isEqualTo(4);
+        assertThat(gate.path("scoredItemCount").asInt()).isEqualTo(2);
+
+        // 줄어든 만큼이 반드시 이유와 함께 같은 객체 안에 남는다.
+        assertThat(gate.path("unscorableItemCount").asInt())
+                .isEqualTo(gate.path("itemCount").asInt() - gate.path("scoredItemCount").asInt())
+                .isGreaterThan(0);
+        assertThat(gate.path("unscorableReason").path("singleMethodClass").asInt()).isEqualTo(1);
+        assertThat(gate.path("unscorableReason").path("objectMethod").asInt()).isEqualTo(1);
+        assertThat(gate.path("narratabilityApplied").asBoolean()).isTrue();
+
+        // 채점은 서술 가능한 2장만 대상으로 한다. 그래야 게이트가 초록에 도달할 수 있다.
+        assertThat(gate.path("averageActionabilityScore").asDouble()).isEqualTo(100.0d);
+        assertThat(gate.path("belowThresholdCount").asInt()).isZero();
+        assertThat(gate.path("meetsThreshold").asBoolean()).isTrue();
+    }
+
+    /**
+     * rules/cautions에는 서술 가능 판정을 적용하지 않는다.
+     * 규칙에 "이 클래스에 메서드가 몇 개냐"를 묻는 것 자체가 의미 왜곡이다.
+     */
+    @Test
+    void refinedRuleGate_doesNotApplyNarratability() throws Exception {
+        JsonNode rules = objectMapper.readTree(
+                "[{\"ruleId\":\"R-1\",\"guideQuality\":{\"actionabilityScore\":90,\"slotCoverage\":1.0,"
+                        + "\"evidenceCoverage\":1.0,\"forbiddenPhraseRate\":0.0,\"repetitionRate\":0.0}}]");
+
+        ObjectNode gate = support.buildRefinedRuleQualityGate(rules, objectMapper.createArrayNode());
+
+        assertThat(gate.path("narratabilityApplied").asBoolean()).isFalse();
+        assertThat(gate.path("scoredItemCount").asInt()).isEqualTo(gate.path("itemCount").asInt());
+        assertThat(gate.path("unscorableItemCount").asInt()).isZero();
+    }
+
+    /**
+     * 실측 산출물로 두 축을 검증한다.
+     *
+     * <p>축1은 움직이고(run A 15 → run B 2), 축2는 두 run에서 동일하다(10장).
+     * 축2가 run과 무관하게 같다는 것이 축을 나눈 근거이므로 그 사실을 테스트로 고정한다.</p>
+     *
+     * <p>특히 {@code slotCoverageAvg}가 0.57과 1.0 두 값을 낸다는 것이 중요하다.
+     * 이 지표가 1.0으로 <b>고정</b>돼 있던 것이 이 작업의 출발점이었다. 같은 코드가
+     * 다른 입력에서 다른 값을 낸다는 것이 "이번 1.0은 고정이 아니라 채워진 것"의 증거다.</p>
+     */
+    @Test
+    void apiDocGate_reproducesBothAxesFromStoredArtifacts() throws Exception {
+        java.nio.file.Path base = java.nio.file.Path.of(
+                "C:", "data", "ossdoc", "run_20260815_94b1aaa5", "artifacts");
+        java.nio.file.Path runA = base.resolve("llm_run10_runA").resolve("api_docs.json");
+        java.nio.file.Path runB = base.resolve("llm_run11_runB").resolve("api_docs.json");
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                java.nio.file.Files.isRegularFile(runA) && java.nio.file.Files.isRegularFile(runB),
+                "실측 산출물이 없는 환경입니다");
+
+        ObjectNode gateA = apiGateOf(runA);
+        ObjectNode gateB = apiGateOf(runB);
+
+        // 축2 — 저장소의 성질이라 두 run에서 같다.
+        for (ObjectNode gate : java.util.List.of(gateA, gateB)) {
+            assertThat(gate.path("itemCount").asInt()).isEqualTo(40);
+            assertThat(gate.path("scoredItemCount").asInt()).isEqualTo(30);
+            assertThat(gate.path("unscorableItemCount").asInt()).isEqualTo(10);
+            assertThat(gate.path("unscorableReason").path("singleMethodClass").asInt()).isEqualTo(8);
+            assertThat(gate.path("unscorableReason").path("objectMethod").asInt()).isEqualTo(2);
+        }
+
+        // 축1 — max-scenarios 4 → 6의 효과. 기존 게이트에서는 25 → 12로 가려져 있었다.
+        assertThat(gateA.path("belowThresholdCount").asInt()).isEqualTo(15);
+        assertThat(gateB.path("belowThresholdCount").asInt()).isEqualTo(2);
+        assertThat(gateA.path("averageActionabilityScore").asDouble()).isEqualTo(80.3d);
+        assertThat(gateB.path("averageActionabilityScore").asDouble()).isEqualTo(99.8d);
+        assertThat(gateA.path("minActionabilityScore").asInt()).isEqualTo(55);
+        assertThat(gateB.path("minActionabilityScore").asInt()).isEqualTo(97);
+
+        // slotCoverageAvg가 고정돼 있지 않다는 증거.
+        assertThat(gateA.path("slotCoverageAvg").asDouble()).isEqualTo(0.57d);
+        assertThat(gateB.path("slotCoverageAvg").asDouble()).isEqualTo(1.0d);
+
+        // 둘 다 아직 초록은 아니다. run B는 채움말 2장만 남았다 — 도달 가능한 목표.
+        assertThat(gateA.path("meetsThreshold").asBoolean()).isFalse();
+        assertThat(gateB.path("meetsThreshold").asBoolean()).isFalse();
+    }
+
+    /**
+     * 게이트의 "서술 가능" 판정이 골격 생성과 어긋나지 않는지 본다.
+     *
+     * <p>골격이 실제로 만든 시나리오의 클래스는 게이트가 판정한 narratable 집합의
+     * <b>부분집합</b>이어야 한다({@code max-scenarios} 상한 때문에 등호는 아니다).
+     * 어긋나면 게이트가 "구조적으로 불가능"이라고 말한 카드에 골격이 서술을 붙이고 있다는 뜻이다.</p>
+     */
+    @Test
+    void gateNarratability_agreesWithSkeleton() throws Exception {
+        java.nio.file.Path base = java.nio.file.Path.of(
+                "C:", "data", "ossdoc", "run_20260815_94b1aaa5", "artifacts", "llm_run11_runB");
+        java.nio.file.Path cards = base.resolve("api_docs.json");
+        java.nio.file.Path specs = base.resolve("scenario_specs.json");
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                java.nio.file.Files.isRegularFile(cards) && java.nio.file.Files.isRegularFile(specs),
+                "실측 산출물이 없는 환경입니다");
+
+        JsonNode coreMethods = objectMapper.readTree(java.nio.file.Files.readString(cards)).path("coreMethods");
+        java.util.List<ScenarioNarratabilitySupport.MethodRef> refs = new java.util.ArrayList<>();
+        for (JsonNode card : coreMethods) {
+            String fqn = card.path("fqn").asText("");
+            refs.add(new ScenarioNarratabilitySupport.MethodRef(
+                    card.path("classFqn").asText(""), fqn,
+                    fqn.contains(".") ? fqn.substring(fqn.lastIndexOf('.') + 1) : fqn));
+        }
+        java.util.Set<String> narratable = ScenarioNarratabilitySupport.narratableClassFqns(refs);
+
+        java.util.Set<String> skeletonClasses = new java.util.LinkedHashSet<>();
+        for (JsonNode scenario : objectMapper.readTree(java.nio.file.Files.readString(specs)).path("scenarios")) {
+            for (JsonNode step : scenario.path("steps")) {
+                skeletonClasses.add(step.path("classFqn").asText(""));
+            }
+        }
+
+        assertThat(skeletonClasses).isNotEmpty();
+        assertThat(narratable).containsAll(skeletonClasses);
+    }
+
+    private ObjectNode apiGateOf(java.nio.file.Path path) throws Exception {
+        JsonNode docs = objectMapper.readTree(java.nio.file.Files.readString(path));
+        return support.buildApiDocQualityGate(docs.path("coreMethods"));
+    }
+
     private ObjectNode gateOf(java.nio.file.Path path) throws Exception {
         JsonNode specs = objectMapper.readTree(java.nio.file.Files.readString(path));
         return support.buildScenarioSpecsQualityGate(specs.path("scenarios"), specs.path("overview"));

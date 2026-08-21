@@ -46,8 +46,6 @@ public class LlmInputAssemblerBuildSupport {
     private static final int MAX_EXTENSION_POINTS = 20;
     private static final int MAX_DIRECTORIES = 24;
     private static final int MAX_EVIDENCE_PER_CAUTION = 5;
-    /** 단계가 이보다 적으면 시나리오로 만들지 않는다. 1단계짜리는 흐름이 아니다. */
-    private static final int MIN_SCENARIO_STEPS = 2;
 
     private final ObjectMapper objectMapper;
     private final LlmGenerationProperties llmGenerationProperties;
@@ -1182,21 +1180,19 @@ public class LlmInputAssemblerBuildSupport {
     /**
      * 시나리오 단계로 삼을 수 없는 메서드인지 판정한다.
      *
-     * <p>{@code java.lang.Object} 오버라이드는 어느 저장소에서나 같은 의미이고
-     * 라이브러리 사용 절차의 단계가 아니다. 이름 기반 판정은 여기까지만 한다 —
-     * getter나 factory를 이름으로 걸러내면 그것이 곧 특정 라이브러리 형태에 대한
-     * 과적합이 된다(어떤 라이브러리에서는 getter가 공개 API의 본체다).</p>
+     * <p>판정 자체는 {@link ScenarioNarratabilitySupport#isObjectMethod}에 있다.
+     * 품질 게이트가 "이 카드가 빈 것이 구조적 한계인지"를 가를 때 같은 규칙을 써야 하는데,
+     * 규칙이 두 벌이면 한쪽만 바뀌는 순간 게이트가 거짓말을 시작하기 때문이다.</p>
      */
     private boolean isNonScenarioMethod(String methodName) {
-        String name = safeText(methodName);
-        return "hashCode".equals(name) || "equals".equals(name) || "toString".equals(name);
+        return ScenarioNarratabilitySupport.isObjectMethod(methodName);
     }
 
     /**
      * api_map이 실제 호출 순서를 준 경우에만 대표 호출 흐름 시나리오를 만든다.
      *
      * <p>이름 키워드로 유도된 흐름({@code derived})은 쓰지 않는다. 단계 수가
-     * {@link #MIN_SCENARIO_STEPS}에 못 미치는 흐름도 만들지 않는다 — 단계가 하나뿐인 것은
+     * {@link ScenarioNarratabilitySupport#MIN_SCENARIO_STEPS}에 못 미치는 흐름도 만들지 않는다 — 단계가 하나뿐인 것은
      * 흐름이 아니고, 시나리오 자리만 차지해 더 나은 후보를 밀어낸다.</p>
      */
     private void appendFlowScenario(ArrayNode out, JsonNode methodFlowSeed, int maxSteps, Set<String> usedFqn) {
@@ -1229,7 +1225,7 @@ public class LlmInputAssemblerBuildSupport {
                     asNullableInt(flow.path("startLine")), asNullableInt(flow.path("endLine")));
         }
 
-        if (steps.size() < MIN_SCENARIO_STEPS) {
+        if (steps.size() < ScenarioNarratabilitySupport.MIN_SCENARIO_STEPS) {
             return;
         }
         for (JsonNode step : steps) {
@@ -1248,7 +1244,7 @@ public class LlmInputAssemblerBuildSupport {
      * <p>라이브러리에서 한 타입의 공개 메서드를 순서대로 쓰는 것은 실제 사용 형태이고
      * 라이브러리 문서가 조직되는 방식이기도 하다. 저장소 종류에 의존하지 않는 축이다.</p>
      *
-     * <p>단계를 {@link #MIN_SCENARIO_STEPS}개 이상 낼 수 있는 타입만 후보가 된다.
+     * <p>단계를 {@link ScenarioNarratabilitySupport#MIN_SCENARIO_STEPS}개 이상 낼 수 있는 타입만 후보가 된다.
      * 이 자격 검사를 통과한 뒤에는 importance가 순위를 정한다. 자격을 개수로 두고
      * 순위를 importance로 두는 이유는, 개수를 순위로 쓰면 getter만 잔뜩 있는 설정 인터페이스가
      * 핵심 타입을 밀어내기 때문이다.</p>
@@ -1284,7 +1280,7 @@ public class LlmInputAssemblerBuildSupport {
 
         List<Map.Entry<String, List<CoreMethodSeed>>> candidates = new ArrayList<>();
         for (Map.Entry<String, List<CoreMethodSeed>> entry : byClass.entrySet()) {
-            if (entry.getValue().size() >= MIN_SCENARIO_STEPS) {
+            if (entry.getValue().size() >= ScenarioNarratabilitySupport.MIN_SCENARIO_STEPS) {
                 candidates.add(entry);
             }
         }
