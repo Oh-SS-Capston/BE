@@ -316,29 +316,20 @@ public final class LlmInputAssemblerSupport {
         return bonus;
     }
 
-    /**
-     * 메서드 이름 패턴 기반으로 사용자 설명형 usage 문장을 만든다.
-     */
-    public static String inferMethodUsage(String methodName, String ownerClass, String signatureHint) {
-        String lower = methodName.toLowerCase(Locale.ROOT);
-        if (lower.contains("parse")) {
-            return "입력 인자를 해석해 실행에 사용할 결과 객체를 만들 때 호출합니다.";
-        }
-        if (lower.contains("add") || lower.contains("required") || lower.contains("builder")) {
-            return "실행 전에 옵션/필수값을 설정하거나 구성할 때 호출합니다.";
-        }
-        if (lower.contains("get") || lower.contains("has")) {
-            return "실행 결과에서 값 존재 여부를 확인하거나 값을 읽을 때 호출합니다.";
-        }
-        if (lower.contains("help") || lower.contains("print")) {
-            return "사용법 또는 오류 안내를 출력할 때 호출합니다.";
-        }
-        if (!signatureHint.isBlank()) {
-            return ownerClass + "의 핵심 기능을 연결할 때 호출합니다. 시그니처: "
-                    + normalizeSummarySeed(shortenText(signatureHint, 80));
-        }
-        return ownerClass + "의 핵심 기능을 연결할 때 호출합니다.";
-    }
+    // inferMethodUsage(메서드 이름 패턴으로 usage 문장을 지어내던 함수)는 제거했다.
+    //
+    // 이 함수의 반환값은 CoreMethodSeed.summarySeed로 들어가 골격 step과 coreMethodSeed에
+    // 실려 프롬프트로 나갔고, PROMPT_SCENARIO_ONE이 근거를 "summarySeed와 filePath/startLine,
+    // 그리고 evidence"로 못 박고 있었다. 실측 40개 메서드 중 39개가 실제 요약이 없어
+    // summarySeed가 이 추측 문구였으므로, 모델은 지시대로 그것을 근거 삼아 베꼈다.
+    // 산출물의 채움말은 출력 문제가 아니라 입력 문제였다.
+    //
+    // 이제 실제 요약이 없으면 summarySeed는 빈 칸이다. 모델에게는 signatureHint(20/20 보유),
+    // evidence 스니펫(20/20 보유), filePath/startLine이 남는다 — 전부 코드에서 나온 근거다.
+    // 잃는 것은 가짜 힌트뿐이다.
+    //
+    // 이 함수가 만들던 6개 문구는 ApiDocGuideSupport의 채움말 목록에 그대로 남겨 둔다.
+    // 자세한 이유는 그쪽 주석 참조(요약: 되살아나면 잡는 트립와이어).
 
     public static String inferScenarioHint(String methodName) {
         String lower = methodName.toLowerCase(Locale.ROOT);

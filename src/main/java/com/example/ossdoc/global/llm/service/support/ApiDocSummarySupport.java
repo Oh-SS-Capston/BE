@@ -12,7 +12,15 @@ public final class ApiDocSummarySupport {
     private ApiDocSummarySupport() {
     }
 
-    private static final String DEFAULT_SUMMARY = "핵심 동작 수행";
+    // DEFAULT_SUMMARY("핵심 동작 수행")는 제거했다.
+    //
+    // 빈 요약을 이 문구로 채우던 자리다. STEP 2에서 ApiDocGuideSupport.sanitizeSlot의 같은
+    // 패턴을 없앴는데 여기는 남아 있었다 — 그때는 summarySeed가 이름 패턴 추측 문구로 항상
+    // 차 있어서 이 분기가 거의 타지 않았기 때문이다. 시드에서 추측 문구를 걷어내자 드러났고,
+    // 실측 run C의 apiEntries 32건 중 7건이 이미 이 문구를 달고 있었다.
+    //
+    // 근거가 없으면 빈 칸으로 둔다. 이 문구 자체는 ApiDocGuideSupport의 채움말 목록에 남겨
+    // 과거 산출물 검증과 되살아남 감지를 계속한다.
 
     /**
      * coreMethodSeed 1건으로부터 요약 뷰를 만든다.
@@ -31,7 +39,7 @@ public final class ApiDocSummarySupport {
         String summaryRaw = normalizeRawSummary(firstNonBlank(
                 method.path("summaryRaw").asText(""),
                 method.path("whatItDoesFull").asText(""),
-                method.path("whatItDoes").asText(DEFAULT_SUMMARY)
+                method.path("whatItDoes").asText("")
         ));
         String summaryNarrative = toNarrativeSummary(firstNonBlank(
                 method.path("guideNarrative").asText(""),
@@ -69,23 +77,19 @@ public final class ApiDocSummarySupport {
     }
 
     private static String normalizeSentence(String text) {
-        String normalized = safeText(text).replaceAll("\\s+", " ").trim();
-        if (normalized.isBlank()) {
-            return DEFAULT_SUMMARY;
-        }
-        return normalized;
+        return safeText(text).replaceAll("\\s+", " ").trim();
     }
 
     private static String normalizeRawSummary(String text) {
-        String raw = safeText(text).replaceAll("\\s+", " ").trim();
-        if (raw.isBlank()) {
-            return DEFAULT_SUMMARY;
-        }
-        return raw;
+        return safeText(text).replaceAll("\\s+", " ").trim();
     }
 
     private static String toNarrativeSummary(String rawSummary, String classFqn, String methodName) {
         String normalized = normalizeSentence(rawSummary);
+        // 요약이 없으면 메서드 참조만 남은 "메서드 X#y에서 " 같은 잘린 문장을 만들지 않는다.
+        if (normalized.isBlank()) {
+            return "";
+        }
         if (looksNarrativeSummary(normalized)) {
             return normalized;
         }

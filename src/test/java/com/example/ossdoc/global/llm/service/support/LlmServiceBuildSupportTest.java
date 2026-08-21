@@ -654,6 +654,38 @@ class LlmServiceBuildSupportTest {
         assertThat(narratable).containsAll(skeletonClasses);
     }
 
+    /**
+     * relatedClass와 relatedMethod가 서로 다른 타입을 가리키는 caution은 메서드 카드에 붙이지 않는다.
+     *
+     * <p>실측 20개 중 6개가 모순이었고, {@code CAU-017}(relatedClass=Launcher,
+     * relatedMethod=MediaType.create, 메시지는 Operator 이야기)이 {@code MediaType.create}
+     * 카드의 failureSymptom에 전혀 다른 클래스의 설명을 붙였다.</p>
+     */
+    @Test
+    void coreMethodCards_dropCautionWhenRelatedClassAndMethodContradict() throws Exception {
+        JsonNode structure = objectMapper.readTree(
+                "{\"coreMethodSeed\":[{\"fqn\":\"com.foo.Alpha.open\",\"classFqn\":\"com.foo.Alpha\","
+                        + "\"methodName\":\"open\",\"signatureHint\":\"open()\",\"importance\":9,"
+                        + "\"filePath\":\"src/Alpha.java\",\"startLine\":10,\"endLine\":12}]}");
+        JsonNode cautions = objectMapper.readTree(
+                "[{\"cautionId\":\"CAU-001\",\"relatedClass\":\"com.foo.Other\","
+                        + "\"relatedMethod\":\"com.foo.Alpha.open\",\"message\":\"Other 이야기입니다.\"},"
+                        + "{\"cautionId\":\"CAU-002\",\"relatedClass\":\"com.foo.Alpha\","
+                        + "\"relatedMethod\":\"com.foo.Alpha.open\",\"message\":\"Alpha 이야기입니다.\"}]");
+
+        ArrayNode cards = support.buildCoreMethodCards(
+                structure.path("coreMethodSeed"),
+                objectMapper.createArrayNode(),
+                cautions,
+                objectMapper.createObjectNode().set("scenarios", objectMapper.createArrayNode()));
+
+        String rendered = cards.toString();
+        // 같은 타입을 가리키는 caution은 그대로 쓰인다.
+        assertThat(rendered).contains("Alpha 이야기입니다.");
+        // 모순인 caution의 메시지는 이 카드의 근거로 주장되지 않는다.
+        assertThat(rendered).doesNotContain("Other 이야기입니다.");
+    }
+
     private ObjectNode apiGateOf(java.nio.file.Path path) throws Exception {
         JsonNode docs = objectMapper.readTree(java.nio.file.Files.readString(path));
         return support.buildApiDocQualityGate(docs.path("coreMethods"));

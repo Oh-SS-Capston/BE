@@ -663,7 +663,7 @@ public class LlmInputAssemblerBuildSupport {
                         prev == null ? "" : prev.filePath(),
                         Math.max(importance, methodHeuristicBonus(methodName)),
                         prev == null ? "" : prev.signatureHint(),
-                        normalizeSummarySeed(inferMethodUsage(methodName, className, prev == null ? "" : prev.signatureHint())),
+                        "",  // 실제 요약이 없으면 빈 칸으로 둔다. 이름 패턴 추측을 근거로 실어 보내지 않는다.
                         inferScenarioHint(methodName),
                         prev == null ? null : prev.startLine(),
                         prev == null ? null : prev.endLine()
@@ -755,11 +755,12 @@ public class LlmInputAssemblerBuildSupport {
                 className = firstNonBlank(item.path("class_name").asText(""), extractSimpleName(classFqn));
             }
             String signatureHint = firstNonBlank(item.path("signatureHint").asText(""), item.path("signature").asText(""));
+            // 실제 요약이 없으면 빈 칸으로 둔다. 예전에는 inferMethodUsage(이름 패턴 추측)를
+            // 마지막 후보로 넣었는데, 실측 40개 중 39개가 그 문구로 채워져 프롬프트에 실려 나갔다.
             String summarySeed = firstNonBlank(
                     item.path("summary").asText(""),
                     item.path("summaryHint").asText(""),
-                    item.path("summary_hint").asText(""),
-                    inferMethodUsage(methodName, className, signatureHint)
+                    item.path("summary_hint").asText("")
             );
             int importance = Math.max(baseImportance, item.path("importance").asInt(baseImportance) + methodHeuristicBonus(methodName));
 
@@ -881,8 +882,7 @@ public class LlmInputAssemblerBuildSupport {
             );
             String summarySeed = firstNonBlank(
                     candidate.path("description").asText(""),
-                    candidate.path("qualityReason").asText(""),
-                    inferMethodUsage(methodName, className, "")
+                    candidate.path("qualityReason").asText("")
             );
             int importance = Math.max(
                     baseImportance,
@@ -2030,7 +2030,7 @@ public class LlmInputAssemblerBuildSupport {
                         firstNonBlank(prev == null ? "" : prev.filePath(), ownerSourceFile),
                         importance,
                         prev == null ? "" : prev.signatureHint(),
-                        normalizeSummarySeed(inferMethodUsage(methodName, className, "")),
+                        "",  // 위와 같은 이유로 빈 칸.
                         inferScenarioHint(methodName),
                         prev == null ? null : prev.startLine(),
                         prev == null ? null : prev.endLine()

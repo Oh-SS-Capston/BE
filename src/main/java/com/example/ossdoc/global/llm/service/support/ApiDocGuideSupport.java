@@ -26,14 +26,21 @@ public final class ApiDocGuideSupport {
      * 메서드 이름에 따라 잡히기도 하고 안 잡히기도 해서 지표가 일관성을 잃는다. 실측(junit-framework)
      * 에서 미조인 카드 23장 중 14장이 {@code :331} 문구 하나를 갖고 있었는데, 초안이 이 분기를
      * 빠뜨려 예측이 18장에서 8장으로 어긋났다.</p>
+     *
+     * <p><b>그 6개의 생산자({@code inferMethodUsage})는 이후 제거됐다.</b> 그래도 목록에 남기는
+     * 이유는 둘이다. 첫째, 고정 입력 회귀 테스트가 쓰는 과거 산출물에 아직 실재한다
+     * (run8 68회 / run9 3회). 지우면 이 프로젝트에서 가장 강한 검증이 사라진다.
+     * 둘째, 누군가 이름 패턴 채움말을 다시 넣으면 게이트가 즉시 잡는다 — 죽은 목록이 아니라
+     * 되살아남을 잡는 트립와이어다. 재사용 중인 {@code refined_rules.json}에는 0회이므로
+     * 새 산출물에서 이 문구가 나온다면 그 자체가 퇴행 신호다.</p>
      */
     private static final List<String> FILLER_EXACT = List.of(
             "핵심 기능을 실행한다.",                                        // 이전 ApiDocGuideSupport.DEFAULT_SUMMARY (삭제됨, 과거 산출물에 남아 있다)
             "핵심 동작을 수행합니다.",                                      // LlmInputAssemblerSupport:472
-            "입력 인자를 해석해 실행에 사용할 결과 객체를 만들 때 호출합니다.",   // LlmInputAssemblerSupport:325
-            "실행 전에 옵션/필수값을 설정하거나 구성할 때 호출합니다.",          // LlmInputAssemblerSupport:328
-            "실행 결과에서 값 존재 여부를 확인하거나 값을 읽을 때 호출합니다.",   // LlmInputAssemblerSupport:331
-            "사용법 또는 오류 안내를 출력할 때 호출합니다.",                    // LlmInputAssemblerSupport:334
+            "입력 인자를 해석해 실행에 사용할 결과 객체를 만들 때 호출합니다.",   // 이전 inferMethodUsage(제거됨)
+            "실행 전에 옵션/필수값을 설정하거나 구성할 때 호출합니다.",          // 이전 inferMethodUsage(제거됨)
+            "실행 결과에서 값 존재 여부를 확인하거나 값을 읽을 때 호출합니다.",   // 이전 inferMethodUsage(제거됨)
+            "사용법 또는 오류 안내를 출력할 때 호출합니다.",                    // 이전 inferMethodUsage(제거됨)
             "핵심 메서드를 호출한다."                                        // LlmServiceBuildSupport:562
     );
 
@@ -42,8 +49,8 @@ public final class ApiDocGuideSupport {
      * 앞에 클래스명이 붙는 형태라 전체 일치로는 잡히지 않는다.
      */
     private static final List<String> FILLER_FRAGMENT = List.of(
-            "핵심 동작 수행",                                              // ApiDocSummarySupport:15
-            "의 핵심 기능을 연결할 때 호출합니다",                            // LlmInputAssemblerSupport:337,340
+            "핵심 동작 수행",                                              // 이전 ApiDocSummarySupport.DEFAULT_SUMMARY(제거됨)
+            "의 핵심 기능을 연결할 때 호출합니다",                            // 이전 inferMethodUsage(제거됨)
             "핵심 흐름 중 해당 기능이 필요할 때",                             // LlmServiceBuildSupport:1593
             "입력 조건 기반 로직",
             "조건문 이후 return 또는 error response가 근접하게 나"

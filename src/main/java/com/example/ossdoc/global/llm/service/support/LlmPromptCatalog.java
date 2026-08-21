@@ -131,6 +131,12 @@ public final class LlmPromptCatalog {
      * <p>{@code excludedByOtherScenarios}는 이 시나리오 골격에서 빠진 메서드와 그것을 가져간
      * 시나리오를 알려준다. 골격은 같은 메서드를 두 시나리오에 넣지 않기 때문에, 이 정보가 없으면
      * 격리된 모델이 "앞서 만든 객체를" 같은 근거 없는 서술로 빈자리를 메운다.</p>
+     *
+     * <p>근거 목록에서 {@code summarySeed}를 유일한 축으로 삼지 않는다. 예전에는 근거를
+     * "summarySeed와 filePath/startLine, 그리고 evidence"로 못 박았는데, 실측 40개 메서드 중
+     * 39개는 실제 요약이 없어 {@code summarySeed}가 이름 패턴 추측 문구였다. 모델은 지시대로
+     * 그것을 근거 삼아 베꼈고, 그 결과가 산출물의 채움말이었다. 시드에서 추측 문구를 걷어냈으므로
+     * (그 자리는 이제 빈다) 프롬프트도 실제로 존재하는 근거를 가리켜야 한다.</p>
      */
     public static final String PROMPT_SCENARIO_ONE = """
             역할: 아래 시나리오 골격 한 장의 비어 있는 서술 필드를 채운다.
@@ -145,7 +151,10 @@ public final class LlmPromptCatalog {
             - 골격에 없는 step을 추가하지 않는다. 다른 시나리오를 만들지 않는다.
             - classFqn과 evidenceLinks는 응답에 넣지 않는다. 골격 값이 쓰이므로 버려진다.
             서술 작성 규칙:
-            - 근거는 골격이 준 summarySeed와 filePath/startLine, 그리고 evidence 뿐이다. 그 범위를 넘지 않는다.
+            - 근거는 골격이 준 signatureHint(메서드 시그니처), filePath/startLine, evidence(코드 스니펫),
+              그리고 summarySeed가 있을 때 그것뿐이다. 그 범위를 넘지 않는다.
+            - summarySeed는 없을 수 있다. 없으면 signatureHint와 evidence로 쓴다.
+              시그니처의 인자 이름·타입과 스니펫의 실제 코드가 가장 확실한 근거다.
             - excludedByOtherScenarios에 있는 메서드는 다른 시나리오가 다룬다.
               이 시나리오의 step으로 삼지 말고, 필요하면 "그 시나리오에서 다룬다"고만 언급한다.
             - 근거가 약하면 confidence를 낮추고 "추정"이라고 밝힌다.

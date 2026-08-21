@@ -572,10 +572,13 @@ public class LlmServiceBuildSupport {
 
                 ObjectNode step = steps.addObject();
                 step.put("stepNo", stepNo);
+                // 모델이 description을 안 쓰면 빈 칸으로 둔다. 예전에는 마지막 후보로
+                // "핵심 메서드를 호출한다."를 넣었는데, 시드에서 이름 패턴 추측 문구를
+                // 걷어낸 뒤로는 summarySeed가 비는 경우가 많아 이 리터럴이 실제로 실릴 자리다.
+                // 근거 없는 문장을 채우느니 게이트가 미충족으로 세게 한다.
                 step.put("description", firstNonBlank(
                         rawStep.path("description").asText(""),
-                        seedStep.path("summarySeed").asText(""),
-                        "핵심 메서드를 호출한다."
+                        seedStep.path("summarySeed").asText("")
                 ));
                 copyTextFields(rawStep, step, STEP_RICH_TEXT_FIELDS);
 
@@ -1543,18 +1546,44 @@ public class LlmServiceBuildSupport {
         return out;
     }
 
+    /**
+     * caution을 메서드 fqn으로 색인한다.
+     *
+     * <p><b>{@code relatedClass}와 {@code relatedMethod}가 서로 다른 타입을 가리키면 쓰지 않는다.</b>
+     * 두 값은 모델이 준 것을 그대로 옮긴 것인데(:312), 실측 20개 중 6개가 서로 모순이었다 —
+     * {@code CAU-017}은 {@code relatedClass=Launcher}, {@code relatedMethod=MediaType.create},
+     * 메시지는 {@code Operator#createMissingOperandMessage} 이야기였다. 그 결과
+     * {@code MediaType.create} 카드의 failureSymptom에 전혀 다른 클래스의 설명이 붙었다.</p>
+     *
+     * <p>둘이 어긋나면 어느 쪽이 맞는지 알 방법이 없으므로 그 caution을 메서드에 붙이지 않는다.
+     * 한쪽을 골라 쓰면 절반은 틀린 곳에 붙는다. caution 자체는 산출물에 그대로 남고,
+     * 여기서 빠지는 것은 "이 메서드 카드의 근거"라는 주장뿐이다.</p>
+     */
     private Map<String, List<String>> indexCautionsByMethod(JsonNode cautions) {
         Map<String, List<String>> out = new HashMap<>();
         if (!cautions.isArray()) {
             return out;
         }
+        int contradictory = 0;
         for (JsonNode caution : cautions) {
             String method = caution.path("relatedMethod").asText("");
             if (method.isBlank()) {
                 continue;
             }
+            String owner = safeText(caution.path("relatedClass").asText(""));
+            if (!owner.isBlank() && !method.startsWith(owner + ".")) {
+                contradictory++;
+                log.warn("[LlmGuide] caution {} 의 relatedClass({})와 relatedMethod({})가 서로 다른 타입을 가리켜"
+                                + " 메서드 카드에 붙이지 않습니다.",
+                        caution.path("cautionId").asText(""), owner, method);
+                continue;
+            }
             out.computeIfAbsent(method, k -> new ArrayList<>())
                     .add(caution.path("message").asText(""));
+        }
+        if (contradictory > 0) {
+            log.warn("[LlmGuide] relatedClass/relatedMethod가 모순인 caution {}/{}건을 메서드 카드에서 제외했습니다.",
+                    contradictory, cautions.size());
         }
         return out;
     }
