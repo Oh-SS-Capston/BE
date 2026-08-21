@@ -89,6 +89,7 @@ public class LlmService {
                 : bundle.evidenceBundle();
 
         JsonNode refinedRules = reusableCautions(request.getRunId())
+                .map(this::refreshReusedGate)
                 .orElseGet(() -> generateCautions(structure, evidence));
         llmArtifactWriter.write(
                 run, ArtifactKind.LLM_REFINED_RULES, ARTIFACT_SCHEMA_VERSION, PATH_REFINED_RULES, refinedRules
@@ -169,6 +170,28 @@ public class LlmService {
                 () -> log.info("[LlmService] reuse-cautions가 켜져 있지만 이전 산출물이 없어 새로 생성합니다.")
         );
         return cached;
+    }
+
+    /**
+     * 재사용한 STEP① 산출물의 qualityGate만 현재 산식으로 다시 계산한다.
+     *
+     * <p>cautions/rules는 손대지 않고 LLM 호출도 없다. 게이트 계산은 결정론이므로
+     * 같은 cautions에 현재 산식을 적용한 값이 곧 이 실행의 값이고, 파일에 남아 있던 값은
+     * 그 산출물을 만들던 시점의 산식으로 잰 값이다.</p>
+     *
+     * <p>이걸 안 하면 낡은 게이트가 그대로 실려 나가 현재 로직으로 잰 값처럼 읽힌다.
+     * 실제로 run A에서 {@code targetSuitabilityAvg=1.0}이 그대로 남는 바람에,
+     * 기본값 1.0을 삼키던 버그를 고쳤는지 산출물만 보고는 판단할 수 없었다.</p>
+     */
+    private JsonNode refreshReusedGate(JsonNode reused) {
+        if (!(reused instanceof ObjectNode node)) {
+            return reused;
+        }
+        node.set("qualityGate", llmServiceBuildSupport.buildRefinedRuleQualityGate(
+                node.path("rules"), node.path("cautions")
+        ));
+        log.info("[LlmService] 재사용 산출물의 qualityGate만 현재 산식으로 재계산했습니다(cautions 내용은 그대로).");
+        return node;
     }
 
     /**
