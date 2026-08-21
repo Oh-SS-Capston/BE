@@ -143,9 +143,11 @@ public final class LlmPromptCatalog {
             골격은 코드 분석으로 확정된 것이다. 시나리오를 새로 만들지 않는다.
             채울 칸:
             - steps의 각 항목마다 description, precondition, action, successSignal, failureSignal,
-              userAction, dataHandled, evidenceInterpretation을 여덟 개 모두 채운다.
-              하나라도 빈 문자열이나 생략으로 두지 않는다. 이 여덟 개가 이 작업의 전부다.
-            - 시나리오 수준의 whyThisMatters, entryPoint, expectedOutcome도 채운다.
+              userAction, dataHandled, evidenceInterpretation 여덟 개를 검토한다.
+              이 여덟 개가 이 작업의 전부다.
+            - 근거로 쓸 수 있는 칸은 채운다. 근거가 없는 칸은 빈 문자열로 둔다.
+              빈 칸은 실패가 아니다. 근거 없이 채운 칸이 실패다.
+            - 시나리오 수준의 whyThisMatters, entryPoint, expectedOutcome도 같은 기준으로 쓴다.
             골격 유지 규칙:
             - scenarioId와 각 step의 stepNo, methodFqn을 그대로 옮긴다. 서술을 붙일 칸을 가리킨다.
             - 골격에 없는 step을 추가하지 않는다. 다른 시나리오를 만들지 않는다.
@@ -157,7 +159,12 @@ public final class LlmPromptCatalog {
               시그니처의 인자 이름·타입과 스니펫의 실제 코드가 가장 확실한 근거다.
             - excludedByOtherScenarios에 있는 메서드는 다른 시나리오가 다룬다.
               이 시나리오의 step으로 삼지 말고, 필요하면 "그 시나리오에서 다룬다"고만 언급한다.
-            - 근거가 약하면 confidence를 낮추고 "추정"이라고 밝힌다.
+            - 스니펫과 시그니처에 없는 것은 쓰지 않는다. 특히 예외 이름, 반환 타입, 호출 순서를
+              지어내지 않는다. 코드가 "null이면 안 된다"고만 말한다면 어떤 예외가 던져지는지는
+              모르는 것이다. 모르는 것은 비운다.
+            - 인자가 없는 메서드에는 인자에 대한 사전조건이 없다. 없는 것을 지어내지 말고 비운다.
+            - 근거가 약하면 confidence를 낮춘다. 다만 confidence를 낮춘다고 해서 근거에 없는
+              사실을 쓸 수 있게 되는 것은 아니다. 그럴 때도 비운다.
             - 금지 표현("핵심 동작 수행", "입력 조건 기반 로직")은 그대로 사용하지 않는다.
             출력 스키마(JSON):
             {"scenarios":[{"scenarioId":"%s","title":"string","intent":"string","whyThisMatters":"string",
