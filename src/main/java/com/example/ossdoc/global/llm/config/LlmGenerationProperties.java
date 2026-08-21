@@ -64,13 +64,38 @@ public class LlmGenerationProperties {
     private ScenarioCallMode scenarioCallMode = ScenarioCallMode.PER_SCENARIO;
 
     /**
-     * PER_SCENARIO 모드에서 시나리오 하나당 출력 토큰 상한.
-     *
-     * <p>골격 한 장은 step 최대 {@link #maxStepsPerScenario}개이고 step마다 서술 8필드다.
-     * 8차 baseline에서 채워진 칸의 실측 분량이 step당 약 150토큰이라
-     * 6 step × 150 ≈ 900에 여유를 둔다.</p>
+     * PER_SCENARIO 모드에서 시나리오 수준 필드(title·intent·whyThisMatters·entryPoint·
+     * expectedOutcome)에 배정하는 출력 토큰 몫.
      */
-    private int tokensPerScenario = 1600;
+    private int tokensScenarioBase = 400;
+
+    /**
+     * PER_SCENARIO 모드에서 step 하나당 배정하는 출력 토큰 몫.
+     *
+     * <p>이전에는 시나리오당 1600 고정이었고 근거는 "8차 실측 step당 약 150토큰"이었다.
+     * <b>그 실측이 틀렸다.</b> 8차는 SINGLE 모드에서 서술 칸이 36/88만 채워졌던 실행이라,
+     * 빈 칸이 59%인 산출물로 칸당 분량을 재서 실제보다 낮게 나왔다. 그 값으로 잡은 1600은
+     * 4 step까지는 우연히 충분했고(실측 최대 1129) 6 step에서 처음 깨졌다 —
+     * run B의 SCN-006이 상한에 정확히 닿아 잘렸다.</p>
+     *
+     * <p>칸이 실제로 채워진 뒤 다시 쟀다(run B, step별 출력 토큰):
+     * 2 step 453·585 / 3 step 618·922 / 4 step 1129. 최소제곱 {@code y = 297·steps - 91},
+     * 잔차 최대 +121. step당 약 300토큰이지 150이 아니다. 잔차를 덮게 350으로 잡는다.</p>
+     *
+     * <p>{@code num_predict}는 목표가 아니라 정지 조건이라 올려도 모델이 안 쓰면 비용이
+     * 늘지 않는다. run B에서 6회 중 5회가 상한 훨씬 아래에서 스스로 멈췄다.</p>
+     */
+    private int tokensScenarioPerStep = 350;
+
+    /**
+     * 골격 step 수에 맞춘 시나리오 하나의 출력 토큰 상한.
+     *
+     * <p>2 step 1,100 / 4 step 1,800 / 6 step 2,500. {@link #maxStepsPerScenario}가
+     * step 수를 묶으므로 별도 천장은 두지 않는다.</p>
+     */
+    public int tokensForScenario(int stepCount) {
+        return tokensScenarioBase + tokensScenarioPerStep * Math.max(0, stepCount);
+    }
 
     /**
      * PER_SCENARIO 모드에서 overview 호출의 출력 토큰 상한.

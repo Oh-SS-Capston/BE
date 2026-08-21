@@ -136,7 +136,12 @@ ossdoc:
       max-steps-per-scenario: ${LLM_MAX_STEPS_PER_SCENARIO:6}
       # 단계별 출력 상한. num_predict와 min()으로 clamp된다.
       # ①: 실측 5,378토큰이므로 여유를 둔 6,500.
-      # ②: 시나리오 2개면 약 4,000토큰. 여유를 둔 5,000.
+      # ②: 시나리오 2개면 약 4,000토큰. 여유를 둔 5,000. (SINGLE 모드 전용)
+      #
+      # 주의: max-scenarios=6이면 골격이 20 step이고 step당 약 300토큰이라
+      # SINGLE은 약 6,000토큰이 필요해 이 상한에서 절단된다. 값을 그대로 두는 것은
+      # SINGLE이 8차/9차 산출물과 비교 가능한 기준선이어야 하기 때문이다.
+      # 기준선으로서의 비교 가능성은 max-scenarios=4에서만 유효하다.
       tokens-cautions: ${LLM_TOKENS_CAUTIONS:6500}
       tokens-scenarios: ${LLM_TOKENS_SCENARIOS:5000}
       # ② 호출 분해 방식. single = 한 호출로 골격 전체(5차까지의 방식).
@@ -153,9 +158,22 @@ ossdoc:
       # per-scenario는 컨텍스트 필터링이 전제다(LlmScenarioContextSupport).
       # 필터링 없이 쪼개면 8차 실측 기준 ② 프롬프트가 12,489토큰/14.2분 → 62,445토큰/약 71분이 된다.
       scenario-call-mode: ${LLM_SCENARIO_CALL_MODE:per-scenario}
-      # per-scenario 전용 출력 상한.
-      # 시나리오 1장 = step 최대 6개 × 서술 8필드. 8차 실측 step당 약 150토큰이라 6×150≈900에 여유를 둔다.
-      tokens-per-scenario: ${LLM_TOKENS_PER_SCENARIO:1600}
+      # per-scenario 전용 출력 상한. 시나리오 1장 = base + per-step × 골격 step 수.
+      #
+      # 이전에는 시나리오당 1600 고정이었고 근거는 "8차 실측 step당 약 150토큰"이었다.
+      # 그 실측이 틀렸다 — 8차는 SINGLE 모드에서 서술 칸이 36/88만 채워졌던 실행이라,
+      # 빈 칸이 59%인 산출물로 칸당 분량을 재서 실제보다 낮게 나왔다.
+      # 1600은 4 step까지 우연히 충분했고(실측 최대 1129) 6 step에서 처음 깨졌다.
+      #
+      # 칸이 실제로 채워진 뒤 다시 쟀다(run B, step별 출력 토큰):
+      #   2 step 453·585 / 3 step 618·922 / 4 step 1129 / 6 step 1600(절단)
+      #   최소제곱 y = 297·steps - 91, 잔차 최대 +121  →  step당 약 300토큰
+      # 잔차를 덮어 350으로 잡는다. 2 step 1,100 / 4 step 1,800 / 6 step 2,500.
+      #
+      # num_predict는 목표가 아니라 정지 조건이라 올려도 모델이 안 쓰면 비용이 늘지 않는다.
+      # run B에서 6회 중 5회가 상한 훨씬 아래에서 스스로 멈췄다.
+      tokens-scenario-base: ${LLM_TOKENS_SCENARIO_BASE:400}
+      tokens-scenario-per-step: ${LLM_TOKENS_SCENARIO_PER_STEP:350}
       # 개요는 8필드 단문이라 짧다. 짧아서 조기종료 위험도 없다.
       tokens-overview: ${LLM_TOKENS_OVERVIEW:900}
       # true면 이전 실행의 llm/refined_rules.json을 재사용하고 ①을 건너뛴다.

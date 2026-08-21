@@ -94,21 +94,23 @@ public final class LlmResponseJsonSupport {
     /**
      * 절단 복원이 실제로 무엇을 했는지 담는다.
      *
-     * <p>이건 <b>길이 차이로는 알 수 없다</b>. 복원은 미완성 항목을 버리는 게 아니라
-     * 닫는 구분자를 덧붙이므로 결과가 원본보다 길어지고, 여기에 Jackson 재직렬화 길이까지
-     * 섞어 빼면 "폐기 -6자" 같은 음수가 나온다(8차 baseline에서 실제로 그렇게 찍혔다).
+     * <p>이건 <b>길이 차이로는 알 수 없다</b>. 닫는 구분자를 덧붙이는 만큼 결과가 길어지고
+     * 미완성 값을 버리는 만큼 짧아져 두 방향이 섞이며, 여기에 Jackson 재직렬화 길이까지
+     * 빼면 "폐기 -6자" 같은 음수가 나온다(8차 baseline에서 실제로 그렇게 찍혔다).
      * 그래서 복원 과정에서 직접 센다.</p>
      *
      * @param json                 복원된 JSON 문자열
      * @param preambleDroppedChars 첫 여는 구분자 앞에서 버린 서두 길이
      * @param closersAppended      덧붙인 닫는 구분자 수 = 응답이 그만큼 열린 채 끝났다는 뜻
      * @param unterminatedString   문자열 리터럴 한가운데서 끊겼는지
+     * @param unterminatedValueDroppedChars 그렇게 끊긴 미완성 key/value 쌍을 버린 길이
      */
     public record TruncationRepair(
             String json,
             int preambleDroppedChars,
             int closersAppended,
-            boolean unterminatedString
+            boolean unterminatedString,
+            int unterminatedValueDroppedChars
     ) {
         /** 손댈 곳이 하나라도 있었는지. 정상 종료한 응답과 구분하는 데 쓴다. */
         public boolean repaired() {
@@ -131,6 +133,21 @@ public final class LlmResponseJsonSupport {
     /**
      * 복원 결과와 함께 "무엇을 고쳤는지"를 돌려준다.
      * 진단 로그가 길이 비교 대신 이 값을 쓰게 하려는 입구다.
+     *
+     * <p><b>문자열 한가운데서 끊기면 그 key/value 쌍을 통째로 버린다.</b> 예전에는 닫는
+     * 따옴표를 붙여 마무리했는데, 그러면 잘린 조각이 문법적으로 완전한 값이 되어
+     * 품질 게이트가 "채운 칸"으로 센다. run B에서 실제로
+     * {@code "confidenceReason": "filePath 와 start"}라는 16자 조각이 그렇게 남았다.
+     * 채운 것과 제대로 채운 것을 구분하는 것이 이 계기판의 존재 이유이므로,
+     * 조각을 완성된 값으로 위장시키지 않는다. 그 칸이 비면 게이트가 미충족으로 세고,
+     * 절단이 지표에 자동으로 나타난다.</p>
+     *
+     * <p>버리는 대신 조각을 남기고 표시하는 방법도 있으나, 절단 신호를 게이트까지
+     * 올리려면 {@code LlmChatClient.call}의 반환형을 바꿔야 해서 호출부가 연쇄로 바뀐다.
+     * 절단 여부와 버린 길이는 이미 로그에 남으므로 그 비용을 지불하지 않는다.</p>
+     *
+     * <p><b>한계</b>: 숫자 한가운데 절단({@code "startLine":12} ← 실제 123)은 탐지할
+     * 방법이 없다. 열린 문자열만이 믿을 수 있는 신호다.</p>
      */
     public static TruncationRepair repairTruncatedJson(String payload) {
         String input = payload == null ? "" : payload.trim();
@@ -145,13 +162,17 @@ public final class LlmResponseJsonSupport {
             start = Math.min(objectStart, arrayStart);
         }
         if (start < 0) {
-            return new TruncationRepair("", input.length(), 0, false);
+            return new TruncationRepair("", input.length(), 0, false, 0);
         }
 
         StringBuilder sb = new StringBuilder();
         boolean inString = false;
         boolean escaped = false;
         Deque<Character> openDelimiters = new ArrayDeque<>();
+        // 문자열 밖에서 마지막으로 만난 구분자(, { [) 바로 뒤 위치. 응답이 문자열
+        // 한가운데서 끝났을 때 여기까지 되돌리면 미완성 key/value 쌍이 통째로 사라진다.
+        // 여는 구분자는 그 "직후"를 기록하므로 되돌려도 열린 구분자 스택은 그대로 유효하다.
+        int lastBoundaryEnd = 0;
 
         for (int i = start; i < input.length(); i++) {
             char ch = input.charAt(i);
@@ -174,6 +195,9 @@ public final class LlmResponseJsonSupport {
             }
             if (ch == '{' || ch == '[') {
                 openDelimiters.push(ch);
+                lastBoundaryEnd = sb.length();
+            } else if (ch == ',') {
+                lastBoundaryEnd = sb.length();
             } else if (ch == '}') {
                 if (!openDelimiters.isEmpty() && openDelimiters.peek() == '{') {
                     openDelimiters.pop();
@@ -185,18 +209,24 @@ public final class LlmResponseJsonSupport {
             }
         }
 
+        // 열린 채 끝난 문자열은 닫지 않고 그 key/value 쌍을 버린다. 닫아 주면 잘린 조각이
+        // 완성된 값으로 위장되고, 품질 게이트가 그걸 "채운 칸"으로 센다.
+        int unterminatedValueDroppedChars = 0;
         if (inString) {
-            sb.append('"');
+            unterminatedValueDroppedChars = sb.length() - lastBoundaryEnd;
+            sb.setLength(lastBoundaryEnd);
         }
         int closersAppended = openDelimiters.size();
         while (!openDelimiters.isEmpty()) {
             sb.append(openDelimiters.pop() == '{' ? '}' : ']');
         }
+        // 되돌린 자리에 남은 쉼표는 아래 후처리가 걷어낸다.
         String json = sb.toString()
                 .replaceAll(",\\s*}", "}")
                 .replaceAll(",\\s*]", "]")
                 .trim();
-        return new TruncationRepair(json, start, closersAppended, inString);
+        return new TruncationRepair(
+                json, start, closersAppended, inString, unterminatedValueDroppedChars);
     }
 
     /**

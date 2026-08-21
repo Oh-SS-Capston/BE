@@ -125,7 +125,7 @@ public class LlmOllamaClientSupport implements LlmChatClient {
                         .body(requestBody)
                         .retrieve()
                         .body(String.class);
-                return parseResponse(stepName, raw);
+                return parseResponse(stepName, raw, effectiveNumPredict);
             } catch (LlmException e) {
                 throw e;
             } catch (RestClientResponseException e) {
@@ -289,7 +289,7 @@ public class LlmOllamaClientSupport implements LlmChatClient {
         }
     }
 
-    private JsonNode parseResponse(String stepName, String raw) {
+    private JsonNode parseResponse(String stepName, String raw, int effectiveNumPredict) {
         try {
             JsonNode root = objectMapper.readTree(raw);
             if (root.has("error")) {
@@ -316,7 +316,10 @@ public class LlmOllamaClientSupport implements LlmChatClient {
                 return objectMapper.readTree(jsonPayload);
             } catch (Exception parseFail) {
                 if (truncated) {
-                    log.warn("[LlmOllama] {} 응답이 num_predict 상한에서 잘렸습니다.", stepName);
+                    // 상한과 실제 출력을 한 줄에 같이 남긴다. 다음 사람이 이 줄만 보고
+                    // 상한을 얼마나 올려야 하는지 판단할 수 있어야 한다.
+                    log.warn("[LlmOllama] {} 응답이 num_predict 상한에서 잘렸습니다. numPredict={}, 출력 {}토큰",
+                            stepName, effectiveNumPredict, root.path("eval_count").asInt(0));
                 }
                 // 파싱이 깨졌다는 것 자체가 이상 신호다. 절단이든 중단이든 원본을 남긴다.
                 logPayloadExcerpt(stepName, jsonPayload, truncated ? "num_predict 상한 절단" : "생성 중단 추정");
@@ -508,22 +511,26 @@ public class LlmOllamaClientSupport implements LlmChatClient {
      * 절단 복원이 실제로 무엇을 고쳤는지 남긴다.
      *
      * <p>이전 버전은 "폐기 N자"를 길이 차이로 구했는데 전제와 단위가 둘 다 틀렸다.
-     * 복원은 미완성 항목을 버리지 않고 닫는 구분자를 덧붙이므로 결과가 원본보다 길어지고,
+     * 닫는 구분자를 덧붙이는 만큼 길어지고 미완성 값을 버리는 만큼 짧아져 두 방향이 섞이며,
      * 비교 대상도 Jackson이 재직렬화한 문자열이라 애초에 같은 단위가 아니었다.
      * 8차 baseline에서 "폐기 -6자 (-0.0%)"가 찍혀 드러났다.</p>
      *
      * <p>대신 복원이 센 값을 그대로 쓴다. {@code closersAppended}가 크면 응답이 그만큼
-     * 깊이 열린 채 끝났다는 뜻이라 "상한이 모자랐다"의 직접 증거가 된다.</p>
+     * 깊이 열린 채 끝났다는 뜻이라 "상한이 모자랐다"의 직접 증거가 된다.
+     * {@code unterminatedValueDroppedChars}는 잘린 조각을 버린 길이다 — 이 값이 0이 아니면
+     * 산출물의 그 칸이 비어 있고, 그건 모델이 안 쓴 게 아니라 상한에 걸린 것이다.</p>
      */
     private void logRepair(String stepName, String jsonPayload, LlmResponseJsonSupport.TruncationRepair repair) {
         log.warn(
                 "[LlmOllama] {} 복원 내역. 파싱대상 {}자 → 닫는 구분자 {}개 추가"
-                        + "(응답이 그만큼 열린 채 끝남), 서두 폐기 {}자, 문자열 중간 절단 {}",
+                        + "(응답이 그만큼 열린 채 끝남), 서두 폐기 {}자, 문자열 중간 절단 {},"
+                        + " 미완성 값 폐기 {}자",
                 stepName,
                 jsonPayload.length(),
                 repair.closersAppended(),
                 repair.preambleDroppedChars(),
-                repair.unterminatedString() ? "예" : "아니오"
+                repair.unterminatedString() ? "예" : "아니오",
+                repair.unterminatedValueDroppedChars()
         );
     }
 

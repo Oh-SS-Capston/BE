@@ -319,7 +319,7 @@ public class LlmService {
                     prompt,
                     prompt,
                     context,
-                    llmGenerationProperties.getTokensPerScenario(),
+                    llmGenerationProperties.tokensForScenario(seedScenario.path("steps").size()),
                     CONTEXT_LIMIT_SCENARIOS_COMPACT,
                     raw -> llmServiceBuildSupport.normalizeOneScenario(seedScenario, raw, structure),
                     () -> llmServiceBuildSupport.fallbackOneScenario(seedScenario, structure)
