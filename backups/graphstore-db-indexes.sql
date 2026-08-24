@@ -3,6 +3,13 @@
 -- These indexes support GraphStore ingest/read queries by run_id, relation type,
 -- symbol identity, evidence lookup, and link-table joins.
 
+-- artifact
+CREATE INDEX IF NOT EXISTS idx_artifact_run_kind_created_at
+    ON artifact (run_id, kind, created_at DESC);
+
+-- Artifact upsert by run_id + kind + path is already covered by the JPA unique
+-- constraint ux_artifact_run_kind_path, so a separate duplicate index is not added.
+
 -- module
 CREATE INDEX IF NOT EXISTS idx_module_run_id
     ON module (run_id);
