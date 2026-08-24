@@ -155,9 +155,32 @@ public class GraphProjectionService {
             int a = Math.min(fromIndex, toIndex);
             int b = Math.max(fromIndex, toIndex);
 
+            /*
+             * clustering 신뢰도가 낮은 edge는 projection 대상에서 제외한다.
+             *
+             * 현재 제외 대상:
+             * - UNRESOLVED 관계
+             * - Reflection 관계
+             *
+             * 원본 GraphStore에는 그대로 남아 있기 때문에
+             * 다른 분석 기능에서는 계속 사용할 수 있다.
+             */
+            if (!edgeWeightPolicy.includeInClustering(edge)) {
+                continue;
+            }
+
             String key = a + ":" + b;
             double weight = edgeWeightPolicy.weightOf(edge);
 
+            /*
+             * 0 이하의 weight 또는 비정상적인 숫자는
+             * Leiden graph에 포함하지 않는다.
+             */
+            if (weight <= 0.0 || !Double.isFinite(weight)) {
+                continue;
+            }
+
+// 같은 두 TYPE 사이에 여러 관계가 존재하면 weight를 합산한다.
             undirectedWeightMap.merge(key, weight, Double::sum);
         }
 

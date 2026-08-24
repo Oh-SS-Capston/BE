@@ -13,258 +13,646 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 그래프 통계에서 resolution 탐색 범위를 유도하고, 로그 스케일 다중 프로브로
- * Modularity Q 기준 최적 resolution을 찾는다. (Method B)
+ * Leiden에 사용할 적절한 resolution 값을 탐색하는 서비스.
  *
- * 흐름:
- * 1. N, M에서 γ_min(density×0.3), γ_max(avgDegree/N) 계산
- * 2. [γ_min, γ_max]를 로그 스케일 후보 5~7개로 분할
- * 3. 각 후보로 Leiden 실행 → 유효 클러스터 수 [3, min(10,√N)] 필터
- * 4. 유효 후보 중 Modularity Q 최고값 선택
- * 5. 최적이 경계에 걸리면 해당 방향으로 1회 확장 재탐색
+ * 여러 resolution 후보에 대해 Leiden을 실행하고,
+ * CPM Quality를 중심으로 최적 후보를 선택한다.
+ *
+ * 추가로 작은 cluster 비율과 giant cluster 비율에 penalty를 적용하여
+ * 지나치게 분할되거나 하나의 cluster에 집중되는 결과를 억제한다.
+ *
+ * Modularity는 최적 resolution 선택 기준이 아니라
+ * 결과 비교 및 분석을 위한 보조 지표로 유지한다.
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class ResolutionProbeService {
 
-    private final LeidenCommunityService leidenCommunityService;
-
+    // 최초 resolution 범위에서 최적값을 찾지 못했을 때 확장 탐색하는 최대 횟수.
     private static final int MAX_EXTENSION = 1;
 
+    // 작은 cluster가 많이 발생하는 결과에 적용하는 penalty 계수.
+    private static final double MISC_PENALTY = 0.35;
+
+    // 하나의 cluster가 전체 graph 대부분을 차지하는 경우 적용하는 penalty 계수.
+    private static final double GIANT_CLUSTER_PENALTY = 0.20;
+
+    private final LeidenCommunityService leidenCommunityService;
+
+    /**
+     * resolution 탐색 결과.
+     *
+     * resolution      : 선택된 resolution
+     * communityResult : 해당 resolution의 Leiden 결과
+     * modularity      : 결과 분석용 Modularity
+     * cpmQuality      : Leiden의 CPM Quality
+     * clusterCount    : minClusterSize 이상인 유효 cluster 수
+     */
     public record ProbeResult(
             double resolution,
             CommunityResult communityResult,
             double modularity,
+            double cpmQuality,
             int clusterCount
     ) {}
 
-    public ProbeResult findBest(ProjectedGraph graph, int minClusterSize, int iterations) {
+    /**
+     * 현재 graph에 적합한 Leiden resolution을 탐색한다.
+     */
+    public ProbeResult findBest(
+            ProjectedGraph graph,
+            int minClusterSize,
+            int iterations
+    ) {
         int n = graph.getNodes().size();
 
-        double totalWeight = graph.getEdges().stream()
+        if (n == 0) {
+            return null;
+        }
+
+        // graph 전체 edge weight 합.
+        double totalWeight = graph.getEdges()
+                .stream()
                 .mapToDouble(ProjectedEdge::getWeight)
                 .sum();
-        double avgDegree = (totalWeight * 2.0) / n;
-        double density   = (n <= 1) ? 0.0 : (totalWeight * 2.0) / ((double) n * (n - 1));
 
-        double gammaMin = Math.max(density * 0.3, 0.005);
-        double gammaMax = Math.min(avgDegree / n, 0.5);
-        if (gammaMax <= gammaMin) gammaMax = gammaMin * 3.0;
+        /*
+         * weighted graph density.
+         *
+         * graph의 연결 밀도를 resolution 후보 범위 계산에 활용한다.
+         */
+        double weightedDensity = n <= 1
+                ? 0.0
+                : (2.0 * totalWeight) / ((double) n * (n - 1));
 
-        int minClusters = 3;
-        // P0-3: 클러스터 상한 완화 — 기존 min(10,√N) 캡이 대규모 repo에서 거대 misc를 강제했으므로 상향
-        int maxClusters = Math.max(minClusters, Math.min(30, (int) Math.sqrt(n)));
+        /*
+         * 일부 매우 큰 weight가 평균을 왜곡할 수 있으므로
+         * 평균 대신 중앙값을 사용한다.
+         */
+        double medianEdgeWeight = medianEdgeWeight(graph);
 
-        log.info("[CLUSTER-PROBE] start. n={}, totalWeight={}, gammaMin={}, gammaMax={}, targetClusters=[{},{}]",
-                n, String.format("%.3f", totalWeight),
-                String.format("%.4f", gammaMin), String.format("%.4f", gammaMax),
-                minClusters, maxClusters);
+        /*
+         * graph density와 실제 edge weight scale을 함께 이용해
+         * resolution 탐색 최소값을 계산한다.
+         */
+        double gammaMin = Math.max(
+                0.001,
+                Math.min(
+                        weightedDensity * 0.20,
+                        medianEdgeWeight * 0.10
+                )
+        );
 
-        // Probe 필터는 구조적 의미를 갖는 최소 크기(3)를 floor로 사용한다.
-        // misc 분류 기준(minClusterSize)과 분리해 잡음 resolution이 유효로 판별되는 것을 막는다.
+        // resolution 탐색 최대값.
+        double gammaMax = Math.max(
+                gammaMin * 4.0,
+                Math.min(
+                        2.0,
+                        medianEdgeWeight * 0.90
+                )
+        );
+
+        /*
+         * 매우 작은 프로젝트는 실제 subsystem이 하나일 수 있으므로
+         * 최소 cluster 수를 1까지 허용한다.
+         */
+        int minClusters = n < 9 ? 1 : 3;
+
+        /*
+         * repository 규모에 따라 최대 허용 cluster 수도 증가시킨다.
+         * 지나치게 많은 cluster가 생성되지 않도록 최대 40으로 제한한다.
+         */
+        int maxClusters = Math.max(
+                minClusters,
+                Math.min(
+                        40,
+                        (int) Math.ceil(Math.sqrt(n) * 1.5)
+                )
+        );
+
+        /*
+         * probe 단계에서는 너무 작은 cluster를 정상 subsystem으로 보지 않는다.
+         */
         int probeMinClusterSize = Math.max(minClusterSize, 3);
 
-        return probe(graph, gammaMin, gammaMax, decideCandidateCount(n),
-                probeMinClusterSize, minClusters, maxClusters, iterations, 0);
+        log.info(
+                "[CLUSTER-PROBE] start. n={}, totalWeight={}, medianEdgeWeight={}, gamma=[{},{}], targetClusters=[{},{}]",
+                n,
+                fmt(totalWeight),
+                fmt(medianEdgeWeight),
+                fmt(gammaMin),
+                fmt(gammaMax),
+                minClusters,
+                maxClusters
+        );
+
+        return probe(
+                graph,
+                gammaMin,
+                gammaMax,
+                decideCandidateCount(n),
+                probeMinClusterSize,
+                minClusters,
+                maxClusters,
+                iterations,
+                0
+        );
     }
 
-    private ProbeResult probe(ProjectedGraph graph,
-                               double gammaMin, double gammaMax, int candidateCount,
-                               int minClusterSize, int minClusters, int maxClusters,
-                               int iterations, int extensionCount) {
+    /**
+     * 여러 resolution 후보를 실행하고 가장 좋은 결과를 선택한다.
+     */
+    private ProbeResult probe(
+            ProjectedGraph graph,
+            double gammaMin,
+            double gammaMax,
+            int candidateCount,
+            int minClusterSize,
+            int minClusters,
+            int maxClusters,
+            int iterations,
+            int extensionCount
+    ) {
+        // resolution 값은 선형이 아니라 로그 스케일로 탐색한다.
+        List<Double> candidates =
+                logLinspace(gammaMin, gammaMax, candidateCount);
 
-        List<Double> candidates = logLinspace(gammaMin, gammaMax, candidateCount);
+        ProbeResult best = null;
+        ProbeResult fallback = null;
 
-        ProbeResult best     = null;
-        ProbeResult fallback = null; // 유효 범위 밖에서 범위에 가장 근접한 후보
-        int bestIdx = -1;
-        // P0-3: 복합 목적함수 추적 (Q 단독 → Q - misc 페널티 - 최대클러스터 페널티)
         double bestComposite = Double.NEGATIVE_INFINITY;
+        int bestIdx = -1;
 
         for (int i = 0; i < candidates.size(); i++) {
             double resolution = candidates.get(i);
-            CommunityResult cr = leidenCommunityService.detect(graph, resolution, iterations);
-            int validCount = countValidClusters(cr.getClusters(), minClusterSize);
-            double q = computeModularity(graph, cr);
-            double composite = computeCompositeScore(graph, cr, q, minClusterSize);
 
-            log.debug("[CLUSTER-PROBE] resolution={}, validClusters={}, Q={}, composite={}",
-                    String.format("%.4f", resolution), validCount,
-                    String.format("%.4f", q), String.format("%.4f", composite));
+            /*
+             * 각 resolution마다 Leiden을 수행한다.
+             * 결과와 CPM Quality를 동시에 받아온다.
+             */
+            LeidenCommunityService.DetectionResult detected =
+                    leidenCommunityService.detectWithQuality(
+                            graph,
+                            resolution,
+                            iterations
+                    );
 
-            if (fallback == null || closerToRange(validCount, fallback.clusterCount(), minClusters, maxClusters)) {
-                fallback = new ProbeResult(resolution, cr, q, validCount);
+            CommunityResult communityResult = detected.communityResult();
+
+            // minClusterSize 이상인 cluster만 유효 cluster로 계산한다.
+            int validCount = countValidClusters(
+                    communityResult.getClusters(),
+                    minClusterSize
+            );
+
+            /*
+             * Modularity는 보조 분석 지표로 유지한다.
+             * 최종 resolution 선택의 중심 기준은 CPM Quality다.
+             */
+            double modularity =
+                    computeModularity(graph, communityResult);
+
+            /*
+             * 최종 후보 점수.
+             *
+             * CPM Quality
+             * - small cluster penalty
+             * - giant cluster penalty
+             */
+            double composite = computeCompositeScore(
+                    graph,
+                    communityResult,
+                    detected.cpmQuality(),
+                    minClusterSize
+            );
+
+            log.debug(
+                    "[CLUSTER-PROBE] resolution={}, validClusters={}, CPM={}, modularity={}, composite={}",
+                    fmt(resolution),
+                    validCount,
+                    fmt(detected.cpmQuality()),
+                    fmt(modularity),
+                    fmt(composite)
+            );
+
+            ProbeResult current = new ProbeResult(
+                    resolution,
+                    communityResult,
+                    modularity,
+                    detected.cpmQuality(),
+                    validCount
+            );
+
+            /*
+             * 정상 clusterCount 범위의 후보가 하나도 없을 경우를 대비해
+             * 목표 범위에 가장 가까운 결과를 fallback으로 기억한다.
+             */
+            if (fallback == null || closerToRange(
+                    validCount,
+                    fallback.clusterCount(),
+                    minClusters,
+                    maxClusters
+            )) {
+                fallback = current;
             }
 
-            if (validCount < minClusters || validCount > maxClusters) continue;
+            // 너무 적거나 너무 많은 cluster가 생성되면 정상 최적 후보에서는 제외한다.
+            if (validCount < minClusters || validCount > maxClusters) {
+                continue;
+            }
 
+            // 정상 후보 중 composite score가 가장 높은 결과를 저장한다.
             if (best == null || composite > bestComposite) {
-                best = new ProbeResult(resolution, cr, q, validCount);
-                bestIdx = i;
+                best = current;
                 bestComposite = composite;
+                bestIdx = i;
             }
         }
 
-        // 경계 확장 (최대 1회)
+        /*
+         * 최적값이 현재 탐색 범위 끝에 있거나 정상 후보가 없다면
+         * resolution 범위를 한 번 더 확장해서 탐색한다.
+         */
         if (extensionCount < MAX_EXTENSION) {
+
+            // 정상 범위의 후보가 하나도 없는 경우 양쪽 범위를 확장한다.
             if (best == null) {
-                log.info("[CLUSTER-PROBE] no valid candidate. expanding both bounds: [{}, {}]",
-                        String.format("%.4f", gammaMin * 0.5), String.format("%.4f", gammaMax * 2.0));
-                return probe(graph, gammaMin * 0.5, gammaMax * 2.0, candidateCount,
-                        minClusterSize, minClusters, maxClusters, iterations, extensionCount + 1);
+                return probe(
+                        graph,
+                        Math.max(0.0001, gammaMin * 0.35),
+                        gammaMax * 2.0,
+                        candidateCount,
+                        minClusterSize,
+                        minClusters,
+                        maxClusters,
+                        iterations,
+                        extensionCount + 1
+                );
             }
+
+            // 가장 작은 resolution이 최적이면 더 낮은 구간을 탐색한다.
             if (bestIdx == 0) {
-                log.info("[CLUSTER-PROBE] best at lower bound. extending lower: [{}, {}]",
-                        String.format("%.4f", gammaMin * 0.3), String.format("%.4f", gammaMin));
-                ProbeResult extended = probe(graph, gammaMin * 0.3, gammaMin, candidateCount,
-                        minClusterSize, minClusters, maxClusters, iterations, extensionCount + 1);
-                double extComposite = computeCompositeScore(graph, extended.communityResult(), extended.modularity(), minClusterSize);
-                return extComposite > bestComposite ? extended : best;
+                ProbeResult extended = probe(
+                        graph,
+                        Math.max(0.0001, gammaMin * 0.25),
+                        gammaMin,
+                        candidateCount,
+                        minClusterSize,
+                        minClusters,
+                        maxClusters,
+                        iterations,
+                        extensionCount + 1
+                );
+
+                return better(graph, best, extended, minClusterSize);
             }
+
+            // 가장 큰 resolution이 최적이면 더 높은 구간을 탐색한다.
             if (bestIdx == candidates.size() - 1) {
-                log.info("[CLUSTER-PROBE] best at upper bound. extending upper: [{}, {}]",
-                        String.format("%.4f", gammaMax), String.format("%.4f", gammaMax * 2.5));
-                ProbeResult extended = probe(graph, gammaMax, gammaMax * 2.5, candidateCount,
-                        minClusterSize, minClusters, maxClusters, iterations, extensionCount + 1);
-                double extComposite = computeCompositeScore(graph, extended.communityResult(), extended.modularity(), minClusterSize);
-                return extComposite > bestComposite ? extended : best;
+                ProbeResult extended = probe(
+                        graph,
+                        gammaMax,
+                        gammaMax * 2.5,
+                        candidateCount,
+                        minClusterSize,
+                        minClusters,
+                        maxClusters,
+                        iterations,
+                        extensionCount + 1
+                );
+
+                return better(graph, best, extended, minClusterSize);
             }
         }
 
-        if (best == null) {
-            log.warn("[CLUSTER-PROBE] no valid candidate after extension. falling back to closest. resolution={}, clusters={}",
-                    fallback != null ? String.format("%.4f", fallback.resolution()) : "N/A",
-                    fallback != null ? fallback.clusterCount() : 0);
-            return fallback;
+        // 정상 후보가 존재하면 best를 사용하고, 없으면 fallback을 사용한다.
+        ProbeResult result = best != null ? best : fallback;
+
+        if (result != null) {
+            log.info(
+                    "[CLUSTER-PROBE] done. resolution={}, clusters={}, CPM={}, modularity={}",
+                    fmt(result.resolution()),
+                    result.clusterCount(),
+                    fmt(result.cpmQuality()),
+                    fmt(result.modularity())
+            );
         }
 
-        log.info("[CLUSTER-PROBE] done. resolution={}, clusters={}, Q={}, composite={}",
-                String.format("%.4f", best.resolution()), best.clusterCount(),
-                String.format("%.4f", best.modularity()), String.format("%.4f", bestComposite));
-        return best;
-    }
-
-    /**
-     * P0-3: 복합 목적함수 — Q 단독 선택 대신 misc 비율·최대 클러스터 비중 페널티 결합.
-     * score = Q - 0.5 × miscRatio - 0.3 × maxClusterShare
-     *
-     * α(0.5), β(0.3)는 초기 가중치; 4개 repo 결과로 튜닝 예정.
-     * miscRatio ↔ maxClusterShare 상관 관계를 고려해 β를 작게 설정.
-     */
-    private double computeCompositeScore(ProjectedGraph graph, CommunityResult cr, double q, int minClusterSize) {
-        int n = graph.getNodes().size();
-        if (n == 0) return q;
-        double miscRatio       = computeMiscRatio(cr.getClusters(), minClusterSize, n);
-        double maxClusterShare = computeMaxClusterShare(cr.getClusters(), n);
-        return q - 0.5 * miscRatio - 0.3 * maxClusterShare;
-    }
-
-    /** misc 비율: minClusterSize 미만 클러스터에 속한 노드 비율 */
-    private double computeMiscRatio(int[] clusters, int minClusterSize, int totalNodes) {
-        if (totalNodes == 0) return 0.0;
-        Map<Integer, Integer> counts = new HashMap<>();
-        for (int c : clusters) counts.merge(c, 1, Integer::sum);
-        int miscCount = counts.values().stream()
-                .filter(s -> s < minClusterSize)
-                .mapToInt(Integer::intValue).sum();
-        return (double) miscCount / totalNodes;
-    }
-
-    /** 최대 클러스터 비중: 단일 가장 큰 클러스터의 노드 비율 */
-    private double computeMaxClusterShare(int[] clusters, int totalNodes) {
-        if (totalNodes == 0) return 0.0;
-        Map<Integer, Integer> counts = new HashMap<>();
-        for (int c : clusters) counts.merge(c, 1, Integer::sum);
-        int max = counts.values().stream().mapToInt(Integer::intValue).max().orElse(0);
-        return (double) max / totalNodes;
-    }
-
-    /**
-     * [min, max] 구간을 로그 스케일로 count개 분할한다.
-     * 낮은 구간에 후보가 촘촘하게 배치되어 resolution 효과의 비선형성을 보정한다.
-     */
-    private List<Double> logLinspace(double min, double max, int count) {
-        List<Double> result = new ArrayList<>(count);
-        double logMin = Math.log(min);
-        double logMax = Math.log(max);
-        for (int i = 0; i < count; i++) {
-            double t = (count == 1) ? 0.5 : (double) i / (count - 1);
-            double val = Math.exp(logMin + t * (logMax - logMin));
-            result.add(Math.round(val * 10000.0) / 10000.0);
-        }
         return result;
     }
 
     /**
-     * minClusterSize 이상인 클러스터 수를 반환한다.
+     * 두 후보 중 composite score가 높은 결과를 반환한다.
      */
-    private int countValidClusters(int[] clusters, int minClusterSize) {
-        Map<Integer, Integer> counts = new HashMap<>();
-        for (int c : clusters) {
-            counts.merge(c, 1, Integer::sum);
+    private ProbeResult better(
+            ProjectedGraph graph,
+            ProbeResult first,
+            ProbeResult second,
+            int minClusterSize
+    ) {
+        if (first == null) {
+            return second;
         }
-        return (int) counts.values().stream().filter(s -> s >= minClusterSize).count();
+
+        if (second == null) {
+            return first;
+        }
+
+        double firstScore = computeCompositeScore(
+                graph,
+                first.communityResult(),
+                first.cpmQuality(),
+                minClusterSize
+        );
+
+        double secondScore = computeCompositeScore(
+                graph,
+                second.communityResult(),
+                second.cpmQuality(),
+                minClusterSize
+        );
+
+        return secondScore > firstScore ? second : first;
     }
 
     /**
-     * 표준 가중 Modularity Q를 계산한다.
-     * Q = Σ_c [ in_c / 2W - (tot_c / 2W)² ]
-     * in_c  : 커뮤니티 c 내부 엣지 가중치 합 (양방향)
-     * tot_c : 커뮤니티 c 소속 노드들의 차수 합
-     * 2W    : 전체 엣지 가중치 합의 2배
+     * resolution 후보의 최종 평가 점수를 계산한다.
      */
-    private double computeModularity(ProjectedGraph graph, CommunityResult result) {
+    private double computeCompositeScore(
+            ProjectedGraph graph,
+            CommunityResult result,
+            double cpmQuality,
+            int minClusterSize
+    ) {
+        int n = graph.getNodes().size();
+
+        if (n == 0) {
+            return cpmQuality;
+        }
+
+        // minClusterSize보다 작은 cluster의 node 비율.
+        double miscRatio = computeMiscRatio(
+                result.getClusters(),
+                minClusterSize,
+                n
+        );
+
+        // 가장 큰 cluster가 전체 node에서 차지하는 비율.
+        double maxClusterShare = computeMaxClusterShare(
+                result.getClusters(),
+                n
+        );
+
+        return cpmQuality
+                - MISC_PENALTY * miscRatio
+                - GIANT_CLUSTER_PENALTY * maxClusterShare;
+    }
+
+    /**
+     * projected edge weight의 중앙값을 계산한다.
+     */
+    private double medianEdgeWeight(ProjectedGraph graph) {
+        if (graph.getEdges().isEmpty()) {
+            return 0.1;
+        }
+
+        double[] values = graph.getEdges()
+                .stream()
+                .mapToDouble(ProjectedEdge::getWeight)
+                .sorted()
+                .toArray();
+
+        int mid = values.length / 2;
+
+        if (values.length % 2 == 0) {
+            return (values[mid - 1] + values[mid]) / 2.0;
+        }
+
+        return values[mid];
+    }
+
+    /**
+     * candidate cluster 수가 현재 fallback보다 목표 범위에 더 가까운지 확인한다.
+     */
+    private boolean closerToRange(
+            int candidate,
+            int current,
+            int min,
+            int max
+    ) {
+        return distanceToRange(candidate, min, max)
+                < distanceToRange(current, min, max);
+    }
+
+    /**
+     * clusterCount와 목표 범위 사이의 거리를 계산한다.
+     * 목표 범위 안이면 0이다.
+     */
+    private int distanceToRange(
+            int value,
+            int min,
+            int max
+    ) {
+        if (value < min) {
+            return min - value;
+        }
+
+        if (value > max) {
+            return value - max;
+        }
+
+        return 0;
+    }
+
+    /**
+     * minClusterSize 미만 cluster에 속한 node 비율을 계산한다.
+     */
+    private double computeMiscRatio(
+            int[] clusters,
+            int minClusterSize,
+            int totalNodes
+    ) {
+        Map<Integer, Integer> counts = counts(clusters);
+
+        int miscCount = counts.values()
+                .stream()
+                .filter(size -> size < minClusterSize)
+                .mapToInt(Integer::intValue)
+                .sum();
+
+        if (totalNodes == 0) {
+            return 0.0;
+        }
+
+        return (double) miscCount / totalNodes;
+    }
+
+    /**
+     * 가장 큰 cluster가 전체 node에서 차지하는 비율을 계산한다.
+     */
+    private double computeMaxClusterShare(
+            int[] clusters,
+            int totalNodes
+    ) {
+        int max = counts(clusters)
+                .values()
+                .stream()
+                .mapToInt(Integer::intValue)
+                .max()
+                .orElse(0);
+
+        if (totalNodes == 0) {
+            return 0.0;
+        }
+
+        return (double) max / totalNodes;
+    }
+
+    /**
+     * cluster ID별 node 개수를 계산한다.
+     */
+    private Map<Integer, Integer> counts(int[] clusters) {
+        Map<Integer, Integer> counts = new HashMap<>();
+
+        for (int cluster : clusters) {
+            counts.merge(cluster, 1, Integer::sum);
+        }
+
+        return counts;
+    }
+
+    /**
+     * min과 max 사이의 resolution 후보를 로그 스케일로 생성한다.
+     */
+    private List<Double> logLinspace(
+            double min,
+            double max,
+            int count
+    ) {
+        List<Double> result = new ArrayList<>(count);
+
+        double logMin = Math.log(min);
+        double logMax = Math.log(max);
+
+        for (int i = 0; i < count; i++) {
+            double t = count == 1
+                    ? 0.5
+                    : (double) i / (count - 1);
+
+            result.add(
+                    Math.exp(logMin + t * (logMax - logMin))
+            );
+        }
+
+        return result;
+    }
+
+    /**
+     * minClusterSize 이상의 cluster 개수를 계산한다.
+     */
+    private int countValidClusters(
+            int[] clusters,
+            int minClusterSize
+    ) {
+        return (int) counts(clusters)
+                .values()
+                .stream()
+                .filter(size -> size >= minClusterSize)
+                .count();
+    }
+
+    /**
+     * Weighted Modularity를 계산한다.
+     *
+     * 이 값은 resolution 선택 목적함수가 아니라
+     * 기존 결과와의 비교 및 분석을 위한 diagnostic metric이다.
+     */
+    private double computeModularity(
+            ProjectedGraph graph,
+            CommunityResult result
+    ) {
         int[] clusters = result.getClusters();
         int n = graph.getNodes().size();
 
         double[] degree = new double[n];
         double totalWeight = 0.0;
+
+        // 각 node의 weighted degree와 전체 edge weight를 계산한다.
         for (ProjectedEdge edge : graph.getEdges()) {
-            double w = edge.getWeight();
-            degree[edge.getFromIndex()] += w;
-            degree[edge.getToIndex()]   += w;
-            totalWeight += w;
+            double weight = edge.getWeight();
+
+            degree[edge.getFromIndex()] += weight;
+            degree[edge.getToIndex()] += weight;
+
+            totalWeight += weight;
         }
 
         double twoM = 2.0 * totalWeight;
-        if (twoM == 0.0) return 0.0;
 
+        if (twoM == 0.0) {
+            return 0.0;
+        }
+
+        // 각 cluster 내부 edge weight 합.
         Map<Integer, Double> internalWeight = new HashMap<>();
+
         for (ProjectedEdge edge : graph.getEdges()) {
-            int ci = clusters[edge.getFromIndex()];
-            int cj = clusters[edge.getToIndex()];
-            if (ci == cj) {
-                internalWeight.merge(ci, 2.0 * edge.getWeight(), Double::sum);
+            int fromCluster = clusters[edge.getFromIndex()];
+            int toCluster = clusters[edge.getToIndex()];
+
+            if (fromCluster == toCluster) {
+                internalWeight.merge(
+                        fromCluster,
+                        2.0 * edge.getWeight(),
+                        Double::sum
+                );
             }
         }
 
+        // 각 cluster에 속한 node의 weighted degree 합.
         Map<Integer, Double> degreeSum = new HashMap<>();
+
         for (int i = 0; i < n; i++) {
-            degreeSum.merge(clusters[i], degree[i], Double::sum);
+            degreeSum.merge(
+                    clusters[i],
+                    degree[i],
+                    Double::sum
+            );
         }
 
-        double q = 0.0;
-        for (int c : degreeSum.keySet()) {
-            double in  = internalWeight.getOrDefault(c, 0.0);
-            double tot = degreeSum.get(c);
-            q += (in / twoM) - Math.pow(tot / twoM, 2);
-        }
-        return q;
-    }
+        double modularity = 0.0;
 
-    private int decideCandidateCount(int n) {
-        if (n <= 200) return 7;
-        if (n <= 750) return 6;
-        return 5;
+        for (int cluster : degreeSum.keySet()) {
+            double internal = internalWeight.getOrDefault(cluster, 0.0);
+            double total = degreeSum.get(cluster);
+
+            modularity += (internal / twoM)
+                    - Math.pow(total / twoM, 2);
+        }
+
+        return modularity;
     }
 
     /**
-     * count가 현재 best보다 [minC, maxC] 범위에 더 가까운지 비교한다.
+     * repository 크기에 따라 탐색할 resolution 후보 수를 결정한다.
      */
-    private boolean closerToRange(int count, int bestCount, int minC, int maxC) {
-        int distNew  = count    < minC ? minC - count    : (count    > maxC ? count    - maxC : 0);
-        int distBest = bestCount < minC ? minC - bestCount : (bestCount > maxC ? bestCount - maxC : 0);
-        return distNew < distBest;
+    private int decideCandidateCount(int n) {
+        if (n <= 200) {
+            return 9;
+        }
+
+        if (n <= 750) {
+            return 7;
+        }
+
+        return 6;
+    }
+
+    /**
+     * 로그 출력을 위해 double 값을 소수점 다섯 자리로 변환한다.
+     */
+    private String fmt(double value) {
+        return String.format("%.5f", value);
     }
 }
