@@ -27,7 +27,7 @@ public class EntryPointJsonCodec {
 
     public ObjectNode serialize(List<EntryPointCandidate> candidates, String runId) {
         ObjectNode root = objectMapper.createObjectNode();
-        root.put("schema_version", "1.0");
+        root.put("schema_version", "1.1");
         root.put("run_id", runId);
         root.put("generated_at", Instant.now().toString());
 
@@ -55,6 +55,21 @@ public class EntryPointJsonCodec {
                     emNode.put("symbol_id", em.getSymbolId() != null ? em.getSymbolId() : "");
                     emNode.put("simple_name", em.getSimpleName() != null ? em.getSimpleName() : "");
                     emNode.put("reason", em.getReason() != null ? em.getReason() : "");
+                    if (em.getHttpEndpoints() != null && !em.getHttpEndpoints().isEmpty()) {
+                        ArrayNode endpointArray = emNode.putArray("http_endpoints");
+                        for (EntryPointCandidate.HttpEndpointInfo endpoint : em.getHttpEndpoints()) {
+                            ObjectNode endpointNode = objectMapper.createObjectNode();
+                            putNullable(endpointNode, "http_method", endpoint.getHttpMethod());
+                            putNullable(endpointNode, "path", endpoint.getPath());
+                            if (endpoint.getConfidence() != null) endpointNode.put("confidence", endpoint.getConfidence());
+                            putNullable(endpointNode, "resolution", endpoint.getResolution());
+                            putNullable(endpointNode, "resolution_reason", endpoint.getResolutionReason());
+                            putNullable(endpointNode, "origin", endpoint.getOrigin());
+                            putNullable(endpointNode, "derivation_kind", endpoint.getDerivationKind());
+                            if (endpoint.getDefaultVisible() != null) endpointNode.put("default_visible", endpoint.getDefaultVisible());
+                            endpointArray.add(endpointNode);
+                        }
+                    }
                     emArray.add(emNode);
                 }
             }
@@ -88,10 +103,28 @@ public class EntryPointJsonCodec {
             JsonNode emArr = node.path("entry_methods");
             if (emArr.isArray()) {
                 for (JsonNode em : emArr) {
+                    List<EntryPointCandidate.HttpEndpointInfo> endpoints = new ArrayList<>();
+                    JsonNode endpointArray = em.path("http_endpoints");
+                    if (endpointArray.isArray()) {
+                        for (JsonNode endpoint : endpointArray) {
+                            endpoints.add(EntryPointCandidate.HttpEndpointInfo.builder()
+                                    .httpMethod(nullableText(endpoint, "http_method"))
+                                    .path(nullableText(endpoint, "path"))
+                                    .confidence(endpoint.has("confidence") ? endpoint.path("confidence").asDouble() : null)
+                                    .resolution(nullableText(endpoint, "resolution"))
+                                    .resolutionReason(nullableText(endpoint, "resolution_reason"))
+                                    .origin(nullableText(endpoint, "origin"))
+                                    .derivationKind(nullableText(endpoint, "derivation_kind"))
+                                    .defaultVisible(endpoint.has("default_visible")
+                                            ? endpoint.path("default_visible").asBoolean() : null)
+                                    .build());
+                        }
+                    }
                     entryMethods.add(EntryPointCandidate.EntryMethodInfo.builder()
                             .symbolId(em.path("symbol_id").asText(""))
                             .simpleName(em.path("simple_name").asText(""))
                             .reason(em.path("reason").asText(""))
+                            .httpEndpoints(List.copyOf(endpoints))
                             .build());
                 }
             }
@@ -143,6 +176,11 @@ public class EntryPointJsonCodec {
             }
         }
         return Set.copyOf(ids);
+    }
+
+    private void putNullable(ObjectNode node, String field, String value) {
+        if (value == null) node.putNull(field);
+        else node.put(field, value);
     }
 
     private String nullableText(JsonNode node, String field) {

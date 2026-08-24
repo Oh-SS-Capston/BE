@@ -53,7 +53,7 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class RuleCandidateArtifactPublisher {
 
-    private static final String SCHEMA_VERSION = "1.3";
+    private static final String SCHEMA_VERSION = "1.4";
     private static final String RELATIVE_PATH = "rule/rule_candidates.json";
     private static final String SOURCE_INDEX_SCHEMA_VERSION = "1.0";
     private static final String SOURCE_INDEX_RELATIVE_PATH = "analysis/symbol_source_index.json";
@@ -651,14 +651,20 @@ public class RuleCandidateArtifactPublisher {
         Evidence ev = evidence.getEvidence();
         EvidenceType evType = (ev != null) ? ev.getEvidenceType() : null;
         boolean isBytecode = evType == EvidenceType.BYTECODE;
+        var edge = evidence.getEdge();
+        RuleMiningSignal signal = evidence.getSignal();
+        Boolean defaultVisible = null;
+        if (edge != null && edge.getAttrs() != null && edge.getAttrs().path("default_visible").isBoolean()) {
+            defaultVisible = edge.getAttrs().path("default_visible").asBoolean();
+        }
 
         return RuleCandidateEvidenceJson.builder()
                 .candidateEvidenceId(evidence.getCandidateEvidenceId())
-                .signalId(evidence.getSignal() == null ? null : evidence.getSignal().getSignalId())
+                .signalId(signal == null ? null : signal.getSignalId())
                 .evidenceId(ev == null ? null : ev.getEvidenceId())
                 .rawId(ev == null ? null : ev.getRawId())
                 .evidenceType(evType != null ? evType.name() : null)
-                .edgeId(evidence.getEdge() == null ? null : evidence.getEdge().getEdgeId())
+                .edgeId(edge == null ? null : edge.getEdgeId())
                 .role(evidence.getRole())
                 .weight(evidence.getWeight())
                 .filePath(evidence.getFilePath())
@@ -666,6 +672,17 @@ public class RuleCandidateArtifactPublisher {
                 .endLine(evidence.getEndLine())
                 .snippet(isBytecode ? null : evidence.getSnippet())
                 .note(evidence.getNote())
+                .edgeType(edge == null || edge.getEdgeType() == null ? null : edge.getEdgeType().name())
+                .edgeOrigin(edge == null || edge.getOrigin() == null ? null : edge.getOrigin().name())
+                .edgeDerivationKind(edge == null || edge.getDerivationKind() == null ? null : edge.getDerivationKind().name())
+                .edgeResolution(edge == null || edge.getResolution() == null ? null : edge.getResolution().name())
+                .edgeResolutionReason(edge == null ? null : edge.getResolutionReason())
+                .edgeConfidence(edge == null ? null : edge.getConfidence())
+                .edgeCallSiteLine(edge == null ? null : edge.getCallSiteLine())
+                .edgeDefaultVisible(defaultVisible)
+                .edgeAttrs(edge == null ? null : edge.getAttrs())
+                .signalConfidenceHint(signal == null ? null : signal.getConfidenceHint())
+                .signalMeta(signal == null ? null : signal.getMeta())
                 .build();
     }
 
@@ -806,6 +823,7 @@ public class RuleCandidateArtifactPublisher {
             case "GUARD_RETURN" -> "조건 검사 후 조기 반환으로 흐름을 제어하는 메서드입니다.";
             case "PERSISTENCE" -> "저장소 save/update/delete 호출을 포함한 영속화 변경 메서드입니다.";
             case "ASSERTION" -> "require/assert 계열의 사전조건 검증을 수행하는 메서드입니다.";
+            case "OBJECT_CREATION" -> "핵심 도메인/지원 객체를 직접 생성하는 메서드입니다.";
             default -> {
                 String safeName = methodName == null || methodName.isBlank() ? "핵심 메서드" : methodName;
                 yield safeName + " 동작과 관련된 핵심 신호가 수집된 메서드입니다.";
@@ -822,6 +840,7 @@ public class RuleCandidateArtifactPublisher {
             case "GUARD_RETURN" -> "검증 실패 조기 종료 시나리오";
             case "PERSISTENCE" -> "데이터 변경/저장 시나리오";
             case "ASSERTION" -> "사전조건 검증 시나리오";
+            case "OBJECT_CREATION" -> "객체 생성/초기화 시나리오";
             default -> {
                 String safeName = methodName == null || methodName.isBlank() ? "핵심 로직" : methodName;
                 yield safeName + " 호출 시나리오";
@@ -845,7 +864,7 @@ public class RuleCandidateArtifactPublisher {
         int behaviorBonus = switch (inferPrimaryBehavior(aggregate)) {
             case "GUARD_THROW", "GUARD_RETURN" -> 4;
             case "PERSISTENCE" -> 3;
-            case "ASSERTION" -> 2;
+            case "ASSERTION", "OBJECT_CREATION" -> 2;
             default -> 1;
         };
 
@@ -878,6 +897,10 @@ public class RuleCandidateArtifactPublisher {
                 || hasSignalType(aggregate, "REQUIRE_CALL");
         if (hasAssertion) {
             return "ASSERTION";
+        }
+
+        if (hasSignalType(aggregate, "OBJECT_CREATION")) {
+            return "OBJECT_CREATION";
         }
         return "GENERAL";
     }

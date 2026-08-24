@@ -26,8 +26,23 @@ public class EntryPointCandidate {
     public static class EntryMethodInfo {
         private String symbolId;
         private String simpleName;
-        /** STATIC_FACTORY | PUBLIC_STATIC | PUBLIC_INSTANCE */
+        /** HTTP_ENDPOINT | STATIC_FACTORY | PUBLIC_STATIC | PUBLIC_INSTANCE */
         private String reason;
+        /** HANDLES_ENDPOINT relation이 존재하는 경우 method 단위 HTTP 의미 정보를 보존한다. */
+        private List<HttpEndpointInfo> httpEndpoints;
+    }
+
+    @Getter
+    @Builder
+    public static class HttpEndpointInfo {
+        private String httpMethod;
+        private String path;
+        private Double confidence;
+        private String resolution;
+        private String resolutionReason;
+        private String origin;
+        private String derivationKind;
+        private Boolean defaultVisible;
     }
     private String symbolId;
     private String qualifiedName;

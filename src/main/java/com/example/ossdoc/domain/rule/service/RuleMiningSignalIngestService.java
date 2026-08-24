@@ -10,6 +10,7 @@ import com.example.ossdoc.domain.graphstore.repository.EdgeEvidenceRepository;
 import com.example.ossdoc.domain.graphstore.repository.EdgeRepository;
 import com.example.ossdoc.domain.graphstore.repository.EvidenceRepository;
 import com.example.ossdoc.domain.graphstore.repository.SymbolRepository;
+import com.example.ossdoc.domain.graphstore.support.EdgeInferencePolicy;
 import com.example.ossdoc.domain.rule.entity.RuleMiningSignal;
 import com.example.ossdoc.domain.rule.enums.RuleCandidateSource;
 import com.example.ossdoc.domain.rule.enums.RuleMiningSignalType;
@@ -60,6 +61,7 @@ public class RuleMiningSignalIngestService {
     private final RuleMiningSignalRepository ruleMiningSignalRepository;
     private final RuleCandidateRepository ruleCandidateRepository;
     private final RuleCandidateEvidenceRepository ruleCandidateEvidenceRepository;
+    private final EdgeInferencePolicy edgeInferencePolicy;
 
     @Transactional
     public RuleMiningSignalIngestResult ingest(String runId, boolean forceRebuild) {
@@ -140,11 +142,12 @@ public class RuleMiningSignalIngestService {
     }
 
     private boolean isSignalSourceEdge(Edge edge) {
-        if (edge == null || edge.getEdgeType() == null) {
+        if (!edgeInferencePolicy.isUsableForInference(edge)) {
             return false;
         }
 
         return edge.getEdgeType() == EdgeType.CALLS
+                || edge.getEdgeType() == EdgeType.CREATES
                 || edge.getEdgeType() == EdgeType.THROWS
                 || edge.getEdgeType() == EdgeType.ACCESSES_FIELD
                 || edge.getEdgeType() == EdgeType.ANNOTATED_WITH;
@@ -210,14 +213,8 @@ public class RuleMiningSignalIngestService {
             }
 
             List<Evidence> linkedEvidences = evidenceByEdgeId.getOrDefault(edge.getEdgeId(), List.of());
-            if (linkedEvidences.isEmpty()) {
-                ingestSingleEdgeSignal(run, edge, null, signals, signalKeys);
-                continue;
-            }
-
-            for (Evidence evidence : linkedEvidences) {
-                ingestSingleEdgeSignal(run, edge, evidence, signals, signalKeys);
-            }
+            Evidence preferredEvidence = selectPreferredEvidence(linkedEvidences);
+            ingestSingleEdgeSignal(run, edge, preferredEvidence, signals, signalKeys);
         }
     }
 
@@ -229,22 +226,43 @@ public class RuleMiningSignalIngestService {
             Set<String> signalKeys
     ) {
         EdgeType edgeType = edge.getEdgeType();
+        BigDecimal edgeConfidence = edgeInferencePolicy.effectiveConfidence(edge, GRAPHSTORE_CONFIDENCE);
+
+        if (edgeType == EdgeType.CREATES) {
+            addSignal(
+                    run,
+                    RuleMiningSignalType.OBJECT_CREATION,
+                    RuleCandidateSource.GRAPHSTORE,
+                    edge.getFromSymbol(),
+                    edge,
+                    evidence,
+                    normalizeText(edgeTargetText(edge)),
+                    evidence == null ? null : evidence.getSnippet(),
+                    resolveStartLine(edge, evidence),
+                    resolveEndLine(edge, evidence),
+                    edgeConfidence,
+                    buildEdgeMeta(edge, "graphstore.creates"),
+                    signals,
+                    signalKeys
+            );
+            return;
+        }
 
         if (edgeType == EdgeType.CALLS) {
             String targetText = edgeTargetText(edge);
 
             addSignal(
                     run,
-                    isObjectCreation(targetText) ? RuleMiningSignalType.OBJECT_CREATION : RuleMiningSignalType.METHOD_CALL,
+                    isLegacyObjectCreation(targetText) ? RuleMiningSignalType.OBJECT_CREATION : RuleMiningSignalType.METHOD_CALL,
                     RuleCandidateSource.GRAPHSTORE,
                     edge.getFromSymbol(),
                     edge,
                     evidence,
                     normalizeText(targetText),
                     evidence == null ? null : evidence.getSnippet(),
-                    evidence == null ? null : evidence.getStartLine(),
-                    evidence == null ? null : evidence.getEndLine(),
-                    GRAPHSTORE_CONFIDENCE,
+                    resolveStartLine(edge, evidence),
+                    resolveEndLine(edge, evidence),
+                    edgeConfidence,
                     buildEdgeMeta(edge, "graphstore.calls"),
                     signals,
                     signalKeys
@@ -261,9 +279,9 @@ public class RuleMiningSignalIngestService {
                         evidence,
                         normalizeText(targetText),
                         evidence == null ? null : evidence.getSnippet(),
-                        evidence == null ? null : evidence.getStartLine(),
-                        evidence == null ? null : evidence.getEndLine(),
-                        CLASSIFIED_CALL_CONFIDENCE,
+                        resolveStartLine(edge, evidence),
+                        resolveEndLine(edge, evidence),
+                        capConfidence(edgeConfidence, CLASSIFIED_CALL_CONFIDENCE),
                         buildEdgeMeta(edge, "graphstore.calls.classified"),
                         signals,
                         signalKeys
@@ -283,9 +301,9 @@ public class RuleMiningSignalIngestService {
                     evidence,
                     normalizeText(edgeTargetText(edge)),
                     evidence == null ? null : evidence.getSnippet(),
-                    evidence == null ? null : evidence.getStartLine(),
-                    evidence == null ? null : evidence.getEndLine(),
-                    GRAPHSTORE_CONFIDENCE,
+                    resolveStartLine(edge, evidence),
+                    resolveEndLine(edge, evidence),
+                    edgeConfidence,
                     buildEdgeMeta(edge, "graphstore.throws"),
                     signals,
                     signalKeys
@@ -303,9 +321,9 @@ public class RuleMiningSignalIngestService {
                     evidence,
                     normalizeText(edgeTargetText(edge)),
                     evidence == null ? null : evidence.getSnippet(),
-                    evidence == null ? null : evidence.getStartLine(),
-                    evidence == null ? null : evidence.getEndLine(),
-                    GRAPHSTORE_CONFIDENCE,
+                    resolveStartLine(edge, evidence),
+                    resolveEndLine(edge, evidence),
+                    edgeConfidence,
                     buildEdgeMeta(edge, "graphstore.accesses_field"),
                     signals,
                     signalKeys
@@ -325,9 +343,9 @@ public class RuleMiningSignalIngestService {
                     evidence,
                     normalizeText(annotationText),
                     evidence == null ? null : evidence.getSnippet(),
-                    evidence == null ? null : evidence.getStartLine(),
-                    evidence == null ? null : evidence.getEndLine(),
-                    GRAPHSTORE_CONFIDENCE,
+                    resolveStartLine(edge, evidence),
+                    resolveEndLine(edge, evidence),
+                    edgeConfidence,
                     buildEdgeMeta(edge, "graphstore.annotation"),
                     signals,
                     signalKeys
@@ -343,9 +361,9 @@ public class RuleMiningSignalIngestService {
                         evidence,
                         normalizeText(annotationText),
                         evidence == null ? null : evidence.getSnippet(),
-                        evidence == null ? null : evidence.getStartLine(),
-                        evidence == null ? null : evidence.getEndLine(),
-                        CLASSIFIED_CALL_CONFIDENCE,
+                        resolveStartLine(edge, evidence),
+                        resolveEndLine(edge, evidence),
+                        capConfidence(edgeConfidence, CLASSIFIED_CALL_CONFIDENCE),
                         buildEdgeMeta(edge, "graphstore.annotation.transactional"),
                         signals,
                         signalKeys
@@ -662,7 +680,57 @@ public class RuleMiningSignalIngestService {
                 || name.equals("state");
     }
 
-    private boolean isObjectCreation(String targetText) {
+    /**
+     * AST/ASM이 동일 relation에 여러 Evidence를 붙인 경우 한 relation을 한 번만 신호화한다.
+     * 가장 좁은 구문 단위(expression/annotation)를 우선하고 AST를 BYTECODE보다 우선한다.
+     */
+    private Evidence selectPreferredEvidence(List<Evidence> evidences) {
+        if (evidences == null || evidences.isEmpty()) return null;
+        return evidences.stream()
+                .filter(Objects::nonNull)
+                .max(Comparator.comparingInt(this::evidencePriority))
+                .orElse(null);
+    }
+
+    private int evidencePriority(Evidence evidence) {
+        int score = 0;
+        JsonNode attrs = evidence.getAttrs();
+        String granularity = attrs == null ? "" : attrs.path("granularity").asText("").toLowerCase(Locale.ROOT);
+        score += switch (granularity) {
+            case "expression" -> 400;
+            case "annotation" -> 350;
+            case "instruction" -> 300;
+            default -> 200;
+        };
+        if (evidence.getEvidenceType() != null) {
+            score += switch (evidence.getEvidenceType()) {
+                case AST -> 30;
+                case BYTECODE -> 20;
+                default -> 10;
+            };
+        }
+        if (evidence.getSnippet() != null && !evidence.getSnippet().isBlank()) score += 5;
+        if (evidence.getStartLine() != null) score += 2;
+        return score;
+    }
+
+    private Integer resolveStartLine(Edge edge, Evidence evidence) {
+        if (evidence != null && evidence.getStartLine() != null) return evidence.getStartLine();
+        return edge == null ? null : edge.getCallSiteLine();
+    }
+
+    private Integer resolveEndLine(Edge edge, Evidence evidence) {
+        if (evidence != null && evidence.getEndLine() != null) return evidence.getEndLine();
+        return resolveStartLine(edge, evidence);
+    }
+
+    private BigDecimal capConfidence(BigDecimal source, BigDecimal cap) {
+        if (source == null) return cap;
+        if (cap == null) return source;
+        return source.min(cap);
+    }
+
+    private boolean isLegacyObjectCreation(String targetText) {
         String text = normalizeText(targetText);
         return text != null && text.toLowerCase(Locale.ROOT).startsWith("new ");
     }
@@ -711,8 +779,29 @@ public class RuleMiningSignalIngestService {
             meta.set("toRawRef", edge.getToRawRef());
         }
 
+        if (edge.getOrigin() != null) {
+            meta.put("origin", edge.getOrigin().name());
+        }
+        if (edge.getDerivationKind() != null) {
+            meta.put("derivationKind", edge.getDerivationKind().name());
+        }
         if (edge.getResolution() != null) {
             meta.put("resolution", edge.getResolution().name());
+        }
+        if (edge.getResolutionReason() != null && !edge.getResolutionReason().isBlank()) {
+            meta.put("resolutionReason", edge.getResolutionReason());
+        }
+        if (edge.getCallSiteLine() != null) {
+            meta.put("callSiteLine", edge.getCallSiteLine());
+        }
+        BigDecimal confidence = edgeInferencePolicy.effectiveConfidence(edge, GRAPHSTORE_CONFIDENCE);
+        meta.put("confidence", confidence.doubleValue());
+        Boolean defaultVisible = edgeInferencePolicy.defaultVisible(edge);
+        if (defaultVisible != null) {
+            meta.put("defaultVisible", defaultVisible);
+        }
+        if (edge.getAttrs() != null && !edge.getAttrs().isNull()) {
+            meta.set("attrs", edge.getAttrs());
         }
 
         return meta;

@@ -44,7 +44,7 @@ public class EntryPointBuildService {
 
         ObjectNode json = entryPointJsonCodec.serialize(candidates, runId);
         artifactService.saveJsonArtifact(
-                run, ArtifactKind.ENTRY_POINTS_JSON, "1.0", "entry_points.json", json);
+                run, ArtifactKind.ENTRY_POINTS_JSON, "1.1", "entry_points.json", json);
 
         log.info("[ENTRYPOINT] ENTRY_POINTS_JSON saved. runId={}, count={}", runId, candidates.size());
 

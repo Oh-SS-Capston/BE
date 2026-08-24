@@ -1901,6 +1901,12 @@ public class LlmServiceBuildSupport {
             summary.put("reachableCount", trace.path("reachableNodes").size());
             summary.put("maxDepth", trace.path("maxDepth").asInt(0));
             summary.put("truncated", trace.path("truncated").asBoolean(false));
+            FlowEdgeTrustStats trustStats = flowEdgeTrustStats(trace.path("reachableEdges"));
+            summary.put("trustedEdgeCount", trustStats.trustedCount());
+            summary.put("inferredEdgeCount", trustStats.inferredCount());
+            if (trustStats.minConfidence() != null) {
+                summary.put("minEdgeConfidence", trustStats.minConfidence());
+            }
 
             // 직접 호출되는 메서드 이름 (depth=1, 최대 5개)
             ArrayNode directCallees = summary.putArray("directCallees");
@@ -1966,6 +1972,12 @@ public class LlmServiceBuildSupport {
             flowRef.put("reachableCount", reachableCount);
             flowRef.put("maxDepth", maxDepth);
             flowRef.put("truncated", truncated);
+            FlowEdgeTrustStats trustStats = flowEdgeTrustStats(trace.path("reachableEdges"));
+            flowRef.put("trustedEdgeCount", trustStats.trustedCount());
+            flowRef.put("inferredEdgeCount", trustStats.inferredCount());
+            if (trustStats.minConfidence() != null) {
+                flowRef.put("minEdgeConfidence", trustStats.minConfidence());
+            }
 
             // directCallees (bfsDepth=1, 최대 5개)
             List<String> directCallees = new java.util.ArrayList<>();
@@ -1995,6 +2007,35 @@ public class LlmServiceBuildSupport {
         log.info("[LLM] flowTrace enrich: coreMethods={}, traces={}, matched={}, unmatched={}",
                 coreMethods.size(), apiFlowTraces.size(), matched, unmatched);
     }
+
+    /**
+     * API flow edge의 semantic trust 메타를 LLM용 요약 수치로 축약한다.
+     * 1.0 artifact처럼 메타가 없으면 confidence만으로 최대한 하위 호환한다.
+     */
+    private FlowEdgeTrustStats flowEdgeTrustStats(JsonNode edges) {
+        if (edges == null || !edges.isArray() || edges.isEmpty()) {
+            return new FlowEdgeTrustStats(0, 0, null);
+        }
+        int trusted = 0;
+        int inferred = 0;
+        Double minConfidence = null;
+        for (JsonNode edge : edges) {
+            double confidence = edge.path("confidence").isNumber()
+                    ? edge.path("confidence").asDouble(1.0d)
+                    : 1.0d;
+            minConfidence = minConfidence == null ? confidence : Math.min(minConfidence, confidence);
+            boolean defaultVisible = edge.path("defaultVisible").asBoolean(false);
+            String resolution = edge.path("resolution").asText("");
+            boolean highTrust = defaultVisible
+                    || ("RESOLVED".equalsIgnoreCase(resolution) && confidence >= 0.75d)
+                    || (resolution.isBlank() && confidence >= 0.75d);
+            if (highTrust) trusted++;
+            else inferred++;
+        }
+        return new FlowEdgeTrustStats(trusted, inferred, minConfidence);
+    }
+
+    private record FlowEdgeTrustStats(int trustedCount, int inferredCount, Double minConfidence) {}
 
     /**
      * API_FLOW_TRACE_JSON entryQualifiedName → TYPE FQN으로 정규화.

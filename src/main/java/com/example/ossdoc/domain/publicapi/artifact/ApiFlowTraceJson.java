@@ -1,5 +1,6 @@
 package com.example.ossdoc.domain.publicapi.artifact;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import lombok.Builder;
 import lombok.Getter;
 import lombok.extern.jackson.Jacksonized;
@@ -74,6 +75,15 @@ public class ApiFlowTraceJson {
         private String toSymbolId;
         private String edgeKind;
         private double confidence;
+        /** 1.0 호환 필드: origin alias. */
         private String evidence;
+        /** Extraction/GraphStore의 relation provenance를 후단 JSON까지 전달한다. */
+        private String origin;
+        private String derivationKind;
+        private String resolution;
+        private String resolutionReason;
+        private Integer callSiteLine;
+        private Boolean defaultVisible;
+        private JsonNode attrs;
     }
 }
