@@ -38,6 +38,7 @@ import com.example.ossdoc.global.llm.dto.request.LlmRequest;
 import com.example.ossdoc.global.llm.service.LlmService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -86,6 +87,9 @@ public class RunPipelineExecutor {
     private final RepoRunRepository repoRunRepository;
     private final RunAnalysisCacheKeyFactory runAnalysisCacheKeyFactory;
     private final AnalysisCacheProperties analysisCacheProperties;
+
+    @Value("${ossdoc.llm.enabled:false}")
+    private boolean llmEnabled;
 
     public void execute(Long jobId) {
         RunPipelineJob job = jobRepository.findById(jobId)
@@ -273,10 +277,20 @@ public class RunPipelineExecutor {
             );
 
             /*
-             * RULE이 실패하면 LLM 입력 전제가 깨지므로,
-             * LLM을 억지로 실행하지 않고 SKIPPED로 남깁니다.
+             * LLM 단계는 외부 API 토큰과 비용에 의존합니다.
+             * 기능 검증 환경에서는 설정으로 끌 수 있고, RULE이 실패한 경우에도 입력 전제가 깨졌으므로 SKIPPED 처리합니다.
              */
-            if (ruleSucceeded) {
+            if (!llmEnabled) {
+                /*
+                 * 대표 라이선스/구조 분석만 검증할 때 외부 LLM 토큰 없이도 파이프라인을 마무리하기 위한 분기입니다.
+                 * 실패가 아니라 의도적인 비활성화이므로 LLM 단계는 SKIPPED로 남깁니다.
+                 */
+                stepService.skipStep(
+                        jobId,
+                        RunStage.LLM,
+                        "LLM 기능이 비활성화되어 결과 생성을 건너뛰었습니다."
+                );
+            } else if (ruleSucceeded) {
                 executeOptional(
                         jobId,
                         RunStage.LLM,

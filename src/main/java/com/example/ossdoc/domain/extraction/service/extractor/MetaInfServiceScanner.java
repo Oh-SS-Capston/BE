@@ -15,8 +15,11 @@ import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.nio.file.DirectoryStream;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -74,14 +77,25 @@ public class MetaInfServiceScanner {
     }
 
     private void scanFallback(Path repoRoot, ExtractionSink sink, Set<String> seen) {
-        try (var paths = Files.walk(repoRoot)) {
-            paths.filter(p -> Files.isDirectory(p)
-                           && p.endsWith(Path.of(SERVICES_SUBDIR))
-                           && !isBuildOutput(p))
-                 .forEach(servicesDir -> {
-                     String siteSymbol = SymbolIdFactory.module("default");
-                     scanServicesDir(repoRoot, servicesDir, siteSymbol, seen, sink);
-                 });
+        try {
+            Files.walkFileTree(repoRoot, new SimpleFileVisitor<>() {
+                @Override
+                public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
+                    if (!repoRoot.equals(dir) && isBuildOutputSegment(dir)) {
+                        // 기존에도 build/target/.gradle 하위 META-INF/services는 결과에서 제외했으므로
+                        // fallback 탐색에서는 해당 subtree 자체를 건너뛰어 불필요한 repo 전체 순회를 줄인다.
+                        return FileVisitResult.SKIP_SUBTREE;
+                    }
+
+                    if (dir.endsWith(Path.of(SERVICES_SUBDIR))) {
+                        String siteSymbol = SymbolIdFactory.module("default");
+                        scanServicesDir(repoRoot, dir, siteSymbol, seen, sink);
+                        return FileVisitResult.SKIP_SUBTREE;
+                    }
+
+                    return FileVisitResult.CONTINUE;
+                }
+            });
         } catch (IOException e) {
             log.warn("[META-INF-SCAN] 레포 루트 탐색 실패: {}", repoRoot, e);
         }
@@ -114,6 +128,11 @@ public class MetaInfServiceScanner {
             if (BUILD_SEGMENTS.contains(segment.toString())) return true;
         }
         return false;
+    }
+
+    private static boolean isBuildOutputSegment(Path path) {
+        Path fileName = path.getFileName();
+        return fileName != null && BUILD_SEGMENTS.contains(fileName.toString());
     }
 
     private static Path resolveRootPath(Path repoRoot, String rawPath) {

@@ -7,128 +7,129 @@ import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
 
+/**
+ * GraphStore의 edge를 clustering graph에 반영할 때 사용할
+ * 가중치와 포함 여부를 결정한다.
+ *
+ * EdgeType, ResolutionStatus, confidence를 함께 고려한다.
+ */
 @Component
 public class EdgeWeightPolicy {
 
     /**
-     * 관계 종류별 기본 결합 강도.
+     * EdgeType별 기본 가중치를 반환한다.
      *
-     * 구조 관계는 코드 구조상의 직접 결합을 중심으로,
-     * 의미 관계는 프레임워크·런타임 의존 강도와 노이즈 가능성을
-     * 함께 고려해 가중치를 설정한다.
+     * 구조적 결합이 강한 관계는 높은 weight를,
+     * 단순한 참조 또는 보조 관계는 상대적으로 낮은 weight를 부여한다.
      */
     private double baseWeight(EdgeType type) {
         return switch (type) {
-            // ── 구조 관계 ─────────────────────────────────────────────
-            case EXTENDS ->
-                    3.5; // IS-A, 단일 상속, 최강 결합
+            case EXTENDS, CONTAINS -> 3.5;
 
-            case CONTAINS ->
-                    3.5; // Inner class — outer와 아키텍처상 불가분
+            case IMPLEMENTS, HAS_FIELD -> 2.5;
 
-            case IMPLEMENTS ->
-                    2.5; // 계약 이행
+            case ACCESSES_FIELD, CREATES, RETURNS -> 2.0;
 
-            case HAS_FIELD ->
-                    2.5; // 구성 관계
+            case THROWS, PARAM, CALLS -> 1.5;
 
-            case ACCESSES_FIELD ->
-                    2.0; // 내부 구현 직접 의존
+            case OVERRIDES -> 1.0;
 
-            case CREATES ->
-                    2.0; // 구체 타입 생성 의존
+            case ANNOTATED_WITH -> 0.5;
 
-            case RETURNS ->
-                    2.0; // 팩토리·빌더 생성 관계
+            // Spring 또는 framework 의미 관계.
+            case INJECTS, CONFIGURES_BEAN, PROVIDES_SPI -> 2.5;
 
-            case THROWS ->
-                    1.5; // 예외 계약
+            case DECLARES_BEAN, LOADS_SERVICE -> 2.0;
 
-            case PARAM ->
-                    1.5; // 메서드 시그니처 의존
+            case PUBLISHES_EVENT, LISTENS_EVENT -> 1.5;
 
-            case CALLS ->
-                    1.5; // 호출 결합
+            case HANDLES_ENDPOINT -> 1.0;
 
-            case OVERRIDES ->
-                    1.0; // 상속·구현의 보조 신호
-
-            case ANNOTATED_WITH ->
-                    0.5; // 프레임워크 어노테이션 노이즈 가능성
-
-            // ── 의미 관계 ─────────────────────────────────────────────
-            case INJECTS ->
-                    2.5; // 런타임 객체 결합, 구성 관계에 가까움
-
-            case CONFIGURES_BEAN ->
-                    2.5; // Bean 구성 및 조립 책임
-
-            case PROVIDES_SPI ->
-                    2.5; // SPI 계약 구현·제공 관계
-
-            case DECLARES_BEAN ->
-                    2.0; // Bean 생성 책임
-
-            case LOADS_SERVICE ->
-                    2.0; // ServiceLoader 기반 런타임 의존
-
-            case PUBLISHES_EVENT ->
-                    1.5; // 이벤트 타입에 대한 발행 의존
-
-            case LISTENS_EVENT ->
-                    1.5; // 이벤트 타입에 대한 구독 의존
-
-            case HANDLES_ENDPOINT ->
-                    1.0; // 외부 진입점 책임 신호, 내부 결합은 비교적 약함
-
-            case REFLECTS_TYPE ->
-                    1.0; // 문자열·동적 타입 참조, 오탐 가능성 반영
-
-            case REFLECTS_METHOD ->
-                    1.0; // 동적 메서드 참조
-
-            case REFLECTS_FIELD ->
-                    1.0; // 동적 필드 참조
-
-            case REFLECTS_CONSTRUCTOR ->
-                    1.0; // 동적 생성자 참조
+            /*
+             * Reflection edge에도 기본 weight 정의는 유지한다.
+             * 단, 실제 clustering 입력에서는 includeInClustering()에서 제외한다.
+             */
+            case REFLECTS_TYPE,
+                 REFLECTS_METHOD,
+                 REFLECTS_FIELD,
+                 REFLECTS_CONSTRUCTOR -> 1.0;
         };
     }
 
-    private double resolutionFactor(
-            ResolutionStatus status
-    ) {
+    /**
+     * 해당 edge를 실제 clustering graph에 포함할지 결정한다.
+     *
+     * UNRESOLVED 관계는 target이 확정되지 않았으므로 clustering에서 제외한다.
+     * Reflection 관계는 runtime 추론 성격이 강하므로 clustering에서는 제외한다.
+     *
+     * 원본 GraphStore에서 edge 자체를 삭제하는 것은 아니다.
+     */
+    public boolean includeInClustering(Edge edge) {
+        if (edge == null || edge.getEdgeType() == null) {
+            return false;
+        }
+
+        // target이 확정되지 않은 관계는 subsystem 연결 근거로 사용하지 않는다.
+        if (edge.getResolution() == ResolutionStatus.UNRESOLVED) {
+            return false;
+        }
+
+        return switch (edge.getEdgeType()) {
+            case REFLECTS_TYPE,
+                 REFLECTS_METHOD,
+                 REFLECTS_FIELD,
+                 REFLECTS_CONSTRUCTOR -> false;
+
+            default -> true;
+        };
+    }
+
+    /**
+     * ResolutionStatus에 따른 가중치 보정 계수.
+     */
+    private double resolutionFactor(ResolutionStatus status) {
         if (status == null) {
             return 1.0;
         }
 
         return switch (status) {
             case RESOLVED -> 1.0;
+
+            // 일부만 확정된 관계이므로 완전한 관계보다 낮은 weight를 적용한다.
             case PARTIAL -> 0.7;
-            case UNRESOLVED -> 0.3;
+
+            // 직접 weightOf가 호출되더라도 unresolved는 0으로 처리한다.
+            case UNRESOLVED -> 0.0;
         };
     }
 
-    private double confidence(
-            BigDecimal confidence
-    ) {
-        return confidence == null
-                ? 1.0
-                : confidence.doubleValue();
+    /**
+     * confidence를 0.0 ~ 1.0 범위로 제한한다.
+     *
+     * confidence가 없으면 중립값인 1.0을 사용한다.
+     */
+    private double confidence(BigDecimal confidence) {
+        if (confidence == null) {
+            return 1.0;
+        }
+
+        return Math.max(
+                0.0,
+                Math.min(1.0, confidence.doubleValue())
+        );
     }
 
+    /**
+     * clustering graph에 사용할 최종 edge weight를 계산한다.
+     *
+     * 최종 weight =
+     * EdgeType 기본 weight
+     * × ResolutionStatus 계수
+     * × confidence
+     */
     public double weightOf(Edge edge) {
-        double base =
-                baseWeight(edge.getEdgeType());
-
-        double resolutionFactor =
-                resolutionFactor(edge.getResolution());
-
-        double confidence =
-                confidence(edge.getConfidence());
-
-        return base
-                * resolutionFactor
-                * confidence;
+        return baseWeight(edge.getEdgeType())
+                * resolutionFactor(edge.getResolution())
+                * confidence(edge.getConfidence());
     }
 }

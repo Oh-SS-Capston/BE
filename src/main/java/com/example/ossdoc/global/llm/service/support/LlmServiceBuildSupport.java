@@ -1000,14 +1000,24 @@ public class LlmServiceBuildSupport {
     }
 
     /**
-     * 메서드 seed와 흐름/주의사항을 결합해 메서드 카드 문서를 생성한다.
+     * 메서드 seed와 흐름/주의사항/시나리오를 결합해
+     * 최종 메서드 카드 문서를 생성한다.
+     *
+     * 시나리오에 구체적인 실행 정보가 존재하면
+     * 기본 method guide보다 시나리오 정보를 우선해서 사용한다.
      */
-    public ArrayNode buildCoreMethodCards(JsonNode methodSeed, JsonNode flowSeed, JsonNode cautions, JsonNode scenarios) {
+    public ArrayNode buildCoreMethodCards(
+            JsonNode methodSeed,
+            JsonNode flowSeed,
+            JsonNode cautions,
+            JsonNode scenarios
+    ) {
         Map<String, List<String>> cautionByMethod = indexCautionsByMethod(cautions);
         Map<String, Integer> orderByMethod = indexMethodOrder(flowSeed);
         Map<String, JsonNode> scenarioStepByMethod = indexScenarioStepByMethod(scenarios);
 
         ArrayNode out = objectMapper.createArrayNode();
+
         if (!methodSeed.isArray()) {
             return out;
         }
@@ -1019,87 +1029,195 @@ public class LlmServiceBuildSupport {
             String fqn = seed.path("fqn").asText("");
             String methodName = seed.path("methodName").asText("");
             String classFqn = seed.path("classFqn").asText("");
+
             String whenToUse = inferWhenToUse(methodName);
-            List<String> methodCautions = cautionByMethod.getOrDefault(fqn, List.of());
-            JsonNode scenarioStep = scenarioStepByMethod.getOrDefault(fqn, NullNode.getInstance());
-            ApiDocSummarySupport.SummaryView summary = ApiDocSummarySupport.fromMethodSeed(
-                    seed,
-                    classFqn,
-                    methodName,
-                    MAX_METHOD_DESCRIPTION_PREVIEW
-            );
-            ApiDocGuideSupport.GuideView guide = ApiDocGuideSupport.buildGuide(
-                    classFqn,
-                    methodName,
-                    fqn,
-                    summary.summaryRaw(),
-                    whenToUse,
-                    methodCautions,
-                    seed.path("filePath").asText(""),
-                    seed.path("startLine").canConvertToInt() ? seed.path("startLine").asInt() : null,
-                    seed.path("endLine").canConvertToInt() ? seed.path("endLine").asInt() : null
-            );
+
+            List<String> methodCautions =
+                    cautionByMethod.getOrDefault(fqn, List.of());
+
+            /*
+             * 현재 메서드와 연결된 scenario step을 찾는다.
+             *
+             * scenario가 없는 경우 NullNode를 사용하고,
+             * 이후 기본 method guide만으로 카드를 생성한다.
+             */
+            JsonNode scenarioStep =
+                    scenarioStepByMethod.getOrDefault(
+                            fqn,
+                            NullNode.getInstance()
+                    );
+
+            /*
+             * method seed를 기반으로 기본 summary를 생성한다.
+             */
+            ApiDocSummarySupport.SummaryView summary =
+                    ApiDocSummarySupport.fromMethodSeed(
+                            seed,
+                            classFqn,
+                            methodName,
+                            MAX_METHOD_DESCRIPTION_PREVIEW
+                    );
+
+            /*
+             * method 자체의 기본 guide를 생성한다.
+             *
+             * 이후 scenario 정보가 존재하면 attachMethodGuideBundle()에서
+             * scenario의 precondition/action/failureSignal 등을 우선 적용한다.
+             */
+            ApiDocGuideSupport.GuideView guide =
+                    ApiDocGuideSupport.buildGuide(
+                            classFqn,
+                            methodName,
+                            fqn,
+                            summary.summaryRaw(),
+                            whenToUse,
+                            methodCautions,
+                            seed.path("filePath").asText(""),
+                            seed.path("startLine").canConvertToInt()
+                                    ? seed.path("startLine").asInt()
+                                    : null,
+                            seed.path("endLine").canConvertToInt()
+                                    ? seed.path("endLine").asInt()
+                                    : null
+                    );
 
             card.put("methodName", methodName);
             card.put("classFqn", classFqn);
             card.put("fqn", fqn);
             card.put("summaryRaw", guide.summaryRaw());
-            attachMethodGuideBundle(card, guide, scenarioStep);
-            String guideNarrative = card.path("guideNarrative").asText(guide.narrative());
+
+            /*
+             * 중요:
+             *
+             * scenarioStep이 존재하면 해당 정보가 기본 guide보다 우선한다.
+             *
+             * 이 메서드 내부에서 guideSlots를 다시 생성하면
+             * 여기서 적용한 scenario 정보가 덮어써지므로
+             * attachMethodGuideBundle() 이후 guideSlots를 다시 만들면 안 된다.
+             */
+            attachMethodGuideBundle(
+                    card,
+                    guide,
+                    scenarioStep
+            );
+
+            /*
+             * attachMethodGuideBundle()에서 만들어진 최종 narrative를 사용한다.
+             */
+            String guideNarrative =
+                    card.path("guideNarrative")
+                            .asText(guide.narrative());
+
             card.put("summaryNarrative", guideNarrative);
             card.put("summaryPreview", guideNarrative);
             card.put("summaryTruncated", false);
+
             card.put("whatItDoes", guideNarrative);
             card.put("whatItDoesPreview", guideNarrative);
             card.put("whatItDoesFull", guideNarrative);
             card.put("whatItDoesTruncated", false);
+
             card.put("whenToUse", whenToUse);
 
-            ObjectNode guideSlots = card.putObject("guideSlots");
-            guideSlots.put("beforeCall", guide.slots().beforeCall());
-            guideSlots.put("doCall", guide.slots().doCall());
-            guideSlots.put("successCheck", guide.slots().successCheck());
-            guideSlots.put("failureSymptom", guide.slots().failureSymptom());
-            guideSlots.put("nextAction", guide.slots().nextAction());
+            /*
+             * guideSlots와 guideQuality는
+             * attachMethodGuideBundle() → attachGuideBundle()에서 이미 생성된다.
+             *
+             * 따라서 여기에서 다시 card.putObject("guideSlots") 또는
+             * card.putObject("guideQuality")를 호출하지 않는다.
+             *
+             * 기존 구현에서는 이 부분에서 기본 guide 값을 다시 넣어
+             * scenario 기반 failureSignal/action 등이 사라지는 버그가 있었다.
+             */
 
-            ObjectNode guideQuality = card.putObject("guideQuality");
-            guideQuality.put("actionabilityScore", guide.quality().actionabilityScore());
-            guideQuality.put("slotCoverage", guide.quality().slotCoverage());
-            guideQuality.put("evidenceCoverage", guide.quality().evidenceCoverage());
-            guideQuality.put("forbiddenPhraseRate", guide.quality().forbiddenPhraseRate());
-            guideQuality.put("repetitionRate", guide.quality().repetitionRate());
-            guideQuality.put("targetSuitabilityScore", guide.quality().targetSuitabilityScore());
-            guideQuality.put("slotEvidenceConfidence", guide.quality().slotEvidenceConfidence());
-            guideQuality.put("threshold", ACTIONABILITY_THRESHOLD);
-            // P1-3: meetsThreshold = actionability 충족 AND targetSuitability 충족(합성/예제 제외)
-            guideQuality.put("meetsThreshold", guide.quality().actionabilityScore() >= ACTIONABILITY_THRESHOLD
-                    && guide.quality().targetSuitabilityScore() >= 1.0);
-            card.put("actionabilityScore", guide.quality().actionabilityScore());
+            /*
+             * scenario 정보를 별도의 usageScenario 객체에도 보존한다.
+             */
+            attachUsageScenario(
+                    card,
+                    scenarioStep
+            );
 
-            ObjectNode slotEvidence = card.putObject("slotEvidence");
-            writeSlotEvidence(slotEvidence, guide.slotEvidence());
+            String signatureHint =
+                    seed.path("signatureHint").asText("");
 
-            attachUsageScenario(card, scenarioStep);
-            String signatureHint = seed.path("signatureHint").asText("");
-            // 오버로딩 구분용 표시 시그니처(메서드명 + 파라미터). fqn은 단순명을 유지한다.
-            card.put("displaySignature", signatureHint.isBlank() ? methodName + "()" : extractInputs(signatureHint));
-            card.put("inputs", extractInputs(signatureHint));
-            card.put("returns", extractReturns(signatureHint));
-            card.put("changesState", inferStateChange(methodName));
-            card.set("pairedWith", inferPairedMethods(methodName, methodSeed));
-            card.put("callOrderNotes", formatCallOrderNote(orderByMethod.get(fqn)));
-            card.set("cautions", toTextArray(methodCautions));
-            card.put("importance", seed.path("importance").asInt(0));
+            /*
+             * 오버로딩 메서드를 화면에서 구분하기 위한 표시용 signature.
+             */
+            card.put(
+                    "displaySignature",
+                    signatureHint.isBlank()
+                            ? methodName + "()"
+                            : extractInputs(signatureHint)
+            );
 
-            ObjectNode evidence = card.putObject("evidence");
-            putIfText(evidence, "filePath", seed.path("filePath").asText(""));
+            card.put(
+                    "inputs",
+                    extractInputs(signatureHint)
+            );
+
+            card.put(
+                    "returns",
+                    extractReturns(signatureHint)
+            );
+
+            card.put(
+                    "changesState",
+                    inferStateChange(methodName)
+            );
+
+            card.set(
+                    "pairedWith",
+                    inferPairedMethods(
+                            methodName,
+                            methodSeed
+                    )
+            );
+
+            card.put(
+                    "callOrderNotes",
+                    formatCallOrderNote(
+                            orderByMethod.get(fqn)
+                    )
+            );
+
+            card.set(
+                    "cautions",
+                    toTextArray(methodCautions)
+            );
+
+            card.put(
+                    "importance",
+                    seed.path("importance").asInt(0)
+            );
+
+            /*
+             * 메서드 근거 파일 위치를 저장한다.
+             */
+            ObjectNode evidence =
+                    card.putObject("evidence");
+
+            putIfText(
+                    evidence,
+                    "filePath",
+                    seed.path("filePath").asText("")
+            );
+
             if (seed.path("startLine").canConvertToInt()) {
-                evidence.put("startLine", seed.path("startLine").asInt());
+                evidence.put(
+                        "startLine",
+                        seed.path("startLine").asInt()
+                );
             }
+
             if (seed.path("endLine").canConvertToInt()) {
-                evidence.put("endLine", seed.path("endLine").asInt());
+                evidence.put(
+                        "endLine",
+                        seed.path("endLine").asInt()
+                );
             }
         }
+
         return out;
     }
 

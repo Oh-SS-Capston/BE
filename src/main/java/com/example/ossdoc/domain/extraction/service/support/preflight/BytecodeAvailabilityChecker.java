@@ -6,11 +6,18 @@ import com.example.ossdoc.domain.extraction.enums.BytecodeAvailability;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 @Component
@@ -32,6 +39,7 @@ public class BytecodeAvailabilityChecker {
         Set<Path> declaredRoots = new LinkedHashSet<>();
         Set<Path> existingRoots = new LinkedHashSet<>();
         Set<Path> missingRoots = new LinkedHashSet<>();
+        Map<Path, List<Path>> classFilesByRoot = new LinkedHashMap<>();
 
         long classFileCount = 0L;
 
@@ -52,7 +60,7 @@ public class BytecodeAvailabilityChecker {
 
                 declaredRoots.add(resolvedRoot);
 
-                if (!Files.exists(resolvedRoot) || !Files.isDirectory(resolvedRoot)) {
+                if (!Files.isDirectory(resolvedRoot)) {
                     missingRoots.add(resolvedRoot);
                     warnings.add("classesDirs path does not exist: " + resolvedRoot);
                     continue;
@@ -61,16 +69,22 @@ public class BytecodeAvailabilityChecker {
                 existingRoots.add(resolvedRoot);
 
                 try {
-                    long count = countClassFiles(resolvedRoot);
-                    if (count == 0L) {
+                    List<Path> classFiles = classFilesByRoot.get(resolvedRoot);
+                    if (classFiles == null) {
+                        classFiles = collectClassFiles(resolvedRoot);
+                        classFilesByRoot.put(resolvedRoot, classFiles);
+                    }
+
+                    if (classFiles.isEmpty()) {
                         warnings.add("classesDirs exists but contains no .class files: " + resolvedRoot);
                     } else {
-                        classFileCount += count;
+                        classFileCount += classFiles.size();
                     }
                 } catch (IOException e) {
                     warnings.add("Failed to scan classesDirs: " + resolvedRoot + " (" + e.getMessage() + ")");
                     existingRoots.remove(resolvedRoot);
                     missingRoots.add(resolvedRoot);
+                    classFilesByRoot.remove(resolvedRoot);
                 }
             }
         }
@@ -89,18 +103,27 @@ public class BytecodeAvailabilityChecker {
                 existingRootCount,
                 List.copyOf(existingRoots),
                 List.copyOf(missingRoots),
+                classFilesByRoot,
                 classFileCount,
                 List.copyOf(warnings)
         );
     }
 
-    private long countClassFiles(Path root) throws IOException {
-        try (var stream = Files.walk(root)) {
-            return stream
-                    .filter(Files::isRegularFile)
-                    .filter(path -> path.toString().endsWith(".class"))
-                    .count();
-        }
+    private List<Path> collectClassFiles(Path root) throws IOException {
+        List<Path> classFiles = new ArrayList<>();
+        Files.walkFileTree(root, new SimpleFileVisitor<>() {
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                if (attrs.isRegularFile() && file.toString().endsWith(".class")) {
+                    // preflight는 class 파일 존재 여부와 목록만 필요하므로
+                    // Files.walk stream 필터 체인 대신 방문 시점에 바로 수집해 순회 비용을 줄인다.
+                    classFiles.add(file);
+                }
+                return FileVisitResult.CONTINUE;
+            }
+        });
+        classFiles.sort(Comparator.naturalOrder());
+        return List.copyOf(classFiles);
     }
 
     private Path normalizePath(Path repoRoot, String rawPath) {
@@ -130,12 +153,14 @@ public class BytecodeAvailabilityChecker {
             int existingRootCount,
             List<Path> existingRoots,
             List<Path> missingRoots,
+            Map<Path, List<Path>> classFilesByRoot,
             long classFileCount,
             List<String> warnings
     ) {
         public BytecodeAvailabilityResult {
             existingRoots = existingRoots == null ? List.of() : List.copyOf(existingRoots);
             missingRoots = missingRoots == null ? List.of() : List.copyOf(missingRoots);
+            classFilesByRoot = copyClassFilesByRoot(classFilesByRoot);
             warnings = warnings == null ? List.of() : List.copyOf(warnings);
         }
 
@@ -158,9 +183,21 @@ public class BytecodeAvailabilityChecker {
                     0,
                     List.of(),
                     List.of(),
+                    Map.of(),
                     0L,
                     warnings
             );
+        }
+
+        private static Map<Path, List<Path>> copyClassFilesByRoot(Map<Path, List<Path>> classFilesByRoot) {
+            if (classFilesByRoot == null || classFilesByRoot.isEmpty()) {
+                return Map.of();
+            }
+
+            Map<Path, List<Path>> copy = new LinkedHashMap<>();
+            classFilesByRoot.forEach((root, files) ->
+                    copy.put(root, files == null ? List.of() : List.copyOf(files)));
+            return Collections.unmodifiableMap(copy);
         }
     }
 }

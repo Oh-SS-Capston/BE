@@ -99,7 +99,7 @@ public class RuleMiningSignalIngestService {
             throw new RuleCandidateException(RuleCandidateErrorCode.GRAPHSTORE_DATA_NOT_FOUND);
         }
 
-        Map<Long, List<Evidence>> evidenceByEdgeId = loadEvidenceByEdgeId(runId, signalSourceEdges);
+        Map<Long, List<Evidence>> evidenceByEdgeId = loadEvidenceByEdgeId(signalSourceEdges);
         List<RuleMiningSignal> signals = new ArrayList<>();
         Set<String> signalKeys = new HashSet<>();
 
@@ -167,7 +167,7 @@ public class RuleMiningSignalIngestService {
                 && symbol.getSourceEndLine() != null;
     }
 
-    private Map<Long, List<Evidence>> loadEvidenceByEdgeId(String runId, List<Edge> edges) {
+    private Map<Long, List<Evidence>> loadEvidenceByEdgeId(List<Edge> edges) {
         Set<Long> edgeIdFilter = edges.stream()
                 .map(Edge::getEdgeId)
                 .filter(Objects::nonNull)
@@ -177,7 +177,9 @@ public class RuleMiningSignalIngestService {
             return Map.of();
         }
 
-        List<EdgeEvidence> links = edgeEvidenceRepository.findAllByEdge_Run_RunId(runId);
+        // Rule mining signal은 위에서 선별한 source edge만 사용하므로
+        // run 전체 edge-evidence를 읽은 뒤 필터링하지 않고 필요한 edge id만 조회한다.
+        List<EdgeEvidence> links = edgeEvidenceRepository.findAllByEdge_EdgeIdIn(edgeIdFilter);
 
         Map<Long, List<Evidence>> result = new HashMap<>();
 
@@ -501,6 +503,12 @@ public class RuleMiningSignalIngestService {
         int bestSpan = Integer.MAX_VALUE;
 
         for (SymbolEntity candidate : candidates) {
+            if (candidate.getSourceStartLine() != null && candidate.getSourceStartLine() > evidenceLine) {
+                // fileSymbols는 startLine 기준 정렬되어 있으므로 현재 줄보다 뒤에서 시작하는 후보부터는
+                // evidence line을 포함할 수 없어 남은 후보 탐색을 중단한다.
+                break;
+            }
+
             if (!containsLine(candidate, evidenceLine)) {
                 continue;
             }
