@@ -36,6 +36,7 @@ import org.mockito.quality.Strictness;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyList;
@@ -112,7 +113,7 @@ class RuleMiningSignalIngestServiceTest {
         when(edgeRepository.findAllByRun_RunId(runId)).thenReturn(List.of(creates));
         when(evidenceRepository.findAllByRun_RunId(runId)).thenReturn(List.of(astExpression, asmInstruction));
         when(symbolRepository.findAllByRun_RunId(runId)).thenReturn(List.of());
-        when(edgeEvidenceRepository.findAllByEdge_Run_RunId(runId)).thenReturn(List.of(link1, link2));
+        when(edgeEvidenceRepository.findAllByEdge_EdgeIdIn(Set.of(101L))).thenReturn(List.of(link1, link2));
         when(ruleMiningSignalRepository.saveAll(anyList())).thenAnswer(invocation -> invocation.getArgument(0));
 
         service.ingest(runId, false);
