@@ -8,6 +8,7 @@ import org.springframework.stereotype.Component;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
 
@@ -78,7 +79,9 @@ public class ExtractionContextFactory {
         if (lookupRoots.isEmpty()) {
             lookupRoots.add(fallbackRoot);
         }
-        return List.copyOf(lookupRoots);
+        // source/test root가 같은 경로를 가리키면 Symbol Solver에 같은 JavaParserTypeSolver가
+        // 반복 등록되므로, 순서를 유지한 채 중복 root만 제거한다.
+        return List.copyOf(new LinkedHashSet<>(lookupRoots));
     }
 
     private Path resolve(Path repoRoot, String rawPath) {

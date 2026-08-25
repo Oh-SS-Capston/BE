@@ -1,6 +1,7 @@
 package com.example.ossdoc.domain.extraction.service.support.planning;
 import com.example.ossdoc.domain.extraction.service.support.util.HashSupport;
 import com.example.ossdoc.domain.extraction.service.support.util.RepoPathUtils;
+import com.example.ossdoc.domain.extraction.service.support.preflight.BytecodeAvailabilityChecker;
 import com.example.ossdoc.domain.extraction.service.support.preflight.ExtractionPreflightResult;
 
 import com.example.ossdoc.domain.extraction.dto.model.ChunkDescriptor;
@@ -11,15 +12,18 @@ import com.example.ossdoc.domain.extraction.enums.ExtractionMode;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.stream.Stream;
 
 @Component
 public class ChunkPlanner {
@@ -47,7 +51,7 @@ public class ChunkPlanner {
             chunks.addAll(planAstChunks(request, repoRoot, effectivePolicy, includeMatcher, excludeMatcher, module));
 
             if (supportsAsm(preflightResult)) {
-                chunks.addAll(planAsmChunks(repoRoot, effectivePolicy, includeMatcher, excludeMatcher, module));
+                chunks.addAll(planAsmChunks(preflightResult, repoRoot, effectivePolicy, includeMatcher, excludeMatcher, module));
             }
         }
 
@@ -106,6 +110,7 @@ public class ChunkPlanner {
     }
 
     private List<ChunkDescriptor> planAsmChunks(
+            ExtractionPreflightResult preflightResult,
             Path repoRoot,
             ChunkingPolicy policy,
             IncludeGlobMatcher includeMatcher,
@@ -121,7 +126,8 @@ public class ChunkPlanner {
                 policy.asmMaxFiles(),
                 policy.asmMaxBytes(),
                 includeMatcher,
-                excludeMatcher
+                excludeMatcher,
+                preflightClassFilesByRoot(preflightResult)
         );
     }
 
@@ -136,20 +142,46 @@ public class ChunkPlanner {
             IncludeGlobMatcher includeMatcher,
             IncludeGlobMatcher excludeMatcher
     ) {
+        return planChunksForRoots(
+                repoRoot,
+                moduleName,
+                roots,
+                kind,
+                fileSuffix,
+                maxFiles,
+                maxBytes,
+                includeMatcher,
+                excludeMatcher,
+                Map.of()
+        );
+    }
+
+    private List<ChunkDescriptor> planChunksForRoots(
+            Path repoRoot,
+            String moduleName,
+            List<Path> roots,
+            ChunkKind kind,
+            String fileSuffix,
+            int maxFiles,
+            long maxBytes,
+            IncludeGlobMatcher includeMatcher,
+            IncludeGlobMatcher excludeMatcher,
+            Map<Path, List<Path>> precollectedFilesByRoot
+    ) {
         List<ChunkDescriptor> chunks = new ArrayList<>();
         if (roots == null || roots.isEmpty()) {
             return chunks;
         }
 
         for (Path root : roots) {
-            List<Path> files = collectFiles(root, fileSuffix);
+            List<FileEntry> files = collectOrReuseFileEntries(repoRoot, root, fileSuffix, precollectedFilesByRoot);
             if (files.isEmpty()) {
                 continue;
             }
 
             List<FileEntry> accepted = new ArrayList<>();
-            for (Path file : files) {
-                String repoRelative = RepoPathUtils.toRepoRelative(repoRoot, file);
+            for (FileEntry entry : files) {
+                String repoRelative = entry.repoRelative();
                 if (!includeMatcher.matches(repoRelative)) {
                     continue;
                 }
@@ -157,12 +189,7 @@ public class ChunkPlanner {
                     continue;
                 }
 
-                try {
-                    long size = Files.size(file);
-                    accepted.add(new FileEntry(file, repoRelative, size));
-                } catch (IOException e) {
-                    // 파일 크기 계산 실패 시 skip
-                }
+                accepted.add(entry);
             }
 
             if (accepted.isEmpty()) {
@@ -174,6 +201,15 @@ public class ChunkPlanner {
         }
 
         return chunks;
+    }
+
+    private Map<Path, List<Path>> preflightClassFilesByRoot(ExtractionPreflightResult preflightResult) {
+        BytecodeAvailabilityChecker.BytecodeAvailabilityResult bytecodeAvailability =
+                preflightResult == null ? null : preflightResult.bytecodeAvailability();
+        if (bytecodeAvailability == null) {
+            return Map.of();
+        }
+        return bytecodeAvailability.classFilesByRoot();
     }
 
     private List<ChunkDescriptor> sliceRootIntoChunks(
@@ -242,20 +278,78 @@ public class ChunkPlanner {
                 .build();
     }
 
-    private List<Path> collectFiles(Path root, String suffix) {
-        if (root == null || !Files.exists(root) || !Files.isDirectory(root)) {
+    private List<FileEntry> collectFileEntries(Path repoRoot, Path root, String suffix) {
+        if (root == null || !Files.isDirectory(root)) {
             return List.of();
         }
 
-        try (Stream<Path> stream = Files.walk(root)) {
-            return stream
-                    .filter(Files::isRegularFile)
-                    .filter(path -> path.toString().endsWith(suffix))
-                    .sorted()
-                    .toList();
+        List<FileEntry> entries = new ArrayList<>();
+        try {
+            Files.walkFileTree(root, new SimpleFileVisitor<>() {
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                    if (attrs.isRegularFile() && file.toString().endsWith(suffix)) {
+                        // 파일 방문 시점의 size metadata를 함께 저장해
+                        // 청크 생성 단계에서 Files.size(file)을 반복 호출하지 않는다.
+                        entries.add(new FileEntry(
+                                file,
+                                RepoPathUtils.toRepoRelative(repoRoot, file),
+                                attrs.size()
+                        ));
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+            });
         } catch (IOException e) {
             return List.of();
         }
+
+        entries.sort(Comparator.comparing(FileEntry::repoRelative));
+        return entries;
+    }
+
+    private List<FileEntry> collectOrReuseFileEntries(
+            Path repoRoot,
+            Path root,
+            String suffix,
+            Map<Path, List<Path>> precollectedFilesByRoot
+    ) {
+        if (root == null) {
+            return List.of();
+        }
+
+        if (precollectedFilesByRoot != null) {
+            List<Path> precollected = precollectedFilesByRoot.get(root);
+            if (precollected == null) {
+                precollected = precollectedFilesByRoot.get(root.normalize());
+            }
+            if (precollected != null) {
+                return toFileEntries(repoRoot, precollected);
+            }
+        }
+
+        return collectFileEntries(repoRoot, root, suffix);
+    }
+
+    private List<FileEntry> toFileEntries(Path repoRoot, List<Path> files) {
+        if (files == null || files.isEmpty()) {
+            return List.of();
+        }
+
+        List<FileEntry> entries = new ArrayList<>();
+        for (Path file : files) {
+            try {
+                entries.add(new FileEntry(
+                        file,
+                        RepoPathUtils.toRepoRelative(repoRoot, file),
+                        Files.size(file)
+                ));
+            } catch (IOException e) {
+                // preflight 이후 파일이 삭제/잠김 상태가 될 수 있으므로 전체 계획은 중단하지 않고 해당 파일만 제외한다.
+            }
+        }
+        entries.sort(Comparator.comparing(FileEntry::repoRelative));
+        return entries;
     }
 
     private record FileEntry(Path path, String repoRelative, long size) {

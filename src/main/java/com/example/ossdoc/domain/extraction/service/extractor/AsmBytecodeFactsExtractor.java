@@ -131,7 +131,9 @@ public class AsmBytecodeFactsExtractor implements FactsExtractor {
         }
 
         for (Path classFile : context.files()) {
-            if (classFile == null || !Files.exists(classFile) || !Files.isRegularFile(classFile)) {
+            if (classFile == null || !Files.isRegularFile(classFile)) {
+                // Files.isRegularFile은 존재하지 않는 파일도 false로 처리하므로
+                // exists + isRegularFile 중복 stat 호출 없이 기존 skip 정책을 유지한다.
                 sink.addWarning("class file does not exist or is not a regular file: " + classFile);
                 sink.recordFileSkipped();
                 continue;

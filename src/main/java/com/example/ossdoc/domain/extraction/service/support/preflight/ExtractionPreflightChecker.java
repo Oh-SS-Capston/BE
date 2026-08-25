@@ -201,7 +201,7 @@ public class ExtractionPreflightChecker {
 
             try {
                 Path normalized = normalizePath(repoRoot, rawPath);
-                if (!Files.exists(normalized) || !Files.isDirectory(normalized)) {
+                if (!Files.isDirectory(normalized)) {
                     warnings.add(fieldName + " path does not exist or is not a directory: " + normalized);
                     continue;
                 }

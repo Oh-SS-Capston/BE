@@ -10,6 +10,7 @@ import com.example.ossdoc.domain.graphstore.enums.EdgeType;
 import com.example.ossdoc.domain.graphstore.enums.SymbolKind;
 import com.example.ossdoc.domain.graphstore.repository.EdgeRepository;
 import com.example.ossdoc.domain.graphstore.repository.SymbolRepository;
+import com.example.ossdoc.domain.graphstore.support.EdgeInferencePolicy;
 import com.example.ossdoc.domain.publicapi.model.EntryPointCandidate;
 import com.example.ossdoc.domain.publicapi.support.PublicSymbolFilter;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -82,6 +83,7 @@ public class EntryPointDetectService {
     private final SymbolRepository symbolRepository;
     private final EdgeRepository edgeRepository;
     private final ArtifactRepository artifactRepository;
+    private final EdgeInferencePolicy edgeInferencePolicy;
 
     public List<EntryPointCandidate> detect(String runId) {
         // 모든 심볼 한 번에 로드 → first-level cache로 lazy 연관 N+1 방지
@@ -92,6 +94,10 @@ public class EntryPointDetectService {
         }
 
         ChildMaps childMaps = buildChildMaps(allSymbols);
+        SemanticEntrySignals semanticEntrySignals = loadSemanticEntrySignals(
+                runId,
+                childMaps.methodOwnerIndex()
+        );
 
         Map<String, Integer> returnedByPublicApi =
                 countReturnedByPublicApi(runId, publicSymbolIds, childMaps.methodOwnerIndex());
@@ -111,11 +117,11 @@ public class EntryPointDetectService {
                 candidates.add(exampleCandidate(symbol));
                 continue;
             }
-            if (shouldExclude(symbol, exportedPackages, childMaps)) continue;
+            if (shouldExclude(symbol, exportedPackages, childMaps, semanticEntrySignals)) continue;
 
             PhaseResult result = evaluatePhases(
                     symbol, childMaps, returnedByPublicApi, annotationUsageCounts,
-                    factsSignals, implementorSymbolIds, moduleRoleIndex);
+                    factsSignals, implementorSymbolIds, moduleRoleIndex, semanticEntrySignals);
             if ("NONE".equals(result.confidence())) continue;
 
             candidates.add(EntryPointCandidate.builder()
@@ -131,7 +137,7 @@ public class EntryPointDetectService {
                     .confidence(result.confidence())
                     .signals(List.copyOf(result.signals()))
                     .score(result.score())
-                    .entryMethods(resolveEntryMethods(symbol.getSymbolId(), childMaps))
+                    .entryMethods(resolveEntryMethods(symbol.getSymbolId(), childMaps, semanticEntrySignals))
                     .evidenceCompleteness(result.evidenceCompleteness())
                     .build());
         }
@@ -179,6 +185,94 @@ public class EntryPointDetectService {
     }
 
     /**
+     * Extraction resolver가 만든 HANDLES_ENDPOINT 관계를 API 진입점 판정용 신호로 변환한다.
+     *
+     * <p>기존에는 Controller가 public 생성자/factory가 없다는 이유로 제외될 수 있었고,
+     * 실제 endpoint method가 API flow seed에 들어가지 못했다. 이제 resolved/confidence 정책을
+     * 통과한 endpoint edge는 타입 진입점과 seed method를 직접 보강한다.</p>
+     */
+    private SemanticEntrySignals loadSemanticEntrySignals(
+            String runId,
+            Map<String, String> methodOwnerIndex
+    ) {
+        List<Edge> endpointEdges = edgeRepository.findAllByRun_RunIdAndEdgeTypeIn(
+                runId,
+                List.of(EdgeType.HANDLES_ENDPOINT)
+        );
+
+        Set<String> usableOwnerIds = new HashSet<>();
+        Set<String> highTrustOwnerIds = new HashSet<>();
+        Map<String, List<String>> endpointMethodIdsByOwner = new HashMap<>();
+        Map<String, List<EntryPointCandidate.HttpEndpointInfo>> endpointInfosByMethodId = new HashMap<>();
+
+        for (Edge edge : endpointEdges) {
+            if (!edgeInferencePolicy.isUsableForInference(edge) || edge.getFromSymbol() == null) {
+                continue;
+            }
+
+            SymbolEntity from = edge.getFromSymbol();
+            String fromId = from.getSymbolId();
+            if (fromId == null) {
+                continue;
+            }
+
+            String ownerId;
+            if (from.getSymbolKind() == SymbolKind.TYPE) {
+                ownerId = fromId;
+            } else {
+                ownerId = methodOwnerIndex.get(fromId);
+            }
+            if (ownerId == null) {
+                continue;
+            }
+
+            usableOwnerIds.add(ownerId);
+            if (edgeInferencePolicy.isHighTrust(edge)) {
+                highTrustOwnerIds.add(ownerId);
+            }
+            if (from.getSymbolKind() == SymbolKind.METHOD) {
+                endpointMethodIdsByOwner
+                        .computeIfAbsent(ownerId, ignored -> new ArrayList<>())
+                        .add(fromId);
+                endpointInfosByMethodId
+                        .computeIfAbsent(fromId, ignored -> new ArrayList<>())
+                        .add(toHttpEndpointInfo(edge));
+            }
+        }
+
+        Map<String, List<String>> immutableMethods = new HashMap<>();
+        endpointMethodIdsByOwner.forEach((ownerId, methodIds) ->
+                immutableMethods.put(ownerId, methodIds.stream().distinct().sorted().toList()));
+
+        Map<String, List<EntryPointCandidate.HttpEndpointInfo>> immutableInfos = new HashMap<>();
+        endpointInfosByMethodId.forEach((methodId, infos) ->
+                immutableInfos.put(methodId, List.copyOf(infos)));
+
+        return new SemanticEntrySignals(
+                Set.copyOf(usableOwnerIds),
+                Set.copyOf(highTrustOwnerIds),
+                Map.copyOf(immutableMethods),
+                Map.copyOf(immutableInfos)
+        );
+    }
+
+    private EntryPointCandidate.HttpEndpointInfo toHttpEndpointInfo(Edge edge) {
+        JsonNode attrs = edge.getAttrs();
+        String httpMethod = attrs == null ? null : attrs.path("http_method").asText(null);
+        String path = attrs == null ? null : attrs.path("path").asText(null);
+        return EntryPointCandidate.HttpEndpointInfo.builder()
+                .httpMethod(httpMethod)
+                .path(path)
+                .confidence(edge.getConfidence() == null ? null : edge.getConfidence().doubleValue())
+                .resolution(edge.getResolution() == null ? null : edge.getResolution().name())
+                .resolutionReason(edge.getResolutionReason())
+                .origin(edge.getOrigin() == null ? null : edge.getOrigin().name())
+                .derivationKind(edge.getDerivationKind() == null ? null : edge.getDerivationKind().name())
+                .defaultVisible(edgeInferencePolicy.defaultVisible(edge))
+                .build();
+    }
+
+    /**
      * #5: ANNOTATED_WITH 엣지의 인바운드 카운트 — 어노테이션 타입별 사용 빈도.
      * RETURNS 빈도 집계(countReturnedByPublicApi)와 동형 구조.
      */
@@ -187,6 +281,7 @@ public class EntryPointDetectService {
                 .findAllByRun_RunIdAndEdgeTypeAndToSymbolIsNotNull(runId, EdgeType.ANNOTATED_WITH);
         Map<String, Integer> counts = new HashMap<>();
         for (Edge edge : edges) {
+            if (!edgeInferencePolicy.isUsableForInference(edge) || edge.getToSymbol() == null) continue;
             String annotationId = edge.getToSymbol().getSymbolId();
             counts.merge(annotationId, 1, Integer::sum);
         }
@@ -207,6 +302,7 @@ public class EntryPointDetectService {
 
         Map<String, Integer> counts = new HashMap<>();
         for (Edge edge : returnsEdges) {
+            if (!edgeInferencePolicy.isUsableForInference(edge) || edge.getToSymbol() == null) continue;
             String methodId   = edge.getFromSymbol().getSymbolId();
             String ownerSymId = methodOwnerIndex.get(methodId);
             if (ownerSymId == null || !publicSymbolIds.contains(ownerSymId)) continue;
@@ -304,6 +400,7 @@ public class EntryPointDetectService {
                 runId, List.of(EdgeType.IMPLEMENTS, EdgeType.EXTENDS));
         Set<String> result = new HashSet<>(edges.size());
         for (Edge e : edges) {
+            if (!edgeInferencePolicy.isUsableForInference(e)) continue;
             if (e.getFromSymbol() != null) {
                 result.add(e.getFromSymbol().getSymbolId());
             }
@@ -356,7 +453,8 @@ public class EntryPointDetectService {
      */
     private boolean shouldExclude(SymbolEntity symbol,
                                    Set<String> exportedPackages,
-                                   ChildMaps childMaps) {
+                                   ChildMaps childMaps,
+                                   SemanticEntrySignals semanticEntrySignals) {
         String qualifiedName = symbol.getQualifiedName();
 
         // P1-2: @API(INTERNAL/DEPRECATED) → 공개 API 후보 제외
@@ -369,13 +467,18 @@ public class EntryPointDetectService {
         if (hasExamplePackage(qualifiedName)) return true;
 
         if (hasExcludedPackageSegment(qualifiedName)) return true;
+        if (isDeprecated(symbol)) return true;
+
+        // usable HTTP endpoint는 Java 생성 경로가 없어도 외부 진입점이다.
+        // 명시적 deprecated/internal/test 필터를 통과한 뒤 JPMS export / 생성자·factory 휴리스틱만 우회한다.
+        if (semanticEntrySignals.hasUsableEndpoint(symbol.getSymbolId())) {
+            return false;
+        }
 
         if (!exportedPackages.isEmpty()) {
             String pkg = extractPackageName(qualifiedName);
             if (!exportedPackages.contains(pkg)) return true;
         }
-
-        if (isDeprecated(symbol)) return true;
 
         String typeKind = resolveTypeKind(symbol);
 
@@ -410,13 +513,20 @@ public class EntryPointDetectService {
                                         Map<String, Integer> annotationUsageCounts,
                                         FactsSignals factsSignals,
                                         Set<String> implementorSymbolIds,
-                                        ModuleRoleIndex moduleRoleIndex) {
+                                        ModuleRoleIndex moduleRoleIndex,
+                                        SemanticEntrySignals semanticEntrySignals) {
         // #6: 심볼의 근거 추출 완전성을 먼저 계산 (모든 반환 경로에서 사용)
         EntryPointCandidate.EvidenceCompleteness ec = buildEvidenceCompleteness(symbol, moduleRoleIndex);
 
         List<String> signals  = new ArrayList<>();
         String simpleName     = symbol.getSimpleName();
         String symbolId       = symbol.getSymbolId();
+        boolean highTrustEndpoint = semanticEntrySignals.hasHighTrustEndpoint(symbolId);
+        boolean usableEndpoint = semanticEntrySignals.hasUsableEndpoint(symbolId);
+
+        if (highTrustEndpoint) {
+            signals.add("HANDLES_ENDPOINT_RESOLVED");
+        }
 
         // Phase 1 — 문서 직접 언급 신호 (HIGH 즉시 확정)
         // P0-1: EXAMPLE_CODE_REFERENCE는 HIGH 승격 신호에서 제거. 예제 경로 심볼은 shouldExclude()에서 차단.
@@ -451,7 +561,9 @@ public class EntryPointDetectService {
             // #5: 어노테이션 타입은 Phase 1 HIGH 경로에서도 PRIMARY 강제
             if ("annotation".equals(resolveTypeKind(symbol))) role = "PRIMARY";
             // #6: javadoc·annotation 모두 미추출 → HIGH 승격 보류, MED 캡 + EVIDENCE_DEGRADED 신호
-            if (!ec.isJavadocAvailable() && !ec.isAnnotationsAvailable()) {
+            if (!highTrustEndpoint
+                    && !ec.isJavadocAvailable()
+                    && !ec.isAnnotationsAvailable()) {
                 signals.add("EVIDENCE_DEGRADED");
                 ec = ec.toBuilder().degraded(true).build();
                 return new PhaseResult("MED", role, signals, 10 + bonus, ec);
@@ -463,6 +575,11 @@ public class EntryPointDetectService {
         int score = phase2Score(symbolId, childMaps, signals)
                 + phase3Score(symbol, childMaps, signals)
                 + phase4Score(symbolId, returnedByPublicApi, signals);
+
+        if (usableEndpoint && !highTrustEndpoint) {
+            signals.add("HANDLES_ENDPOINT_INFERRED");
+            score += MED_MIN_SCORE;
+        }
 
         // #5: 어노테이션 타입 전용 신호 (constructor/factory 신호 부재 보완)
         score += phaseAnnotationScore(symbol, annotationUsageCounts, signals);
@@ -488,7 +605,8 @@ public class EntryPointDetectService {
             // 라이브러리 진입 신호(STATIC_FACTORY·NAMING_HIGH·PUBLISHED_LIBRARY_MODULE)가 없으면 NONE
             boolean hasSurvivorSignal = signals.contains("STATIC_FACTORY")
                     || signals.contains("NAMING_HIGH")
-                    || signals.contains("PUBLISHED_LIBRARY_MODULE");
+                    || signals.contains("PUBLISHED_LIBRARY_MODULE")
+                    || signals.contains("HANDLES_ENDPOINT_INFERRED");
             if (!hasSurvivorSignal) {
                 return new PhaseResult("NONE", null, signals, 0, ec);
             }
@@ -660,7 +778,9 @@ public class EntryPointDetectService {
                 || signals.contains("JAVADOC_ENTRY_POINT")
                 || signals.contains("NAMING_HIGH")
                 || signals.contains("FACADE_STRUCTURE")
-                || signals.contains("STATIC_FACTORY");
+                || signals.contains("STATIC_FACTORY")
+                || signals.contains("HANDLES_ENDPOINT_RESOLVED")
+                || signals.contains("HANDLES_ENDPOINT_INFERRED");
         return hasStrongEntrySignal ? "PRIMARY" : "SECONDARY";
     }
 
@@ -1059,19 +1179,47 @@ public class EntryPointDetectService {
      * static factory → public static → public instance 우선순위로 최대 MAX_ENTRY_METHODS개 반환.
      */
     private List<EntryPointCandidate.EntryMethodInfo> resolveEntryMethods(
-            String symbolId, ChildMaps childMaps) {
-        return childMaps.methodsByOwner()
-                .getOrDefault(symbolId, List.of())
-                .stream()
+            String symbolId,
+            ChildMaps childMaps,
+            SemanticEntrySignals semanticEntrySignals) {
+        List<SymbolEntity> allMethods = childMaps.methodsByOwner()
+                .getOrDefault(symbolId, List.of());
+        List<SymbolEntity> publicMethods = allMethods.stream()
                 .filter(m -> m.getAccess() == AccessLevel.PUBLIC)
+                .toList();
+
+        // Spring MVC handler는 Java access modifier와 무관하게 외부 HTTP 진입점이 될 수 있으므로
+        // semantic endpoint는 전체 member에서 찾고, 기존 일반 API 휴리스틱만 public으로 제한한다.
+        Map<String, SymbolEntity> byId = allMethods.stream()
+                .collect(Collectors.toMap(SymbolEntity::getSymbolId, m -> m, (left, right) -> left));
+        List<EntryPointCandidate.EntryMethodInfo> result = new ArrayList<>();
+        Set<String> included = new HashSet<>();
+
+        // HTTP endpoint는 실제 외부 진입 메서드이므로 일반 factory/static 휴리스틱보다 우선한다.
+        for (String methodId : semanticEntrySignals.endpointMethodIds(symbolId)) {
+            SymbolEntity method = byId.get(methodId);
+            if (method == null || !included.add(methodId)) continue;
+            result.add(EntryPointCandidate.EntryMethodInfo.builder()
+                    .symbolId(method.getSymbolId())
+                    .simpleName(method.getSimpleName())
+                    .reason("HTTP_ENDPOINT")
+                    .httpEndpoints(semanticEntrySignals.endpointInfos(method.getSymbolId()))
+                    .build());
+            if (result.size() >= MAX_ENTRY_METHODS) return List.copyOf(result);
+        }
+
+        publicMethods.stream()
+                .filter(m -> !included.contains(m.getSymbolId()))
                 .sorted(Comparator.comparingInt(this::entryMethodSeedPriority))
-                .limit(MAX_ENTRY_METHODS)
+                .limit(MAX_ENTRY_METHODS - result.size())
                 .map(m -> EntryPointCandidate.EntryMethodInfo.builder()
                         .symbolId(m.getSymbolId())
                         .simpleName(m.getSimpleName())
                         .reason(classifyEntryMethodReason(m))
                         .build())
-                .toList();
+                .forEach(result::add);
+
+        return List.copyOf(result);
     }
 
     private String classifyEntryMethodReason(SymbolEntity method) {
@@ -1112,6 +1260,31 @@ public class EntryPointDetectService {
             Map<String, List<SymbolEntity>> methodsByOwner,
             Map<String, String>             methodOwnerIndex
     ) {}
+
+    private record SemanticEntrySignals(
+            Set<String> usableOwnerIds,
+            Set<String> highTrustOwnerIds,
+            Map<String, List<String>> endpointMethodIdsByOwner,
+            Map<String, List<EntryPointCandidate.HttpEndpointInfo>> endpointInfosByMethodId
+    ) {
+        private boolean hasUsableEndpoint(String symbolId) {
+            return symbolId != null && usableOwnerIds.contains(symbolId);
+        }
+
+        private boolean hasHighTrustEndpoint(String symbolId) {
+            return symbolId != null && highTrustOwnerIds.contains(symbolId);
+        }
+
+        private List<String> endpointMethodIds(String symbolId) {
+            return symbolId == null ? List.of()
+                    : endpointMethodIdsByOwner.getOrDefault(symbolId, List.of());
+        }
+
+        private List<EntryPointCandidate.HttpEndpointInfo> endpointInfos(String methodId) {
+            return methodId == null ? List.of()
+                    : endpointInfosByMethodId.getOrDefault(methodId, List.of());
+        }
+    }
 
     private record FactsSignals(
             Set<String> readmeMentionedFqns,

@@ -1,5 +1,6 @@
 package com.example.ossdoc.domain.rule.dto.json;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import lombok.Builder;
 
 import java.math.BigDecimal;
@@ -18,6 +19,19 @@ public record RuleCandidateEvidenceJson(
         Integer startLine,
         Integer endLine,
         String snippet,
-        String note
+        String note,
+
+        String edgeType,
+        String edgeOrigin,
+        String edgeDerivationKind,
+        String edgeResolution,
+        String edgeResolutionReason,
+        BigDecimal edgeConfidence,
+        Integer edgeCallSiteLine,
+        Boolean edgeDefaultVisible,
+        JsonNode edgeAttrs,
+
+        BigDecimal signalConfidenceHint,
+        JsonNode signalMeta
 ) {
 }

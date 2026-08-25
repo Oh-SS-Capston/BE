@@ -1350,14 +1350,24 @@ public class LlmServiceBuildSupport {
     }
 
     /**
-     * 메서드 seed와 흐름/주의사항을 결합해 메서드 카드 문서를 생성한다.
+     * 메서드 seed와 흐름/주의사항/시나리오를 결합해
+     * 최종 메서드 카드 문서를 생성한다.
+     *
+     * 시나리오에 구체적인 실행 정보가 존재하면
+     * 기본 method guide보다 시나리오 정보를 우선해서 사용한다.
      */
-    public ArrayNode buildCoreMethodCards(JsonNode methodSeed, JsonNode flowSeed, JsonNode cautions, JsonNode scenarios) {
+    public ArrayNode buildCoreMethodCards(
+            JsonNode methodSeed,
+            JsonNode flowSeed,
+            JsonNode cautions,
+            JsonNode scenarios
+    ) {
         Map<String, List<String>> cautionByMethod = indexCautionsByMethod(cautions);
         Map<String, Integer> orderByMethod = indexMethodOrder(flowSeed);
         Map<String, JsonNode> scenarioStepByMethod = indexScenarioStepByMethod(scenarios);
 
         ArrayNode out = objectMapper.createArrayNode();
+
         if (!methodSeed.isArray()) {
             return out;
         }
@@ -1405,6 +1415,7 @@ public class LlmServiceBuildSupport {
             card.put("summaryNarrative", guideNarrative);
             card.put("summaryPreview", guideNarrative);
             card.put("summaryTruncated", false);
+
             card.put("whatItDoes", guideNarrative);
             card.put("whatItDoesPreview", guideNarrative);
             card.put("whatItDoesFull", guideNarrative);
@@ -1414,26 +1425,87 @@ public class LlmServiceBuildSupport {
             writeSlotEvidence(slotEvidence, guide.slotEvidence());
 
             attachUsageScenario(card, scenarioStep);
-            String signatureHint = seed.path("signatureHint").asText("");
-            // 오버로딩 구분용 표시 시그니처(메서드명 + 파라미터). fqn은 단순명을 유지한다.
-            card.put("displaySignature", signatureHint.isBlank() ? methodName + "()" : extractInputs(signatureHint));
-            card.put("inputs", extractInputs(signatureHint));
-            card.put("returns", extractReturns(signatureHint));
-            card.put("changesState", inferStateChange(methodName));
-            card.set("pairedWith", inferPairedMethods(methodName, methodSeed));
-            card.put("callOrderNotes", formatCallOrderNote(orderByMethod.get(fqn)));
-            card.set("cautions", toTextArray(methodCautions));
-            card.put("importance", seed.path("importance").asInt(0));
 
-            ObjectNode evidence = card.putObject("evidence");
-            putIfText(evidence, "filePath", seed.path("filePath").asText(""));
+            String signatureHint =
+                    seed.path("signatureHint").asText("");
+
+            /*
+             * 오버로딩 메서드를 화면에서 구분하기 위한 표시용 signature.
+             */
+            card.put(
+                    "displaySignature",
+                    signatureHint.isBlank()
+                            ? methodName + "()"
+                            : extractInputs(signatureHint)
+            );
+
+            card.put(
+                    "inputs",
+                    extractInputs(signatureHint)
+            );
+
+            card.put(
+                    "returns",
+                    extractReturns(signatureHint)
+            );
+
+            card.put(
+                    "changesState",
+                    inferStateChange(methodName)
+            );
+
+            card.set(
+                    "pairedWith",
+                    inferPairedMethods(
+                            methodName,
+                            methodSeed
+                    )
+            );
+
+            card.put(
+                    "callOrderNotes",
+                    formatCallOrderNote(
+                            orderByMethod.get(fqn)
+                    )
+            );
+
+            card.set(
+                    "cautions",
+                    toTextArray(methodCautions)
+            );
+
+            card.put(
+                    "importance",
+                    seed.path("importance").asInt(0)
+            );
+
+            /*
+             * 메서드 근거 파일 위치를 저장한다.
+             */
+            ObjectNode evidence =
+                    card.putObject("evidence");
+
+            putIfText(
+                    evidence,
+                    "filePath",
+                    seed.path("filePath").asText("")
+            );
+
             if (seed.path("startLine").canConvertToInt()) {
-                evidence.put("startLine", seed.path("startLine").asInt());
+                evidence.put(
+                        "startLine",
+                        seed.path("startLine").asInt()
+                );
             }
+
             if (seed.path("endLine").canConvertToInt()) {
-                evidence.put("endLine", seed.path("endLine").asInt());
+                evidence.put(
+                        "endLine",
+                        seed.path("endLine").asInt()
+                );
             }
         }
+
         return out;
     }
 
@@ -2439,6 +2511,12 @@ public class LlmServiceBuildSupport {
             summary.put("reachableCount", trace.path("reachableNodes").size());
             summary.put("maxDepth", trace.path("maxDepth").asInt(0));
             summary.put("truncated", trace.path("truncated").asBoolean(false));
+            FlowEdgeTrustStats trustStats = flowEdgeTrustStats(trace.path("reachableEdges"));
+            summary.put("trustedEdgeCount", trustStats.trustedCount());
+            summary.put("inferredEdgeCount", trustStats.inferredCount());
+            if (trustStats.minConfidence() != null) {
+                summary.put("minEdgeConfidence", trustStats.minConfidence());
+            }
 
             // 직접 호출되는 메서드 이름 (depth=1, 최대 5개)
             ArrayNode directCallees = summary.putArray("directCallees");
@@ -2504,6 +2582,12 @@ public class LlmServiceBuildSupport {
             flowRef.put("reachableCount", reachableCount);
             flowRef.put("maxDepth", maxDepth);
             flowRef.put("truncated", truncated);
+            FlowEdgeTrustStats trustStats = flowEdgeTrustStats(trace.path("reachableEdges"));
+            flowRef.put("trustedEdgeCount", trustStats.trustedCount());
+            flowRef.put("inferredEdgeCount", trustStats.inferredCount());
+            if (trustStats.minConfidence() != null) {
+                flowRef.put("minEdgeConfidence", trustStats.minConfidence());
+            }
 
             // directCallees (bfsDepth=1, 최대 5개)
             List<String> directCallees = new java.util.ArrayList<>();
@@ -2533,6 +2617,35 @@ public class LlmServiceBuildSupport {
         log.info("[LLM] flowTrace enrich: coreMethods={}, traces={}, matched={}, unmatched={}",
                 coreMethods.size(), apiFlowTraces.size(), matched, unmatched);
     }
+
+    /**
+     * API flow edge의 semantic trust 메타를 LLM용 요약 수치로 축약한다.
+     * 1.0 artifact처럼 메타가 없으면 confidence만으로 최대한 하위 호환한다.
+     */
+    private FlowEdgeTrustStats flowEdgeTrustStats(JsonNode edges) {
+        if (edges == null || !edges.isArray() || edges.isEmpty()) {
+            return new FlowEdgeTrustStats(0, 0, null);
+        }
+        int trusted = 0;
+        int inferred = 0;
+        Double minConfidence = null;
+        for (JsonNode edge : edges) {
+            double confidence = edge.path("confidence").isNumber()
+                    ? edge.path("confidence").asDouble(1.0d)
+                    : 1.0d;
+            minConfidence = minConfidence == null ? confidence : Math.min(minConfidence, confidence);
+            boolean defaultVisible = edge.path("defaultVisible").asBoolean(false);
+            String resolution = edge.path("resolution").asText("");
+            boolean highTrust = defaultVisible
+                    || ("RESOLVED".equalsIgnoreCase(resolution) && confidence >= 0.75d)
+                    || (resolution.isBlank() && confidence >= 0.75d);
+            if (highTrust) trusted++;
+            else inferred++;
+        }
+        return new FlowEdgeTrustStats(trusted, inferred, minConfidence);
+    }
+
+    private record FlowEdgeTrustStats(int trustedCount, int inferredCount, Double minConfidence) {}
 
     /**
      * API_FLOW_TRACE_JSON entryQualifiedName → TYPE FQN으로 정규화.

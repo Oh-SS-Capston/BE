@@ -98,6 +98,7 @@ import com.github.javaparser.symbolsolver.resolution.typesolvers.ReflectionTypeS
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.nio.charset.CharacterCodingException;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -132,6 +133,91 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
 
     private record ThrowAnalysis(List<TypeRef> uncheckedTypes, boolean hasConditional) {}
     private record HttpMapping(AnnotationExpr annotation, String annotationName, List<String> httpMethods, List<String> paths, List<String> consumes, List<String> produces, Map<String, String> rawAttributes, boolean pathDeclared, boolean pathResolved) {}
+    private record SourceText(String content, List<String> lines) {}
+    private record CallableBodyNodeIndex(
+            List<MethodCallExpr> methodCalls,
+            List<ObjectCreationExpr> objectCreations,
+            List<NameExpr> nameExpressions,
+            List<FieldAccessExpr> fieldAccesses
+    ) {
+
+        static CallableBodyNodeIndex from(CallableDeclaration<?> declaration) {
+            // callable 본문 relation 생성에 필요한 노드를 한 번의 AST walk로 모아
+            // CALLS/USES/field access 추출이 같은 subtree를 반복 순회하지 않게 한다.
+            List<MethodCallExpr> methodCalls = new ArrayList<>();
+            List<ObjectCreationExpr> objectCreations = new ArrayList<>();
+            List<NameExpr> nameExpressions = new ArrayList<>();
+            List<FieldAccessExpr> fieldAccesses = new ArrayList<>();
+
+            declaration.walk(node -> {
+                if (node instanceof MethodCallExpr methodCallExpr) {
+                    methodCalls.add(methodCallExpr);
+                }
+                if (node instanceof ObjectCreationExpr objectCreationExpr) {
+                    objectCreations.add(objectCreationExpr);
+                }
+                if (node instanceof NameExpr nameExpr) {
+                    nameExpressions.add(nameExpr);
+                }
+                if (node instanceof FieldAccessExpr fieldAccessExpr) {
+                    fieldAccesses.add(fieldAccessExpr);
+                }
+            });
+
+            return new CallableBodyNodeIndex(methodCalls, objectCreations, nameExpressions, fieldAccesses);
+        }
+    }
+
+    private record MethodBodyNodeIndex(
+            CallableBodyNodeIndex callableIndex,
+            List<ThrowStmt> throwStatements,
+            List<AssignExpr> assignments,
+            Set<String> localVariableNames
+    ) {
+
+        static MethodBodyNodeIndex from(MethodDeclaration method) {
+            // 메서드 본문은 relations/observations/rule signal에서 반복 사용되므로
+            // AST subtree를 기능별로 매번 다시 걷지 않고 한 번 만든 지역 인덱스를 재사용한다.
+            List<MethodCallExpr> methodCalls = new ArrayList<>();
+            List<ObjectCreationExpr> objectCreations = new ArrayList<>();
+            List<NameExpr> nameExpressions = new ArrayList<>();
+            List<FieldAccessExpr> fieldAccesses = new ArrayList<>();
+            List<ThrowStmt> throwStatements = new ArrayList<>();
+            List<AssignExpr> assignments = new ArrayList<>();
+            Set<String> localVariableNames = new LinkedHashSet<>();
+
+            method.walk(node -> {
+                if (node instanceof MethodCallExpr methodCallExpr) {
+                    methodCalls.add(methodCallExpr);
+                }
+                if (node instanceof ObjectCreationExpr objectCreationExpr) {
+                    objectCreations.add(objectCreationExpr);
+                }
+                if (node instanceof NameExpr nameExpr) {
+                    nameExpressions.add(nameExpr);
+                }
+                if (node instanceof FieldAccessExpr fieldAccessExpr) {
+                    fieldAccesses.add(fieldAccessExpr);
+                }
+                if (node instanceof ThrowStmt throwStmt) {
+                    throwStatements.add(throwStmt);
+                }
+                if (node instanceof AssignExpr assignExpr) {
+                    assignments.add(assignExpr);
+                }
+                if (node instanceof VariableDeclarator variableDeclarator) {
+                    localVariableNames.add(variableDeclarator.getNameAsString());
+                }
+            });
+
+            return new MethodBodyNodeIndex(
+                    new CallableBodyNodeIndex(methodCalls, objectCreations, nameExpressions, fieldAccesses),
+                    throwStatements,
+                    assignments,
+                    localVariableNames
+            );
+        }
+    }
 
     private boolean hasAnnotationAttribute(
             AnnotationExpr annotation,
@@ -157,6 +243,11 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
 
     @Override
     public ChunkResult extract(ExtractionContext context) {
+        return extract(context, new ExtractionRunCache());
+    }
+
+    @Override
+    public ChunkResult extract(ExtractionContext context, ExtractionRunCache runCache) {
         ExtractionSink sink = new ExtractionSink();
 
         if (!context.isAstChunk()) {
@@ -169,11 +260,13 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             return sink.toChunkResult(context.chunk());
         }
 
-        ParserConfiguration parserConfiguration = parserConfiguration(context, sink);
+        ParserConfiguration parserConfiguration = parserConfiguration(context, sink, runCache);
         JavaParser parser = new JavaParser(parserConfiguration);
 
         for (Path javaFile : context.files()) {
-            if (javaFile == null || !Files.exists(javaFile) || !Files.isRegularFile(javaFile)) {
+            if (javaFile == null || !Files.isRegularFile(javaFile)) {
+                // Files.isRegularFile은 존재하지 않는 파일도 false로 처리하므로
+                // exists + isRegularFile 중복 stat 호출 없이 기존 skip 정책을 유지한다.
                 sink.addWarning("source file does not exist or is not a regular file: " + javaFile);
                 sink.recordFileSkipped();
                 continue;
@@ -188,7 +281,22 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         return sink.toChunkResult(context.chunk());
     }
 
-    private ParserConfiguration parserConfiguration(ExtractionContext context, ExtractionSink sink) {
+    private ParserConfiguration parserConfiguration(
+            ExtractionContext context,
+            ExtractionSink sink,
+            ExtractionRunCache runCache
+    ) {
+        ExtractionRunCache safeRunCache = runCache == null ? new ExtractionRunCache() : runCache;
+        ExtractionRunCache.AstParserConfigurationKey key =
+                ExtractionRunCache.AstParserConfigurationKey.from(
+                        context.module(),
+                        context.astLookupRoots(),
+                        context.classpathEntries()
+                );
+        return safeRunCache.astParserConfiguration(key, ignored -> buildParserConfiguration(context, sink));
+    }
+
+    private ParserConfiguration buildParserConfiguration(ExtractionContext context, ExtractionSink sink) {
         ParserConfiguration configuration = new ParserConfiguration()
                 .setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
                 .setAttributeComments(false);
@@ -218,14 +326,14 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         }
 
         for (Path classpathEntry : context.classpathEntries()) {
-            if (classpathEntry == null || !Files.exists(classpathEntry)) {
+            if (!isJarPath(classpathEntry)) {
                 continue;
             }
 
             try {
-                if (Files.isRegularFile(classpathEntry)
-                        && classpathEntry.getFileName() != null
-                        && classpathEntry.getFileName().toString().endsWith(".jar")) {
+                // classpath에는 디렉터리/비 JAR 항목도 섞일 수 있으므로
+                // 문자열 suffix로 먼저 거른 뒤 실제 파일 여부만 확인해 불필요한 파일시스템 조회를 줄인다.
+                if (Files.isRegularFile(classpathEntry)) {
                     solver.add(new JarTypeSolver(classpathEntry.toString()));
                 }
             } catch (Exception e) {
@@ -238,12 +346,21 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         return solver;
     }
 
+    private boolean isJarPath(Path path) {
+        return path != null
+                && path.getFileName() != null
+                && path.getFileName().toString().endsWith(".jar");
+    }
+
     private void parseFile(ExtractionContext context, JavaParser parser, Path javaFile, ExtractionSink sink) {
         String relativePath = RepoPathUtils.toRepoRelative(context.repoRoot(), javaFile);
         sink.recordFileScanned();
 
         try {
-            ParseResult<CompilationUnit> parseResult = parser.parse(javaFile);
+            SourceText sourceText = readSourceText(javaFile, sink);
+            // 파일 내용은 한 번만 읽고 JavaParser 입력과 evidence snippet/Javadoc 추출에 같이 쓴다.
+            // 기존에는 parser.parse(Path)와 readAllLines가 각각 파일을 읽어 큰 repo에서 I/O와 디코딩 비용이 중복됐다.
+            ParseResult<CompilationUnit> parseResult = parser.parse(sourceText.content());
             if (parseResult.getResult().isEmpty()) {
                 String problems = parseResult.getProblems().stream()
                         .map(problem -> problem.getVerboseMessage())
@@ -253,8 +370,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             }
 
             sink.recordFileParsed();
-            List<String> sourceLines = readSourceLines(javaFile, sink);
-            processCompilationUnit(context, relativePath, parseResult.getResult().orElseThrow(), sourceLines, sink);
+            processCompilationUnit(context, relativePath, parseResult.getResult().orElseThrow(), sourceText.lines(), sink);
         } catch (ParseProblemException | IOException e) {
             sink.addError("failed to parse source file: " + relativePath + " (" + e.getMessage() + ")");
         }
@@ -555,7 +671,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         sink.addSymbol(fact);
 
         addAnnotationRelations(constructorSymbol, declaration.getAnnotations(), annotationRefs, relativePath, sourceLines, evidence.id(), sink);
-        addCallableBodyRelations(declaration, constructorSymbol, relativePath, sourceLines, evidence.id(), sink);
+        addCallableBodyRelations(CallableBodyNodeIndex.from(declaration), constructorSymbol, relativePath, sourceLines, evidence.id(), sink);
         addConstructorObservationsIfNeeded(
                 context,
                 declaration,
@@ -584,8 +700,9 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         List<TypeRef> annotationRefs = annotationTypeRefs(declaration.getAnnotations(), sink);
         sink.addEvidence(evidence);
 
-        ThrowAnalysis throwAnalysis = analyzeThrows(declaration, sink);
-        List<StateMutation> mutations = analyzeMutations(declaration);
+        MethodBodyNodeIndex bodyIndex = MethodBodyNodeIndex.from(declaration);
+        ThrowAnalysis throwAnalysis = analyzeThrows(declaration, bodyIndex, sink);
+        List<StateMutation> mutations = analyzeMutations(declaration, bodyIndex);
 
         SymbolFact fact = SymbolFact.builder()
                 .symbol(methodSymbol)
@@ -609,21 +726,21 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         sink.addSymbol(fact);
 
         addAnnotationRelations(methodSymbol, declaration.getAnnotations(), annotationRefs, relativePath, sourceLines, evidence.id(), sink);
-        addCallableBodyRelations(declaration, methodSymbol, relativePath, sourceLines, evidence.id(), sink);
-        addMethodObservationsIfNeeded(context, ownerTypeDeclaration, declaration, methodSymbol, relativePath, sourceLines, evidence.id(), sink);
+        addCallableBodyRelations(bodyIndex.callableIndex(), methodSymbol, relativePath, sourceLines, evidence.id(), sink);
+        addMethodObservationsIfNeeded(context, ownerTypeDeclaration, declaration, bodyIndex, methodSymbol, relativePath, sourceLines, evidence.id(), sink);
         addOverridesRelationIfPresent(declaration, methodSymbol, declaration.getNameAsString(), signature, evidence.id(), sink);
 
         if (isExampleFile(relativePath)) {
-            collectExampleTypeRefs(relativePath, declaration, sink);
+            collectExampleTypeRefs(relativePath, bodyIndex.callableIndex(), sink);
         }
     }
 
     private void collectExampleTypeRefs(
             String relativePath,
-            MethodDeclaration declaration,
+            CallableBodyNodeIndex bodyIndex,
             ExtractionSink sink
     ) {
-        declaration.findAll(ObjectCreationExpr.class).forEach(expr -> {
+        bodyIndex.objectCreations().forEach(expr -> {
             try {
                 String fqcn = expr.getType().resolve().asReferenceType().getQualifiedName();
                 if (!isStandardLibrary(fqcn)) {
@@ -641,7 +758,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             }
         });
 
-        declaration.findAll(MethodCallExpr.class).forEach(call -> {
+        bodyIndex.methodCalls().forEach(call -> {
             call.getScope().ifPresent(scope -> {
                 try {
                     ResolvedType resolved = scope.calculateResolvedType();
@@ -742,14 +859,14 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
     }
 
     private void addCallableBodyRelations(
-            CallableDeclaration<?> declaration,
+            CallableBodyNodeIndex bodyIndex,
             String callableSymbol,
             String relativePath,
             List<String> sourceLines,
             String callableEvidenceId,
             ExtractionSink sink
     ) {
-        declaration.findAll(MethodCallExpr.class)
+        bodyIndex.methodCalls()
                 .forEach(methodCallExpr ->
                         addMethodCallRelation(
                                 callableSymbol,
@@ -761,7 +878,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                         )
                 );
 
-        declaration.findAll(ObjectCreationExpr.class)
+        bodyIndex.objectCreations()
                 .forEach(objectCreationExpr ->
                         addObjectCreationRelation(
                                 callableSymbol,
@@ -773,7 +890,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                         )
                 );
 
-        declaration.findAll(NameExpr.class)
+        bodyIndex.nameExpressions()
                 .forEach(nameExpr ->
                         addFieldAccessRelation(
                                 callableSymbol,
@@ -785,7 +902,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                         )
                 );
 
-        declaration.findAll(FieldAccessExpr.class)
+        bodyIndex.fieldAccesses()
                 .forEach(fieldAccessExpr ->
                         addFieldAccessRelation(
                                 callableSymbol,
@@ -2495,6 +2612,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             ExtractionContext context,
             TypeDeclaration<?> ownerTypeDeclaration,
             MethodDeclaration declaration,
+            MethodBodyNodeIndex bodyIndex,
             String methodSymbol,
             String relativePath,
             List<String> sourceLines,
@@ -2713,7 +2831,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             );
         }
 
-        declaration.findAll(MethodCallExpr.class)
+        bodyIndex.callableIndex().methodCalls()
                 .forEach(call -> {
                     if (isPublishEventCall(call)) {
                         sink.addObservation(
@@ -2857,6 +2975,29 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                         );
                     }
                 });
+    }
+
+    private void addMethodObservationsIfNeeded(
+            ExtractionContext context,
+            TypeDeclaration<?> ownerTypeDeclaration,
+            MethodDeclaration declaration,
+            String methodSymbol,
+            String relativePath,
+            List<String> sourceLines,
+            String evidenceId,
+            ExtractionSink sink
+    ) {
+        addMethodObservationsIfNeeded(
+                context,
+                ownerTypeDeclaration,
+                declaration,
+                MethodBodyNodeIndex.from(declaration),
+                methodSymbol,
+                relativePath,
+                sourceLines,
+                evidenceId,
+                sink
+        );
     }
 
     /**
@@ -3361,7 +3502,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         }).toList();
     }
 
-    private ThrowAnalysis analyzeThrows(MethodDeclaration method, ExtractionSink sink) {
+    private ThrowAnalysis analyzeThrows(MethodDeclaration method, MethodBodyNodeIndex bodyIndex, ExtractionSink sink) {
         if (method.getBody().isEmpty()) {
             return new ThrowAnalysis(null, false);
         }
@@ -3374,7 +3515,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         List<TypeRef> unchecked = new ArrayList<>();
         boolean[] hasConditional = {false};
 
-        method.findAll(ThrowStmt.class).forEach(throwStmt -> {
+        bodyIndex.throwStatements().forEach(throwStmt -> {
             if (throwStmt.getExpression() instanceof ObjectCreationExpr oce) {
                 unchecked.add(toTypeRef(oce.getType(), sink));
                 if (isInsideConditional(throwStmt)) {
@@ -3389,7 +3530,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         );
     }
 
-    private List<StateMutation> analyzeMutations(MethodDeclaration method) {
+    private List<StateMutation> analyzeMutations(MethodDeclaration method, MethodBodyNodeIndex bodyIndex) {
         if (method.getBody().isEmpty()) {
             return null;
         }
@@ -3402,13 +3543,13 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         List<StateMutation> mutations = new ArrayList<>();
         int[] seqIdx = {0};
 
-        method.findAll(AssignExpr.class).forEach(assign -> {
+        bodyIndex.assignments().forEach(assign -> {
             if (mutations.size() >= 20) return;
             String target = null;
             if (assign.getTarget() instanceof FieldAccessExpr fae) {
                 target = fae.toString();
             } else if (assign.getTarget() instanceof NameExpr ne) {
-                if (isFieldReference(ne, method)) {
+                if (isFieldReference(ne, method, bodyIndex)) {
                     target = "this." + ne.getNameAsString();
                 }
             }
@@ -3422,7 +3563,7 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
             }
         });
 
-        method.findAll(MethodCallExpr.class).forEach(call -> {
+        bodyIndex.callableIndex().methodCalls().forEach(call -> {
             if (mutations.size() >= 20) return;
             String name = call.getNameAsString();
             if (MUTATING_EXACT.contains(name) || MUTATING_PREFIX.matcher(name).matches()) {
@@ -3451,17 +3592,15 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
         return false;
     }
 
-    private boolean isFieldReference(NameExpr ne, MethodDeclaration method) {
+    private boolean isFieldReference(NameExpr ne, MethodDeclaration method, MethodBodyNodeIndex bodyIndex) {
         String name = ne.getNameAsString();
 
         for (Parameter param : method.getParameters()) {
             if (param.getNameAsString().equals(name)) return false;
         }
 
-        if (method.getBody().isPresent()) {
-            for (VariableDeclarator vd : method.getBody().get().findAll(VariableDeclarator.class)) {
-                if (vd.getNameAsString().equals(name)) return false;
-            }
+        if (bodyIndex.localVariableNames().contains(name)) {
+            return false;
         }
 
         return true;
@@ -3623,29 +3762,35 @@ public class JavaParserAstFactsExtractor implements FactsExtractor {
                 .build();
     }
 
-    private List<String> readSourceLines(Path javaFile, ExtractionSink sink) {
+    private SourceText readSourceText(Path javaFile, ExtractionSink sink) throws IOException {
+        byte[] bytes = Files.readAllBytes(javaFile);
         try {
-            return Files.readAllLines(javaFile, StandardCharsets.UTF_8);
-        } catch (IOException e) {
+            String content = StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(bytes))
+                    .toString();
+            return new SourceText(content, sourceLines(content));
+        } catch (CharacterCodingException e) {
             // UTF-8 strict decode failed (non-UTF-8 bytes in comments or string literals).
             // JavaParser uses CodingErrorAction.REPLACE internally and succeeds on the same file.
-            // Re-read leniently so invalid bytes become replacement chars rather than producing
-            // an empty sourceLines list that silently drops all snippet and Javadoc output.
-            try {
-                byte[] bytes = Files.readAllBytes(javaFile);
-                String content = StandardCharsets.UTF_8.newDecoder()
-                        .onMalformedInput(CodingErrorAction.REPLACE)
-                        .onUnmappableCharacter(CodingErrorAction.REPLACE)
-                        .decode(ByteBuffer.wrap(bytes))
-                        .toString();
-                sink.addWarning("source file contains non-UTF-8 bytes; snippet/javadoc extraction used lenient decoding: "
-                        + javaFile.getFileName());
-                return content.lines().collect(Collectors.toList());
-            } catch (IOException e2) {
-                sink.addWarning("failed to read source lines for snippet/javadoc extraction: " + javaFile.getFileName());
-                return List.of();
-            }
+            // 이미 읽은 byte 배열을 lenient decode해 재사용하므로 실패 파일도 추가 I/O 없이 snippet을 보존한다.
+            String content = StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPLACE)
+                    .onUnmappableCharacter(CodingErrorAction.REPLACE)
+                    .decode(ByteBuffer.wrap(bytes))
+                    .toString();
+            sink.addWarning("source file contains non-UTF-8 bytes; snippet/javadoc extraction used lenient decoding: "
+                    + javaFile.getFileName());
+            return new SourceText(content, sourceLines(content));
         }
+    }
+
+    private List<String> sourceLines(String content) {
+        if (content == null || content.isEmpty()) {
+            return List.of();
+        }
+        return content.lines().collect(Collectors.toList());
     }
 
     private String readSnippetFromLines(List<String> sourceLines, Integer startLine, Integer endLine) {

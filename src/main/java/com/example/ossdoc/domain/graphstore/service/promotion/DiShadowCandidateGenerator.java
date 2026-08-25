@@ -52,6 +52,18 @@ public final class DiShadowCandidateGenerator {
                     0, List.of(), List.of()
             );
         }
+        return generate(ShadowFactsIndex.from(facts), objectMapper);
+    }
+
+    public static ObservationPromotionCandidateGenerationResult generate(
+            ShadowFactsIndex factsIndex,
+            ObjectMapper objectMapper
+    ) {
+        if (factsIndex == null) {
+            return new ObservationPromotionCandidateGenerationResult(
+                    0, List.of(), List.of()
+            );
+        }
 
         ObjectMapper mapper = objectMapper == null
                 ? new ObjectMapper().findAndRegisterModules()
@@ -63,9 +75,9 @@ public final class DiShadowCandidateGenerator {
                 new RelationConfidencePolicy();
 
         List<NormalizedObservationFact> observations =
-                facts.observations() == null ? List.of() : facts.observations();
+                factsIndex.observations();
         Map<String, NormalizedSymbolFact> symbols =
-                symbolIndex(facts.symbols());
+                factsIndex.symbolsById();
         List<ProviderCandidate> providers =
                 providerCandidates(observations, symbols, mapper);
 

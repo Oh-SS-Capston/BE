@@ -1409,8 +1409,25 @@ public class LlmInputAssemblerBuildSupport {
                         item.path("simple_name").asText(""),
                         extractSimpleName(node.path("fqn").asText(""))
                 ));
-                node.put("reason", firstNonBlank(item.path("reason").asText(""), "확장 가능 지점"));
-                node.put("confidenceSource", firstNonBlank(item.path("confidenceSource").asText(""), "문서"));
+                JsonNode semanticRelations = firstArray(item, "semantic_relations", "semanticRelations");
+                JsonNode signals = firstArray(item, "signals");
+                String semanticReason = extensionSemanticReason(semanticRelations, signals);
+                node.put("reason", firstNonBlank(
+                        item.path("reason").asText(""),
+                        semanticReason,
+                        "확장 가능 지점"
+                ));
+                node.put("confidenceSource", firstNonBlank(
+                        item.path("confidenceSource").asText(""),
+                        semanticRelations.isArray() && !semanticRelations.isEmpty() ? "의미그래프" : "구조"
+                ));
+                putIfText(node, "confidence", item.path("confidence").asText(""));
+                if (signals.isArray() && !signals.isEmpty()) {
+                    node.set("signals", signals);
+                }
+                if (semanticRelations.isArray() && !semanticRelations.isEmpty()) {
+                    node.set("semanticRelations", semanticRelations);
+                }
                 putIfText(node, "filePath", firstNonBlank(item.path("filePath").asText(""), item.path("file_path").asText("")));
             }
         }
@@ -1456,6 +1473,32 @@ public class LlmInputAssemblerBuildSupport {
         }
 
         return out;
+    }
+
+    private String extensionSemanticReason(JsonNode semanticRelations, JsonNode signals) {
+        if (semanticRelations != null && semanticRelations.isArray()) {
+            for (JsonNode relation : semanticRelations) {
+                String edgeType = firstNonBlank(
+                        relation.path("edge_type").asText(""),
+                        relation.path("edgeType").asText("")
+                ).toUpperCase(Locale.ROOT);
+                if ("PROVIDES_SPI".equals(edgeType)) {
+                    return "SPI provider 등록으로 확인된 확장 지점";
+                }
+                if ("LOADS_SERVICE".equals(edgeType)) {
+                    return "ServiceLoader 사용으로 확인된 확장 지점";
+                }
+            }
+        }
+        if (signals != null && signals.isArray()) {
+            for (JsonNode signal : signals) {
+                String value = signal.asText("").toUpperCase(Locale.ROOT);
+                if (value.startsWith("SPI_RELATION")) {
+                    return "SPI 의미 관계로 확인된 확장 지점";
+                }
+            }
+        }
+        return "";
     }
 
     private String resolveExtensionReasonByName(String className) {
@@ -1722,6 +1765,32 @@ public class LlmInputAssemblerBuildSupport {
                             || "BYTECODE".equalsIgnoreCase(evidence.path("evidenceType").asText(""));
                     if (!isBytecodeEvidence) {
                         putIfText(node, "snippet", trimSnippet(evidence.path("snippet").asText("")));
+                    }
+
+                    // semantic graph relation metadata를 최종 LLM evidenceIndex까지 전달한다.
+                    // rule_candidates 1.4 이전 artifact에는 필드가 없으므로 모두 선택적으로 복사한다.
+                    putIfText(node, "edgeType", evidence.path("edgeType").asText(""));
+                    putIfText(node, "edgeOrigin", evidence.path("edgeOrigin").asText(""));
+                    putIfText(node, "edgeDerivationKind", evidence.path("edgeDerivationKind").asText(""));
+                    putIfText(node, "edgeResolution", evidence.path("edgeResolution").asText(""));
+                    putIfText(node, "edgeResolutionReason", evidence.path("edgeResolutionReason").asText(""));
+                    if (evidence.path("edgeConfidence").isNumber()) {
+                        node.set("edgeConfidence", evidence.path("edgeConfidence"));
+                    }
+                    if (evidence.path("edgeCallSiteLine").canConvertToInt()) {
+                        node.put("edgeCallSiteLine", evidence.path("edgeCallSiteLine").asInt());
+                    }
+                    if (evidence.path("edgeDefaultVisible").isBoolean()) {
+                        node.put("edgeDefaultVisible", evidence.path("edgeDefaultVisible").asBoolean());
+                    }
+                    if (!evidence.path("edgeAttrs").isMissingNode() && !evidence.path("edgeAttrs").isNull()) {
+                        node.set("edgeAttrs", evidence.path("edgeAttrs"));
+                    }
+                    if (evidence.path("signalConfidenceHint").isNumber()) {
+                        node.set("signalConfidenceHint", evidence.path("signalConfidenceHint"));
+                    }
+                    if (!evidence.path("signalMeta").isMissingNode() && !evidence.path("signalMeta").isNull()) {
+                        node.set("signalMeta", evidence.path("signalMeta"));
                     }
                 }
             }
@@ -2017,6 +2086,7 @@ public class LlmInputAssemblerBuildSupport {
                 int importance = baseImportance + roleBoost + confidenceBoost
                         + entryMethodReasonBoost(em.path("reason").asText(""))
                         + methodHeuristicBonus(methodName);
+                HttpEndpointSeed endpointSeed = resolveHttpEndpointSeed(em);
 
                 String seedKey = methodSeedKey(methodFqn, symbolId);
                 CoreMethodSeed prev = byFqn.get(seedKey);
@@ -2030,8 +2100,15 @@ public class LlmInputAssemblerBuildSupport {
                         firstNonBlank(prev == null ? "" : prev.filePath(), ownerSourceFile),
                         importance,
                         prev == null ? "" : prev.signatureHint(),
-                        "",  // 위와 같은 이유로 빈 칸.
-                        inferScenarioHint(methodName),
+                        // endpointSeed는 HANDLES_ENDPOINT 엣지(HTTP 메서드 + 경로)에서 나온 근거 기반 문장이다.
+                        // 이름 패턴 추측이 아니라 그래프에 실재하는 엣지를 옮긴 것이므로 근거 채널인
+                        // summarySeed에 실어도 된다. 다만 inferMethodUsage 폴백은 되살리지 않는다.
+                        // 빈 값은 그대로 빈 칸으로 둔다 - normalizeSummarySeed는 빈 입력에
+                        // "핵심 동작을 수행합니다."(FILLER_EXACT 등재)를 채워 넣으므로 통과시키지 않는다.
+                        endpointSeed.summarySeed().isBlank()
+                                ? ""
+                                : normalizeSummarySeed(endpointSeed.summarySeed()),
+                        firstNonBlank(endpointSeed.scenarioHint(), inferScenarioHint(methodName)),
                         prev == null ? null : prev.startLine(),
                         prev == null ? null : prev.endLine()
                 );
@@ -2048,11 +2125,60 @@ public class LlmInputAssemblerBuildSupport {
     private int entryMethodReasonBoost(String reason) {
         String normalized = safeText(reason).toUpperCase(Locale.ROOT);
         return switch (normalized) {
+            case "HTTP_ENDPOINT" -> 5;
             case "STATIC_FACTORY", "PUBLIC_CONSTRUCTOR" -> 4;
             case "PUBLIC_STATIC" -> 2;
             case "PUBLIC_INSTANCE" -> 1;
             default -> 0;
         };
+    }
+
+    /**
+     * entry_method에 연결된 HANDLES_ENDPOINT 메타데이터를 LLM용 메서드 시드로 축약한다.
+     * 가장 신뢰도가 높은 endpoint 하나를 대표값으로 선택하되, 원본 endpoint 목록은 api_map에 그대로 유지한다.
+     */
+    private HttpEndpointSeed resolveHttpEndpointSeed(JsonNode entryMethod) {
+        JsonNode endpoints = firstArray(entryMethod, "http_endpoints", "httpEndpoints");
+        if (!endpoints.isArray() || endpoints.isEmpty()) {
+            return HttpEndpointSeed.EMPTY;
+        }
+
+        JsonNode best = null;
+        double bestConfidence = -1.0d;
+        for (JsonNode endpoint : endpoints) {
+            double confidence = endpoint.path("confidence").isNumber()
+                    ? endpoint.path("confidence").asDouble(0.0d)
+                    : 0.0d;
+            if (best == null || confidence > bestConfidence) {
+                best = endpoint;
+                bestConfidence = confidence;
+            }
+        }
+        if (best == null) {
+            return HttpEndpointSeed.EMPTY;
+        }
+
+        String httpMethod = safeText(firstNonBlank(
+                best.path("http_method").asText(""),
+                best.path("httpMethod").asText("")
+        )).toUpperCase(Locale.ROOT);
+        String path = safeText(best.path("path").asText(""));
+        String endpointLabel = (httpMethod + " " + path).trim();
+        if (endpointLabel.isBlank()) {
+            // 엔드포인트는 있는데 HTTP 메서드/경로가 둘 다 비면 남는 것은 "HTTP 진입점이다"뿐이다.
+            // 참이지만 정보량이 0인 문장이고, summarySeed는 프롬프트가 근거로 못 박는 채널이라
+            // 같은 문장이 여러 메서드에 복제되면 모델이 그것을 근거 삼아 서술을 부풀린다.
+            // 근거가 없으면 비운다는 PROMPT_SCENARIO_ONE 규칙에 맞춰 빈 시드로 떨어뜨린다.
+            return HttpEndpointSeed.EMPTY;
+        }
+        return new HttpEndpointSeed(
+                "HTTP " + endpointLabel + " 요청을 처리하는 외부 API 진입 메서드입니다.",
+                "HTTP " + endpointLabel + " 요청 처리"
+        );
+    }
+
+    private record HttpEndpointSeed(String summarySeed, String scenarioHint) {
+        private static final HttpEndpointSeed EMPTY = new HttpEndpointSeed("", "");
     }
 
     /**

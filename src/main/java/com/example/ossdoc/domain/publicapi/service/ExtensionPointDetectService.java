@@ -10,6 +10,7 @@ import com.example.ossdoc.domain.graphstore.enums.EdgeType;
 import com.example.ossdoc.domain.graphstore.enums.SymbolKind;
 import com.example.ossdoc.domain.graphstore.repository.EdgeRepository;
 import com.example.ossdoc.domain.graphstore.repository.SymbolRepository;
+import com.example.ossdoc.domain.graphstore.support.EdgeInferencePolicy;
 import com.example.ossdoc.domain.publicapi.model.ExtensionPointCandidate;
 import com.example.ossdoc.domain.publicapi.support.PublicSymbolFilter;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -92,6 +93,7 @@ public class ExtensionPointDetectService {
     private final SymbolRepository symbolRepository;
     private final EdgeRepository edgeRepository;
     private final ArtifactRepository artifactRepository;
+    private final EdgeInferencePolicy edgeInferencePolicy;
 
     public List<ExtensionPointCandidate> detect(String runId) {
         List<SymbolEntity> allSymbols = symbolRepository.findAllByRun_RunId(runId);
@@ -111,8 +113,9 @@ public class ExtensionPointDetectService {
         Map<String, Integer> registrationParamCounts =
                 countRegistrationParams(runId, publicSymbolIds, childMaps.methodOwnerIndex());
 
-        // Phase 1 신호 소스: FACTS_JSON 아티팩트
+        // Phase 1 신호 소스: 기존 FACTS_JSON + resolver가 승격한 SPI semantic edge
         FactsSignals factsSignals = loadFactsSignals(runId, allSymbols);
+        SemanticExtensionSignals semanticSignals = loadSemanticExtensionSignals(runId);
 
         SubsystemMaps subsystemMaps = loadSubsystemMaps(runId);
 
@@ -125,11 +128,11 @@ public class ExtensionPointDetectService {
             int implementorCount = implementorCounts.getOrDefault(symbol.getSymbolId(), 0);
             int extenderCount    = extenderCounts.getOrDefault(symbol.getSymbolId(), 0);
 
-            if (shouldExclude(symbol, implementorCount, registrationParamCounts)) continue;
+            if (shouldExclude(symbol, implementorCount, registrationParamCounts, semanticSignals)) continue;
 
             PhaseResult result = evaluatePhases(
                     symbol, implementorCount, extenderCount,
-                    registrationParamCounts, factsSignals);
+                    registrationParamCounts, factsSignals, semanticSignals);
             if ("NONE".equals(result.confidence())) continue;
 
             String subsystemId    = subsystemMaps.memberToSubsystem().get(symbol.getSymbolId());
@@ -153,6 +156,7 @@ public class ExtensionPointDetectService {
                     .linkedExtenderCount(extenderCount)
                     .confidence(result.confidence())
                     .signals(List.copyOf(result.signals()))
+                    .semanticRelations(semanticSignals.relations(symbol.getSymbolId()))
                     .score(result.score())
                     .build());
         }
@@ -197,9 +201,56 @@ public class ExtensionPointDetectService {
                 .findAllByRun_RunIdAndEdgeTypeAndToSymbolIsNotNull(runId, edgeType);
         Map<String, Integer> counts = new HashMap<>();
         for (Edge edge : edges) {
+            if (!edgeInferencePolicy.isUsableForInference(edge) || edge.getToSymbol() == null) continue;
             counts.merge(edge.getToSymbol().getSymbolId(), 1, Integer::sum);
         }
         return counts;
+    }
+
+    /**
+     * Observation resolver가 승격한 SPI 관계를 확장점 판정 신호로 변환한다.
+     * PROVIDES_SPI / LOADS_SERVICE의 target service type이 확장 계약 후보가 된다.
+     */
+    private SemanticExtensionSignals loadSemanticExtensionSignals(String runId) {
+        List<Edge> edges = edgeRepository.findAllByRun_RunIdAndEdgeTypeIn(
+                runId, List.of(EdgeType.PROVIDES_SPI, EdgeType.LOADS_SERVICE));
+
+        Set<String> usableTargetIds = new HashSet<>();
+        Set<String> highTrustTargetIds = new HashSet<>();
+        Map<String, List<ExtensionPointCandidate.SemanticRelationInfo>> relationInfosByTarget = new HashMap<>();
+        for (Edge edge : edges) {
+            if (!edgeInferencePolicy.isUsableForInference(edge) || edge.getToSymbol() == null) continue;
+            String targetId = edge.getToSymbol().getSymbolId();
+            if (targetId == null) continue;
+            usableTargetIds.add(targetId);
+            if (edgeInferencePolicy.isHighTrust(edge)) {
+                highTrustTargetIds.add(targetId);
+            }
+            relationInfosByTarget
+                    .computeIfAbsent(targetId, ignored -> new ArrayList<>())
+                    .add(toSemanticRelationInfo(edge));
+        }
+
+        Map<String, List<ExtensionPointCandidate.SemanticRelationInfo>> immutableRelations = new HashMap<>();
+        relationInfosByTarget.forEach((targetId, infos) -> immutableRelations.put(targetId, List.copyOf(infos)));
+        return new SemanticExtensionSignals(
+                Set.copyOf(usableTargetIds),
+                Set.copyOf(highTrustTargetIds),
+                Map.copyOf(immutableRelations));
+    }
+
+    private ExtensionPointCandidate.SemanticRelationInfo toSemanticRelationInfo(Edge edge) {
+        return ExtensionPointCandidate.SemanticRelationInfo.builder()
+                .edgeType(edge.getEdgeType() == null ? null : edge.getEdgeType().name())
+                .sourceSymbolId(edge.getFromSymbol() == null ? null : edge.getFromSymbol().getSymbolId())
+                .confidence(edge.getConfidence() == null ? null : edge.getConfidence().doubleValue())
+                .resolution(edge.getResolution() == null ? null : edge.getResolution().name())
+                .resolutionReason(edge.getResolutionReason())
+                .origin(edge.getOrigin() == null ? null : edge.getOrigin().name())
+                .derivationKind(edge.getDerivationKind() == null ? null : edge.getDerivationKind().name())
+                .defaultVisible(edgeInferencePolicy.defaultVisible(edge))
+                .attrs(edge.getAttrs())
+                .build();
     }
 
     /**
@@ -216,6 +267,7 @@ public class ExtensionPointDetectService {
 
         Map<String, Integer> counts = new HashMap<>();
         for (Edge edge : paramEdges) {
+            if (!edgeInferencePolicy.isUsableForInference(edge) || edge.getToSymbol() == null) continue;
             String methodId   = edge.getFromSymbol().getSymbolId();
             String ownerSymId = methodOwnerIndex.get(methodId);
             if (ownerSymId == null || !publicSymbolIds.contains(ownerSymId)) continue;
@@ -352,7 +404,8 @@ public class ExtensionPointDetectService {
      */
     private boolean shouldExclude(SymbolEntity symbol,
                                    int implementorCount,
-                                   Map<String, Integer> registrationParamCounts) {
+                                   Map<String, Integer> registrationParamCounts,
+                                   SemanticExtensionSignals semanticSignals) {
         String qualifiedName = symbol.getQualifiedName();
 
         if (hasExcludedPackageSegment(qualifiedName)) return true;
@@ -363,7 +416,8 @@ public class ExtensionPointDetectService {
 
         // 구현체 1개뿐이고 외부 주입 경로도 없으면 내부 계층 분리용으로 판단
         if (implementorCount == 1
-                && registrationParamCounts.getOrDefault(symbol.getSymbolId(), 0) == 0) {
+                && registrationParamCounts.getOrDefault(symbol.getSymbolId(), 0) == 0
+                && !semanticSignals.hasUsableSpiRelation(symbol.getSymbolId())) {
             return true;
         }
 
@@ -376,12 +430,16 @@ public class ExtensionPointDetectService {
                                         int implementorCount,
                                         int extenderCount,
                                         Map<String, Integer> registrationParamCounts,
-                                        FactsSignals factsSignals) {
+                                        FactsSignals factsSignals,
+                                        SemanticExtensionSignals semanticSignals) {
         List<String> signals = new ArrayList<>();
         String symbolId      = symbol.getSymbolId();
         String qualifiedName = symbol.getQualifiedName();
 
         // Phase 1 — 명시적 선언 신호 (HIGH 즉시)
+        if (semanticSignals.hasHighTrustSpiRelation(symbolId)) {
+            signals.add("SPI_RELATION_RESOLVED");
+        }
         if (factsSignals.spiQualifiedNames().contains(qualifiedName)) {
             signals.add("SPI_DECLARED");
         }
@@ -399,6 +457,11 @@ public class ExtensionPointDetectService {
         int score = phase2Score(symbol, signals)
                 + phase3Score(symbol, signals)
                 + phase4Score(symbol, registrationParamCounts, factsSignals, signals);
+
+        if (semanticSignals.hasUsableSpiRelation(symbolId)) {
+            signals.add("SPI_RELATION_INFERRED");
+            score += MED_MIN_SCORE;
+        }
 
         // IMPLEMENTS/EXTENDS 인바운드 존재 자체는 보조 신호 (점수 없이 근거만 기록)
         if (implementorCount >= 2) signals.add("MULTI_IMPLEMENTOR");
@@ -672,6 +735,25 @@ public class ExtensionPointDetectService {
             Map<String, List<SymbolEntity>> methodsByOwner,
             Map<String, String>             methodOwnerIndex
     ) {}
+
+    private record SemanticExtensionSignals(
+            Set<String> usableTargetIds,
+            Set<String> highTrustTargetIds,
+            Map<String, List<ExtensionPointCandidate.SemanticRelationInfo>> relationsByTarget
+    ) {
+        private boolean hasUsableSpiRelation(String symbolId) {
+            return symbolId != null && usableTargetIds.contains(symbolId);
+        }
+
+        private boolean hasHighTrustSpiRelation(String symbolId) {
+            return symbolId != null && highTrustTargetIds.contains(symbolId);
+        }
+
+        private List<ExtensionPointCandidate.SemanticRelationInfo> relations(String symbolId) {
+            if (symbolId == null) return List.of();
+            return relationsByTarget.getOrDefault(symbolId, List.of());
+        }
+    }
 
     private record FactsSignals(
             Set<String> spiQualifiedNames,

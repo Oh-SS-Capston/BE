@@ -827,4 +827,40 @@ class LlmServiceBuildSupportTest {
         assertThat(normalized.path("scenarios").get(0).path("steps").get(0).path("description").asText())
                 .contains("DiscoverySelector");
     }
+
+    @Test
+    void buildApiFlowSummary_exposesSemanticEdgeTrustStats() throws Exception {
+        JsonNode traces = objectMapper.readTree("""
+                [{
+                  "entryName": "OrderController",
+                  "entryQualifiedName": "org.acme.OrderController",
+                  "exposure": "PRIMARY",
+                  "reachableNodes": [
+                    {"name":"OrderController","bfsDepth":0},
+                    {"name":"OrderService","bfsDepth":1}
+                  ],
+                  "reachableEdges": [
+                    {
+                      "confidence": 0.93,
+                      "resolution": "RESOLVED",
+                      "defaultVisible": true
+                    },
+                    {
+                      "confidence": 0.61,
+                      "resolution": "PARTIAL",
+                      "defaultVisible": false
+                    }
+                  ],
+                  "maxDepth": 1,
+                  "truncated": false
+                }]
+                """);
+
+        JsonNode summary = support.buildApiFlowSummary(traces, 10).get(0);
+
+        assertThat(summary.path("trustedEdgeCount").asInt()).isEqualTo(1);
+        assertThat(summary.path("inferredEdgeCount").asInt()).isEqualTo(1);
+        assertThat(summary.path("minEdgeConfidence").asDouble()).isEqualTo(0.61d);
+    }
+
 }

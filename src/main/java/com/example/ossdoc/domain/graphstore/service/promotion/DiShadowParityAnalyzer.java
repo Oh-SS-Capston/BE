@@ -12,11 +12,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * DI GraphStore shadow 후보와 Extraction INJECTS Relation을
@@ -34,29 +34,27 @@ public final class DiShadowParityAnalyzer {
             ObservationPromotionCandidateGenerationResult generated,
             ObjectMapper objectMapper
     ) {
+        return compare(ShadowFactsIndex.from(facts), generated, objectMapper);
+    }
+
+    public static ObservationPromotionCandidateParityReport compare(
+            ShadowFactsIndex factsIndex,
+            ObservationPromotionCandidateGenerationResult generated,
+            ObjectMapper objectMapper
+    ) {
         ObjectMapper mapper = objectMapper == null
                 ? new ObjectMapper().findAndRegisterModules()
                 : objectMapper;
 
-        List<NormalizedRelationFact> allRelations =
-                facts == null || facts.relations() == null
-                        ? List.of()
-                        : facts.relations();
-
+        ShadowFactsIndex safeIndex = factsIndex == null
+                ? ShadowFactsIndex.from(null)
+                : factsIndex;
+        // 공통 relation 인덱스를 재사용해 parity 단계의 전체 relations 반복 순회를 줄인다.
+        // 성능 최적화: relationByKeyForKinds가 이미 remove 가능한 새 Map을 반환하므로 추가 복사를 생략한다.
+        // DI parity의 누락/불일치 판정은 유지하면서 중간 Map 복사 비용만 제거한다.
         Map<String, NormalizedRelationFact> extractionByKey =
-                new LinkedHashMap<>();
-
-        for (NormalizedRelationFact relation : allRelations) {
-            if (relation == null
-                    || !TARGET_KIND.equals(normalizeCode(relation.kind()))) {
-                continue;
-            }
-
-            extractionByKey.put(
-                    ObservationPromotionShadowCandidate.relationKey(relation),
-                    relation
-            );
-        }
+                safeIndex.relationByKeyForKinds(Set.of(TARGET_KIND));
+        int extractionCount = extractionByKey.size();
 
         List<ObservationPromotionShadowCandidate> candidates =
                 generated == null
@@ -118,14 +116,6 @@ public final class DiShadowParityAnalyzer {
                     )
             ));
         }
-
-        int extractionCount = (int) allRelations.stream()
-                .filter(Objects::nonNull)
-                .filter(relation ->
-                        TARGET_KIND.equals(normalizeCode(relation.kind())))
-                .map(ObservationPromotionShadowCandidate::relationKey)
-                .distinct()
-                .count();
 
         return new ObservationPromotionCandidateParityReport(
                 candidates.size(),
