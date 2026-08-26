@@ -1,5 +1,6 @@
 package com.example.ossdoc.global.llm.service.support;
 
+import com.example.ossdoc.global.llm.config.LlmGenerationProperties;
 import com.example.ossdoc.global.llm.model.CoreMethodSeed;
 import com.example.ossdoc.global.llm.model.CoreTypeSeed;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -14,7 +15,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 class LlmInputAssemblerBuildSupportSemanticEdgeTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
-    private final LlmInputAssemblerBuildSupport support = new LlmInputAssemblerBuildSupport(objectMapper);
+    private final LlmInputAssemblerBuildSupport support =
+            new LlmInputAssemblerBuildSupport(objectMapper, new LlmGenerationProperties());
 
     @Test
     void extractCoreMethods_usesHttpEndpointAsMethodSeed() throws Exception {

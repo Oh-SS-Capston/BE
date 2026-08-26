@@ -70,6 +70,20 @@ public class AnalysisCache extends BaseAuditedEntity {
     private String sourceRunId;
 
     /**
+     * 이 캐시 번들을 만든 LLM 제공자 이름입니다(OLLAMA/CLAUDE).
+     *
+     * 왜 캐시 행에 두는가:
+     * - DB 폴백 조회는 cacheKey가 아니라 repo/commit으로 찾습니다. 그래서 키에 provider를
+     *   넣는 것만으로는 "claude 요청에 ollama 결과가 나가는" 재사용을 막지 못합니다.
+     *   조회 조건으로 쓰려면 repoUrlNorm/commitSha와 같은 층위로 비정규화해 두어야 합니다.
+     *
+     * nullable인 이유:
+     * - 이 컬럼 이전에 쌓인 캐시 행이 있습니다. 조회 시 설정 기본 제공자로 간주해 계속 재사용합니다.
+     */
+    @Column(name = "llm_provider", length = 20)
+    private String llmProvider;
+
+    /**
      * 결과 산출물 포인터 묶음(JSON)입니다.
      * 예: artifact kind별 artifactId/path/url 메타.
      */
@@ -109,6 +123,14 @@ public class AnalysisCache extends BaseAuditedEntity {
         this.commitSha = commitSha;
         this.status = AnalysisCacheStatus.IN_PROGRESS;
         this.hitCount = 0L;
+    }
+
+    /**
+     * 이 캐시 행이 어느 제공자의 산출물인지 기록합니다.
+     * markReady/markFailed와 무관하게 upsert 시점에 항상 최신 값으로 맞춥니다.
+     */
+    public void assignLlmProvider(String llmProvider) {
+        this.llmProvider = llmProvider;
     }
 
     /**

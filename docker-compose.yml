@@ -21,6 +21,42 @@ services:
       retries: 10
       start_period: 10s
 
+  # LLM 단계(ossdoc.llm.provider=ollama)가 쓰는 로컬 모델 서버.
+  #
+  # 포트를 호스트에 노출하지 않는다. 앱은 compose 네트워크에서 http://ollama:11434로 닿고,
+  # 개발 머신에는 이미 native ollama가 11434를 쓰고 있는 경우가 많아 노출하면 바인드가 충돌한다.
+  # 외부에서 직접 붙어야 하면 OLLAMA_PUBLISH_PORT를 정하고 아래 ports 주석을 푼다.
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ossdoc-ollama
+    restart: unless-stopped
+    # ports:
+    #   - "${OLLAMA_PUBLISH_PORT:-11435}:11434"
+    volumes:
+      - ossdoc_ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  # 모델을 한 번 받아두는 1회성 서비스. 이미 있으면 매니페스트만 확인하고 즉시 끝난다.
+  #
+  # 별도 서비스로 둔 이유: ollama 이미지는 모델을 자동으로 받지 않아서, 앱이 먼저 뜨면
+  # 첫 run의 LLM 단계가 "model not found"로 실패한다. app이 이 서비스의 완료를 기다리게 해
+  # 그 창을 없앤다. qwen3.5:9b는 6.6GB라 최초 1회는 수 분이 걸린다.
+  ollama-model-init:
+    image: ollama/ollama:latest
+    container_name: ossdoc-ollama-model-init
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c", "ollama pull ${OLLAMA_MODEL:-qwen3.5:9b}"]
+    restart: "no"
+
   app:
     build:
       context: .
@@ -31,6 +67,11 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      ollama:
+        condition: service_healthy
+      # 모델을 다 받은 뒤에 앱이 뜬다. 첫 run의 LLM 단계가 model not found로 죽는 것을 막는다.
+      ollama-model-init:
+        condition: service_completed_successfully
     env_file:
       - path: .env.app
         required: false
@@ -42,6 +83,9 @@ services:
       SPRING_PROFILES_ACTIVE: prod
       REDIS_HOST: redis
       REDIS_PORT: 6379
+      # 컨테이너 안에서 localhost는 앱 자신이라 기본값(localhost:11434)으로는 닿지 않는다.
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3.5:9b}
       OSSDOC_WORKSPACE_BASE_DIR: /workspace
       MAVEN_COMMAND: /usr/bin/mvn
       GRADLE_COMMAND: /usr/bin/gradle
@@ -62,3 +106,5 @@ services:
 volumes:
   ossdoc_redis_data:
   ossdoc_workspace:
+  # 받은 모델을 담는다. 이게 없으면 컨테이너를 다시 만들 때마다 6.6GB를 다시 받는다.
+  ossdoc_ollama_data:

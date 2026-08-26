@@ -14,6 +14,7 @@ import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
+import org.springframework.data.domain.Persistable;
 
 @Entity
 @Table(
@@ -22,8 +23,7 @@ import org.hibernate.type.SqlTypes;
 )
 @Getter
 @NoArgsConstructor(access = lombok.AccessLevel.PROTECTED)
-@AllArgsConstructor
-public class SymbolEntity extends BaseAuditedEntity {
+public class SymbolEntity extends BaseAuditedEntity implements Persistable<String> {
 
     @Id
     @Column(name = "symbol_id", nullable = false)
@@ -89,6 +89,75 @@ public class SymbolEntity extends BaseAuditedEntity {
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "annotations", columnDefinition = "jsonb")
     private JsonNode annotations = JsonNodeFactory.instance.arrayNode();
+
+    /*
+     * symbolId는 애플리케이션이 부여하는 값이라 Spring Data의 기본 판별(id == null)로는
+     * 신규 여부를 알 수 없어 save()가 항상 merge()로 동작한다.
+     * merge()는 관리 사본을 반환하므로 저장에 넘긴 원본 인스턴스는 detached 상태로 남고,
+     * GraphStoreIngestService가 저장 이후에 수행하는 owner/source span 연결이 유실된다.
+     *
+     * 신규 여부를 이 플래그로 직접 알려 persist() 경로를 타게 한다.
+     * 조회(@PostLoad)와 저장(@PostPersist) 직후에는 더 이상 신규가 아니므로 false로 뒤집는다.
+     */
+    @Transient
+    @Getter(lombok.AccessLevel.NONE)
+    private boolean newEntity = true;
+
+    public SymbolEntity(
+            String symbolId,
+            RepoRun run,
+            ModuleEntity module,
+            SymbolKind symbolKind,
+            String qualifiedName,
+            String simpleName,
+            AccessLevel access,
+            JsonNode modifiers,
+            SymbolEntity owner,
+            JsonNode signature,
+            FileIndex sourceFile,
+            Integer sourceStartLine,
+            Integer sourceEndLine,
+            OriginKind origin,
+            String typeKind,
+            String sourceRoot,
+            String docComment,
+            JsonNode annotations
+    ) {
+        this.symbolId = symbolId;
+        this.run = run;
+        this.module = module;
+        this.symbolKind = symbolKind;
+        this.qualifiedName = qualifiedName;
+        this.simpleName = simpleName;
+        this.access = access;
+        this.modifiers = modifiers;
+        this.owner = owner;
+        this.signature = signature;
+        this.sourceFile = sourceFile;
+        this.sourceStartLine = sourceStartLine;
+        this.sourceEndLine = sourceEndLine;
+        this.origin = origin;
+        this.typeKind = typeKind;
+        this.sourceRoot = sourceRoot;
+        this.docComment = docComment;
+        this.annotations = annotations;
+    }
+
+    @Override
+    public String getId() {
+        return symbolId;
+    }
+
+    @Override
+    public boolean isNew() {
+        return newEntity;
+    }
+
+    @PostLoad
+    @PostPersist
+    private void markNotNew() {
+        this.newEntity = false;
+    }
 
     public void assignOwner(SymbolEntity owner) {
         this.owner = owner;

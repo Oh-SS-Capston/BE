@@ -8,6 +8,10 @@ import com.example.ossdoc.domain.run.cache.repository.AnalysisCacheRepository;
 import com.example.ossdoc.domain.run.cache.support.AnalysisCacheRedisKeyPolicy;
 import com.example.ossdoc.domain.run.cache.support.AnalysisCacheRedisStore;
 import com.example.ossdoc.global.properties.AnalysisCacheProperties;
+import com.example.ossdoc.global.llm.enums.LlmProvider;
+import com.example.ossdoc.global.llm.service.support.LlmChatClient;
+import com.example.ossdoc.global.llm.service.support.LlmChatClientResolver;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -15,6 +19,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -45,7 +50,8 @@ class AnalysisCacheLookupServiceTest {
                 analysisCacheRepository,
                 keyPolicy,
                 redisStore,
-                new ObjectMapper()
+                new ObjectMapper(),
+                new LlmChatClientResolver(List.of(new StubOllamaChatClient()), "ollama")
         );
     }
 
@@ -62,7 +68,8 @@ class AnalysisCacheLookupServiceTest {
         AnalysisCacheLookupResult result = lookupService.lookupReady(
                 cacheKey,
                 "github://apache/commons-cli",
-                "e717fd63"
+                "e717fd63",
+                "OLLAMA"
         );
 
         assertThat(result.hit()).isTrue();
@@ -70,7 +77,7 @@ class AnalysisCacheLookupServiceTest {
         assertThat(result.reason()).isEqualTo("REDIS_HIT_DB_CONFIRMED");
         assertThat(ready.getHitCount()).isEqualTo(1L);
         verify(analysisCacheRepository, never())
-                .findLatestByRepoAndCommitAndStatus(any(), any(), any());
+                .findLatestByRepoAndCommitAndProviderAndStatus(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -82,16 +89,19 @@ class AnalysisCacheLookupServiceTest {
                 .thenReturn(Optional.of("{\"cacheKey\":\"cache-key-input\",\"sourceRunId\":\"run_old\"}"));
         when(analysisCacheRepository.findByKeyAndStatus(inputCacheKey, AnalysisCacheStatus.READY))
                 .thenReturn(Optional.empty());
-        when(analysisCacheRepository.findLatestByRepoAndCommitAndStatus(
+        when(analysisCacheRepository.findLatestByRepoAndCommitAndProviderAndStatus(
                 "github://apache/commons-cli",
                 "e717fd63",
-                AnalysisCacheStatus.READY
+                AnalysisCacheStatus.READY,
+                "OLLAMA",
+                "OLLAMA"
         )).thenReturn(Optional.of(dbReady));
 
         AnalysisCacheLookupResult result = lookupService.lookupReady(
                 inputCacheKey,
                 "github://apache/commons-cli",
-                "e717fd63"
+                "e717fd63",
+                "OLLAMA"
         );
 
         assertThat(result.hit()).isTrue();
@@ -108,16 +118,19 @@ class AnalysisCacheLookupServiceTest {
 
         when(redisStore.get("analysis:ready:" + cacheKey))
                 .thenReturn(Optional.empty());
-        when(analysisCacheRepository.findLatestByRepoAndCommitAndStatus(
+        when(analysisCacheRepository.findLatestByRepoAndCommitAndProviderAndStatus(
                 "github://apache/commons-cli",
                 "e717fd63",
-                AnalysisCacheStatus.READY
+                AnalysisCacheStatus.READY,
+                "OLLAMA",
+                "OLLAMA"
         )).thenReturn(Optional.empty());
 
         AnalysisCacheLookupResult result = lookupService.lookupReady(
                 cacheKey,
                 "github://apache/commons-cli",
-                "e717fd63"
+                "e717fd63",
+                "OLLAMA"
         );
 
         assertThat(result.hit()).isFalse();
@@ -195,6 +208,24 @@ class AnalysisCacheLookupServiceTest {
                 java.time.LocalDateTime.now().plusMinutes(minutesOffset)
         );
         return cache;
+    }
+
+    /** provider 축만 통과시키기 위한 스텁. 실제 LLM 호출은 이 테스트 범위가 아니다. */
+    private record StubOllamaChatClient() implements LlmChatClient {
+        @Override
+        public String resolvePrimaryModel() {
+            return "stub-model";
+        }
+
+        @Override
+        public LlmProvider provider() {
+            return LlmProvider.OLLAMA;
+        }
+
+        @Override
+        public JsonNode call(String stepName, String systemPrompt, String userMessage, int maxTokens) {
+            throw new UnsupportedOperationException("stub");
+        }
     }
 }
 

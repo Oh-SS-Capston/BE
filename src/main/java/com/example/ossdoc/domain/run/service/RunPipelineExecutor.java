@@ -56,6 +56,9 @@ import java.util.concurrent.atomic.AtomicReference;
  *
  * 필수 단계 실패: FAILED
  * 선택 단계 실패: PARTIAL_SUCCESS
+ *
+ * LLM 단계는 로컬 모델(ossdoc.llm.provider=ollama)로 파이프라인 끝에 이어붙어 있습니다.
+ * ossdoc.llm.enabled=false로 두면 이전처럼 SKIPPED로만 기록하고 RULE까지만 진행합니다.
  */
 @Slf4j
 @Service
@@ -277,13 +280,21 @@ public class RunPipelineExecutor {
             );
 
             /*
-             * LLM 단계는 외부 API 토큰과 비용에 의존합니다.
-             * 기능 검증 환경에서는 설정으로 끌 수 있고, RULE이 실패한 경우에도 입력 전제가 깨졌으므로 SKIPPED 처리합니다.
+             * LLM 단계는 provider 설정에 따라 로컬 모델(ollama) 또는 외부 API(claude)를 씁니다.
+             * 어느 쪽이든 모델이 준비되지 않은 환경에서는 설정으로 끌 수 있고,
+             * RULE이 실패한 경우에도 입력 전제가 깨졌으므로 SKIPPED 처리합니다.
              */
             if (!llmEnabled) {
                 /*
                  * 대표 라이선스/구조 분석만 검증할 때 외부 LLM 토큰 없이도 파이프라인을 마무리하기 위한 분기입니다.
                  * 실패가 아니라 의도적인 비활성화이므로 LLM 단계는 SKIPPED로 남깁니다.
+                 *
+                 * LLM은 선택 단계이므로 optionalFailures에 넣지 않습니다.
+                 * 따라서 최종 상태(SUCCESS / PARTIAL_SUCCESS) 판정에는 영향이 없습니다.
+                 * 다만 LLM 산출물 5종이 생성되지 않으므로
+                 * AnalysisCachePublishService.REQUIRED_READY_ARTIFACT_KINDS 조건을 만족하지 못해
+                 * READY 캐시가 발행되지 않습니다. 비활성화 기간에는 동일 repo/commit 재요청도
+                 * 캐시 miss로 전체 재분석됩니다. (의도된 동작)
                  */
                 stepService.skipStep(
                         jobId,
@@ -303,7 +314,16 @@ public class RunPipelineExecutor {
                                         null,
                                         null,
                                         true,
-                                        true
+                                        true,
+                                        /*
+                                         * 제공자는 run이 만들어질 때 확정돼 저장돼 있습니다.
+                                         * job.getRun()은 지연 로딩 프록시라 이 스레드에서 초기화가 보장되지 않으므로,
+                                         * 저장소에서 다시 읽어 값을 꺼냅니다.
+                                         */
+                                        repoRunRepository.findById(runId)
+                                                .map(RepoRun::getLlmProvider)
+                                                .map(Enum::name)
+                                                .orElse(null)
                                 )
                         )
                 );
@@ -580,6 +600,7 @@ public class RunPipelineExecutor {
                 .promptTemplateVersion(analysisCacheProperties.getPromptTemplateVersion())
                 .outputSchemaVersion(analysisCacheProperties.getOutputSchemaVersion())
                 .runOptionsSignature(analysisCacheProperties.getDefaultRunOptionsSignature())
+                .llmProvider(run.getLlmProvider() == null ? null : run.getLlmProvider().name())
                 .build();
         return runAnalysisCacheKeyFactory.buildKey(seed);
     }

@@ -25,6 +25,7 @@ public class RunPipelineWorker {
     private final RunPipelineQueueService queueService;
     private final RunPipelineExecutor executor;
     private final RunCacheWaitResolveService cacheWaitResolveService;
+    private final RunPipelineJobLockHeartbeat lockHeartbeat;
 
     @Value("${ossdoc.pipeline.worker.max-jobs-per-tick:1}")
     private int maxJobsPerTick;
@@ -54,7 +55,15 @@ public class RunPipelineWorker {
                     job.getRun().getRunId()
             );
 
-            executor.execute(job.getJobId());
+            /*
+             * lock(30분)보다 오래 걸리는 단계(LLM)가 있으므로 실행 내내 lock을 연장합니다.
+             * 연장이 없으면 만료된 lock을 다른 인스턴스가 집어가 같은 job을 중복 실행합니다.
+             */
+            lockHeartbeat.runWithHeartbeat(
+                    job.getJobId(),
+                    workerId,
+                    () -> executor.execute(job.getJobId())
+            );
         }
     }
 

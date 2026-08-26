@@ -18,6 +18,9 @@ import com.example.ossdoc.domain.run.repository.RunPipelineJobRepository;
 import com.example.ossdoc.domain.run.repository.RunPipelineStepExecutionRepository;
 import com.example.ossdoc.domain.run.support.GithubClient;
 import com.example.ossdoc.domain.run.support.RunAnalysisCacheKeyFactory;
+import com.example.ossdoc.global.llm.enums.LlmProvider;
+import com.example.ossdoc.global.llm.service.support.LlmChatClient;
+import com.example.ossdoc.global.llm.service.support.LlmChatClientResolver;
 import com.example.ossdoc.domain.run.support.WorkspaceManager;
 import com.example.ossdoc.domain.user.entity.User;
 import com.example.ossdoc.domain.user.enums.AuthProvider;
@@ -96,7 +99,8 @@ class RepoRunServiceTest {
                 runPipelineJobRepository,
                 runPipelineStepExecutionRepository,
                 artifactRepository,
-                tokenService
+                tokenService,
+                new LlmChatClientResolver(List.of(new StubOllamaChatClient()), "ollama")
         );
 
         lenient().when(analysisCacheLookupService.lookupFailedCooldown(any(), any(), any()))
@@ -124,7 +128,7 @@ class RepoRunServiceTest {
 
         when(userRepository.findById(userId)).thenReturn(Optional.of(owner));
         when(githubClient.resolveCommitSha("apache", "commons-cli", "master")).thenReturn("e717fd63");
-        when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63")))
+        when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63"), any()))
                 .thenReturn(AnalysisCacheLookupResult.hit("cache-key-1", "run_cached_001", "REDIS_HIT_DB_CONFIRMED"));
         when(repoRunRepository.findOwnedRun("run_cached_001", userId))
                 .thenReturn(Optional.of(cachedRun));
@@ -166,7 +170,7 @@ class RepoRunServiceTest {
 
         when(userRepository.findById(userId)).thenReturn(Optional.of(requester));
         when(githubClient.resolveCommitSha("apache", "commons-cli", "master")).thenReturn("e717fd63");
-        when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63")))
+        when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63"), any()))
                 .thenReturn(AnalysisCacheLookupResult.hit("cache-key-1", "run_source_001", "REDIS_HIT_DB_CONFIRMED"));
         when(repoRunRepository.findOwnedRun("run_source_001", userId))
                 .thenReturn(Optional.empty());
@@ -218,7 +222,7 @@ class RepoRunServiceTest {
 
         when(userRepository.findById(userId)).thenReturn(Optional.of(requester));
         when(githubClient.resolveCommitSha("apache", "commons-cli", "master")).thenReturn("e717fd63");
-        when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63")))
+        when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63"), any()))
                 .thenReturn(AnalysisCacheLookupResult.hit("cache-key-1", "run_source_partial_001", "REDIS_HIT_DB_CONFIRMED"));
         when(repoRunRepository.findOwnedRun("run_source_partial_001", userId))
                 .thenReturn(Optional.empty());
@@ -248,7 +252,7 @@ class RepoRunServiceTest {
 
         when(userRepository.findById(userId)).thenReturn(Optional.of(owner));
         when(githubClient.resolveCommitSha("apache", "commons-cli", "master")).thenReturn("e717fd63");
-        when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63")))
+        when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63"), any()))
                 .thenReturn(AnalysisCacheLookupResult.miss("CACHE_MISS"));
         when(analysisCacheLockService.tryAcquire(any(), any())).thenReturn(true);
         when(workspaceManager.workspaceRoot(any())).thenReturn(Path.of("C:/data/ossdoc/run_new_001"));
@@ -287,7 +291,7 @@ class RepoRunServiceTest {
 
         when(userRepository.findById(userId)).thenReturn(Optional.of(owner));
         when(githubClient.resolveCommitSha("apache", "commons-cli", "master")).thenReturn("e717fd63");
-        when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63")))
+        when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63"), any()))
                 .thenReturn(AnalysisCacheLookupResult.miss("CACHE_MISS"));
         when(analysisCacheLockService.tryAcquire(any(), any())).thenReturn(false);
         when(runPipelineJobRepository.findActiveJobsByRepoAndSha(
@@ -327,7 +331,7 @@ class RepoRunServiceTest {
 
         when(userRepository.findById(userId)).thenReturn(Optional.of(requester));
         when(githubClient.resolveCommitSha("apache", "commons-cli", "master")).thenReturn("e717fd63");
-        when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63")))
+        when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63"), any()))
                 .thenReturn(AnalysisCacheLookupResult.miss("CACHE_MISS"));
         when(analysisCacheLockService.tryAcquire(any(), any())).thenReturn(false);
         when(runPipelineJobRepository.findActiveJobsByRepoAndSha(
@@ -381,7 +385,7 @@ class RepoRunServiceTest {
 
         when(userRepository.findById(userId)).thenReturn(Optional.of(requester));
         when(githubClient.resolveCommitSha("apache", "commons-cli", "master")).thenReturn("e717fd63");
-        when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63")))
+        when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63"), any()))
                 .thenReturn(AnalysisCacheLookupResult.miss("CACHE_MISS"));
         when(analysisCacheLockService.tryAcquire(any(), any())).thenReturn(false);
         when(runPipelineJobRepository.findActiveJobsByRepoAndSha(
@@ -426,7 +430,7 @@ class RepoRunServiceTest {
 
         when(userRepository.findById(userId)).thenReturn(Optional.of(requester));
         when(githubClient.resolveCommitSha("apache", "commons-cli", "master")).thenReturn("e717fd63");
-        when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63")))
+        when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63"), any()))
                 .thenReturn(AnalysisCacheLookupResult.miss("CACHE_MISS"));
         when(analysisCacheLookupService.lookupFailedCooldown(any(), eq("github://apache/commons-cli"), eq("e717fd63")))
                 .thenReturn(AnalysisCacheFailedCooldownResult.active(
@@ -471,7 +475,7 @@ class RepoRunServiceTest {
 
         when(userRepository.findById(userId)).thenReturn(Optional.of(requester));
         when(githubClient.resolveCommitSha("apache", "commons-cli", "master")).thenReturn("e717fd63");
-        when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63")))
+        when(analysisCacheLookupService.lookupReady(any(), eq("github://apache/commons-cli"), eq("e717fd63"), any()))
                 .thenReturn(AnalysisCacheLookupResult.miss("CACHE_MISS"));
         when(analysisCacheLookupService.lookupFailedCooldown(any(), eq("github://apache/commons-cli"), eq("e717fd63")))
                 .thenReturn(AnalysisCacheFailedCooldownResult.active(
@@ -511,7 +515,7 @@ class RepoRunServiceTest {
 
         assertThat(response.isCacheHit()).isFalse();
         assertThat(response.getRunId()).startsWith("run_");
-        verify(analysisCacheLookupService, never()).lookupReady(any(), any(), any());
+        verify(analysisCacheLookupService, never()).lookupReady(any(), any(), any(), any());
         verify(analysisCacheLookupService, never()).lookupFailedCooldown(any(), any(), any());
         verify(repoRunRepository).save(any(RepoRun.class));
         verify(pipelineQueueService).enqueue(any(RepoRun.class), eq(userId));
@@ -553,5 +557,27 @@ class RepoRunServiceTest {
         return job;
     }
 
+
+    /**
+     * provider 확정 경로만 통과시키기 위한 스텁이다.
+     * 이 테스트는 캐시/토큰 흐름을 보는 것이라 실제 LLM 호출은 일어나지 않는다.
+     */
+    private static class StubOllamaChatClient implements LlmChatClient {
+        @Override
+        public String resolvePrimaryModel() {
+            return "stub-model";
+        }
+
+        @Override
+        public LlmProvider provider() {
+            return LlmProvider.OLLAMA;
+        }
+
+        @Override
+        public com.fasterxml.jackson.databind.JsonNode call(
+                String stepName, String systemPrompt, String userMessage, int maxTokens) {
+            throw new UnsupportedOperationException("stub");
+        }
+    }
 }
 

@@ -108,6 +108,48 @@ class BytecodeAnnotationEvidenceFactoryTest {
         );
     }
 
+    /**
+     * PostgreSQL의 text/jsonb는 U+0000을 저장할 수 없다(SQLState 22P05).
+     * bytecode 어노테이션 값에는 실제로 NUL이 들어오므로(@kotlin.Metadata 등)
+     * snippet과 attrs.values 양쪽에서 제거돼야 artifact 저장이 실패하지 않는다.
+     */
+    @Test
+    @DisplayName("어노테이션 값의 NUL 문자를 snippet과 attrs 양쪽에서 제거한다")
+    void stripsNulCharactersFromSnippetAndAttrs() {
+        Map<String, Object> values = new LinkedHashMap<>();
+        values.put("d1", List.of("\0head", "tail\0"));
+        values.put("d2", "plain\0value");
+
+        EvidenceFact evidence =
+                BytecodeAnnotationEvidenceFactory.create(
+                        "build/classes/kotlin/main/sample/SampleKt.class",
+                        "sample-app",
+                        "type:sample.SampleKt",
+                        "Lkotlin/Metadata;",
+                        "kotlin.Metadata",
+                        true,
+                        0,
+                        "annotation",
+                        values
+                );
+
+        // NUL만 제거하고 나머지 문자는 보존해야 한다.
+        assertEquals(
+                "@kotlin.Metadata(d1=[\"head\", \"tail\"], d2=\"plainvalue\")",
+                evidence.snippet()
+        );
+        assertEquals(
+                -1,
+                evidence.snippet().indexOf('\0'),
+                "snippet에 NUL이 남아 있으면 안 된다"
+        );
+        assertEquals(
+                -1,
+                String.valueOf(evidence.attrs()).indexOf('\0'),
+                "attrs에 NUL이 남아 있으면 안 된다"
+        );
+    }
+
     private EvidenceFact create(String role) {
         return BytecodeAnnotationEvidenceFactory.create(
                 "build/classes/java/main/sample/Listener.class",

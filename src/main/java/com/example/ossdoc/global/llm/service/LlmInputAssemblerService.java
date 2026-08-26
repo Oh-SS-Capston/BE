@@ -136,6 +136,9 @@ public class LlmInputAssemblerService {
         root.set("coreClassSeed", llmInputAssemblerBuildSupport.buildCoreClassSeed(coreTypes));
         root.set("coreMethodSeed", llmInputAssemblerBuildSupport.buildCoreMethodSeed(coreMethods));
         root.set("methodFlowSeed", llmInputAssemblerBuildSupport.buildMethodFlowSeed(apiMap, coreMethods));
+        // 시나리오 골격은 methodFlowSeed를 기반으로 만들므로 그 뒤에 둔다.
+        root.set("scenarioSeed", llmInputAssemblerBuildSupport.buildScenarioSeed(
+                root.path("methodFlowSeed"), coreMethods));
         root.set("extensionSeed", llmInputAssemblerBuildSupport.buildExtensionSeed(apiMap, coreTypes, subsystems));
         root.set("directories", llmInputAssemblerBuildSupport.buildDirectories(apiMap, coreTypes, coreMethods));
         root.set("evidenceIndex", llmInputAssemblerBuildSupport.buildEvidenceIndex(coreTypes, coreMethods, ruleCandidates));

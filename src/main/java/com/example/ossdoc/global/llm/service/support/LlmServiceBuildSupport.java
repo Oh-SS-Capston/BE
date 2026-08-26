@@ -5,6 +5,7 @@ import com.example.ossdoc.global.llm.exception.LlmException;
 import com.example.ossdoc.global.llm.exception.code.LlmErrorCode;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.example.ossdoc.global.llm.config.LlmGenerationProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.NullNode;
@@ -14,9 +15,11 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -25,6 +28,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * LlmService의 출력 정규화/문서 조합 로직을 분리한 지원 컴포넌트.
@@ -36,10 +41,14 @@ import java.util.function.Supplier;
 public class LlmServiceBuildSupport {
 
     // 시나리오/문서 조합 시 사용하는 출력 제한값
-    private static final int MAX_CAUTIONS = 20;
-    private static final int MAX_SCENARIOS = 4;
-    private static final int MAX_STEPS_PER_SCENARIO = 8;
+    //
+    // caution/scenario/step 상한은 ossdoc.llm.generation.* 설정에서 읽는다.
+    // 프롬프트에 "최대 N개"라고 써도 로컬 9B 모델은 이를 무시하므로(실측: 8을 요구했으나 20개 생성),
+    // 실제 개수를 결정하는 것은 여기의 상한이다. 설정과 실동작이 어긋나지 않도록 같은 값을 쓴다.
     private static final int MAX_CORE_CLASSES = 20;
+
+    /** 한 항목에 붙일 관련 시나리오 상한. 기존 코드가 쓰던 3을 상수로 승격했다. */
+    private static final int MAX_RELATED_SCENARIOS = 3;
     private static final int MAX_CORE_METHODS = 40;
     private static final int MAX_METHOD_FLOW = 16;
     private static final int MAX_EVIDENCE_LINKS = 8;
@@ -67,6 +76,13 @@ public class LlmServiceBuildSupport {
             "expectedOutcome",
             "confidenceReason"
     );
+    /**
+     * 서술에서 코드 심볼로 볼 토큰. humps가 둘 이상인 CamelCase만 잡는다.
+     * 한 겹까지 허용하면 한국어 사이에 섞인 일반 명사와 {@code API} 같은 약어를 오탐한다.
+     */
+    private static final Pattern CAMEL_CASE_SYMBOL =
+            Pattern.compile("\\b[A-Z][a-z0-9]+(?:[A-Z][A-Za-z0-9]*)+\\b");
+
     private static final List<String> STEP_RICH_TEXT_FIELDS = List.of(
             "precondition",
             "action",
@@ -84,10 +100,24 @@ public class LlmServiceBuildSupport {
             "evidenceInterpretation",
             "confidenceReason"
     );
-    private static final List<String> GUIDE_FORBIDDEN_PHRASES = List.of(
-            "핵심 동작 수행",
-            "입력 조건 기반 로직"
-    );
+    /**
+     * targetSuitability를 측정할 수 없는 경로임을 나타내는 값.
+     *
+     * <p>{@code attachGuideBundle}은 rules/cautions/step이 공유하는 경로라
+     * 메서드 문맥(methodName/classFqn/filePath)을 항상 갖고 있지 않다.
+     * 억지로 계산해 넣는 대신 <b>guideQuality에 아예 쓰지 않고</b>,
+     * 집계하는 {@code buildApiDocQualityGate}가 부재를 "측정 불가"로 읽게 한다.
+     * 예전에는 부재를 1.0(적합)으로 읽어 P1-3 필터가 조용히 항상 통과했다.</p>
+     */
+    private static final double TARGET_SUITABILITY_NOT_MEASURED = -1.0d;
+
+    /**
+     * 시나리오 서술 채움률 기준선.
+     *
+     * <p>0.9로 둔 근거는 실측이다 — 호출 분해 전(SINGLE) 0.41, 분해 후(PER_SCENARIO) 0.97이라
+     * 두 상태를 확실히 가른다. 완주를 요구하되 한두 칸의 미충족은 허용하는 선이다.</p>
+     */
+    private static final double SCENARIO_NARRATIVE_THRESHOLD = 0.9d;
 
     private static final String MAIN_JAVA_MARKER = "/src/main/java/";
     private static final String MAIN_KOTLIN_MARKER = "/src/main/kotlin/";
@@ -95,6 +125,7 @@ public class LlmServiceBuildSupport {
     private static final String TARGET_MARKER = "/target/";
 
     private final ObjectMapper objectMapper;
+    private final LlmGenerationProperties llmGenerationProperties;
     /**
      * coreClassSeed에서 클래스 FQN과 소스 경로 매핑을 구성한다.
      */
@@ -147,7 +178,6 @@ public class LlmServiceBuildSupport {
                     methodName,
                     methodFqn,
                     summaryRaw,
-                    inferWhenToUse(methodName),
                     List.of(),
                     filePath,
                     startLine,
@@ -246,7 +276,7 @@ public class LlmServiceBuildSupport {
             }
         }
 
-        for (int i = 0; i < cautionsRaw.size() && cautions.size() < MAX_CAUTIONS; i++) {
+        for (int i = 0; i < cautionsRaw.size() && cautions.size() < llmGenerationProperties.getMaxCautions(); i++) {
             JsonNode rawItem = cautionsRaw.get(i);
             if (!rawItem.isObject()) {
                 continue;
@@ -302,11 +332,112 @@ public class LlmServiceBuildSupport {
     }
 
     /**
+     * PER_SCENARIO 모드: overview와 methodFlow만 담은 껍데기를 만든다.
+     *
+     * <p>{@code scenarios}는 빈 배열로 두고 호출자가 시나리오별 호출 결과를 하나씩 채운다.
+     * methodFlow는 시드 결정론이라 LLM 호출이 필요 없다 — {@code methodFlowSeed}가
+     * 이미 실제 호출 순서를 갖고 있고, SINGLE 모드에서도 모델 응답보다 시드가 우선이다.</p>
+     */
+    public ObjectNode buildScenarioSpecsShell(JsonNode overviewRaw, JsonNode structure) {
+        ObjectNode out = objectMapper.createObjectNode();
+        out.set("overview", normalizeOverview(overviewRaw, structure));
+        out.set("methodFlow", normalizeMethodFlow(NullNode.getInstance(), structure.path("methodFlowSeed")));
+        out.putArray("scenarios");
+        return out;
+    }
+
+    /**
+     * PER_SCENARIO 모드: 골격 한 장과 그 호출의 응답으로 시나리오 하나를 만든다.
+     *
+     * <p>SINGLE 모드와 같은 {@link #buildScenariosFromSeed}를 원소 하나짜리 배열로 태운다.
+     * 근거 우선순위(골격이 이기고 서술은 모델이 이긴다)와 폐기 계측을 그대로 쓰기 위해서다.
+     * 두 모드의 산출물이 같은 코드를 통과해야 A/B 비교가 성립한다.</p>
+     *
+     * @throws LlmException 응답에 시나리오가 없거나 서술이 전부 비어 있으면 compact 재시도 기회를 남긴다.
+     */
+    public JsonNode normalizeOneScenario(JsonNode seedScenario, JsonNode raw, JsonNode structure) {
+        JsonNode scenariosRaw = extractArrayByKey(raw, "scenarios");
+        if (scenariosRaw == null || !scenariosRaw.isArray() || scenariosRaw.isEmpty()) {
+            throw new LlmException(LlmErrorCode.RESPONSE_PARSE_FAILED);
+        }
+        /*
+         * 계약 형태만 갖추고 값이 전부 빈 문자열인 응답("빈 봉투")도 실패로 인정한다.
+         *
+         * junit-framework 실측에서 접근자만 나열된 시나리오 두 장(SCN-005/006)이
+         * stepNo까지 맞춘 완전한 스키마에 서술만 전부 ""로 채워 돌아왔다. 파싱은 성공하고
+         * step도 stepNo로 정상 매칭되므로 logSeedAxisDrops의 폐기 수도 0이라,
+         * 기존 방어선 어디에도 걸리지 않고 "골격 채움 0/N" 한 줄만 남긴 채 통과했다.
+         * 그 결과 20 step 중 8 step이 시드 문구만 실린 채 산출물로 나갔다.
+         *
+         * 여기서 던지면 generateWithRetryPlan의 compact 재시도를 한 번 더 쓰고,
+         * 그래도 비면 fallbackOneScenario로 그 한 장만 골격으로 떨어진다.
+         */
+        if (!hasAnyStepNarrative(scenariosRaw)) {
+            log.warn(
+                    "[LlmScenario] {} 응답이 계약 형태만 갖추고 서술이 전부 비어 있습니다."
+                            + " 파싱 실패로 처리해 재시도합니다.",
+                    seedScenario.path("scenarioId").asText("")
+            );
+            throw new LlmException(LlmErrorCode.RESPONSE_PARSE_FAILED);
+        }
+        ArrayNode seedOnly = objectMapper.createArrayNode();
+        seedOnly.add(seedScenario);
+
+        ArrayNode built = buildScenariosFromSeed(
+                seedOnly,
+                scenariosRaw,
+                indexMethodSeedByFqn(structure.path("coreMethodSeed"))
+        );
+        return built.isEmpty() ? NullNode.getInstance() : built.get(0);
+    }
+
+    /**
+     * 응답의 step 중 서술을 하나라도 담은 것이 있는지 본다.
+     *
+     * <p>{@code description}과 {@link #STEP_RICH_TEXT_FIELDS} 중 하나라도 비어있지 않으면
+     * 서술이 있는 것으로 친다. 판정을 description 하나로 좁히면 모델이 description은 비우고
+     * action만 쓴 응답까지 버리게 된다.</p>
+     */
+    private boolean hasAnyStepNarrative(JsonNode scenariosRaw) {
+        for (JsonNode scenario : scenariosRaw) {
+            for (JsonNode step : scenario.path("steps")) {
+                if (!safeText(step.path("description").asText("")).isBlank()) {
+                    return true;
+                }
+                for (String field : STEP_RICH_TEXT_FIELDS) {
+                    if (!safeText(step.path(field).asText("")).isBlank()) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * PER_SCENARIO 모드 실패 시: 모델 응답 없이 골격만으로 시나리오 하나를 만든다.
+     * 시나리오 하나가 실패해도 나머지는 살아남는다는 것이 분해의 이점이므로,
+     * 여기서 전체를 포기하지 않고 그 한 장만 시드 문구로 되돌린다.
+     */
+    public JsonNode fallbackOneScenario(JsonNode seedScenario, JsonNode structure) {
+        ArrayNode seedOnly = objectMapper.createArrayNode();
+        seedOnly.add(seedScenario);
+
+        ArrayNode built = buildScenariosFromSeed(
+                seedOnly,
+                objectMapper.createArrayNode(),
+                indexMethodSeedByFqn(structure.path("coreMethodSeed"))
+        );
+        return built.isEmpty() ? NullNode.getInstance() : built.get(0);
+    }
+
+    /**
      * 시나리오 LLM 응답을 계약 스키마로 정규화한다.
      */
     public JsonNode normalizeScenarioSpecs(JsonNode raw, JsonNode structure) {
         JsonNode scenariosRaw = extractArrayByKey(raw, "scenarios");
-        if (scenariosRaw == null || !scenariosRaw.isArray()) {
+        if (scenariosRaw == null || !scenariosRaw.isArray() || scenariosRaw.isEmpty()) {
+            // 응답에 시나리오가 아예 없으면 compact 재시도 기회를 남긴다.
             throw new LlmException(LlmErrorCode.RESPONSE_PARSE_FAILED);
         }
 
@@ -318,8 +449,14 @@ public class LlmServiceBuildSupport {
                 ? (ArrayNode) out.path("methodFlow")
                 : objectMapper.createArrayNode();
 
+        JsonNode scenarioSeed = structure.path("scenarioSeed");
+        if (scenarioSeed.isArray() && !scenarioSeed.isEmpty()) {
+            out.set("scenarios", buildScenariosFromSeed(scenarioSeed, scenariosRaw, methodSeedByFqn));
+            return out;
+        }
+
         ArrayNode scenarios = out.putArray("scenarios");
-        for (int i = 0; i < scenariosRaw.size() && scenarios.size() < MAX_SCENARIOS; i++) {
+        for (int i = 0; i < scenariosRaw.size() && scenarios.size() < llmGenerationProperties.getMaxScenarios(); i++) {
             JsonNode rawScenario = scenariosRaw.get(i);
             if (!rawScenario.isObject()) {
                 continue;
@@ -335,7 +472,7 @@ public class LlmServiceBuildSupport {
             ArrayNode steps = scenario.putArray("steps");
             JsonNode rawSteps = rawScenario.path("steps");
             if (rawSteps.isArray()) {
-                for (int s = 0; s < rawSteps.size() && steps.size() < MAX_STEPS_PER_SCENARIO; s++) {
+                for (int s = 0; s < rawSteps.size() && steps.size() < llmGenerationProperties.getMaxStepsPerScenario(); s++) {
                     JsonNode rawStep = rawSteps.get(s);
                     if (!rawStep.isObject()) {
                         continue;
@@ -389,6 +526,298 @@ public class LlmServiceBuildSupport {
     }
 
     /**
+     * 시나리오 골격(scenarioSeed)을 축으로 모델 서술을 덮어 시나리오를 만든다.
+     *
+     * <p>모델 응답을 축으로 삼으면 시나리오 개수/순서/대상 메서드가 실행마다 흔들리고,
+     * 누락된 단계는 {@code methodFlow}의 같은 인덱스를 가져다 쓰게 되어 서로 다른
+     * 시나리오의 step 1이 모두 같은 메서드를 참조하는 문제가 있었다.
+     * 골격을 축으로 삼으면 구조는 코드가 보장하고 모델은 서술만 담당한다.</p>
+     *
+     * <p>필드별 우선순위가 다르다. scenarioId/classFqn/methodFqn/근거 위치는 골격이 이기고,
+     * 서술 필드는 모델이 이긴다. 모델이 대상을 바꿔치기해도 골격이 되돌린다.</p>
+     */
+    private ArrayNode buildScenariosFromSeed(
+            JsonNode scenarioSeed,
+            JsonNode scenariosRaw,
+            Map<String, JsonNode> methodSeedByFqn
+    ) {
+        Map<String, JsonNode> rawById = new HashMap<>();
+        for (JsonNode rawScenario : scenariosRaw) {
+            if (!rawScenario.isObject()) {
+                continue;
+            }
+            String id = safeText(rawScenario.path("scenarioId").asText(""));
+            if (!id.isBlank()) {
+                rawById.putIfAbsent(id, rawScenario);
+            }
+        }
+
+        // 골격 밖 응답은 여기서 조용히 사라진다. 얼마나 버리는지 모르면
+        // 모델이 프롬프트를 지키는지 측정할 방법이 없다.
+        Set<JsonNode> consumedScenarios = Collections.newSetFromMap(new IdentityHashMap<>());
+        int seedStepSlots = 0;
+        int slotsFilledByModel = 0;
+        int rawStepsSeen = 0;
+        int rawStepsConsumed = 0;
+
+        ArrayNode scenarios = objectMapper.createArrayNode();
+        for (int i = 0; i < scenarioSeed.size(); i++) {
+            JsonNode seedScenario = scenarioSeed.get(i);
+            String scenarioId = firstNonBlank(
+                    seedScenario.path("scenarioId").asText(""),
+                    String.format("SCN-%03d", i + 1)
+            );
+            // scenarioId로 먼저 맞추고, 모델이 ID를 바꿨으면 같은 순서의 응답으로 맞춘다.
+            JsonNode rawScenario = rawById.get(scenarioId);
+            if (rawScenario == null) {
+                rawScenario = i < scenariosRaw.size() ? scenariosRaw.get(i) : NullNode.getInstance();
+            }
+            if (rawScenario.isObject()) {
+                consumedScenarios.add(rawScenario);
+            }
+
+            ObjectNode scenario = scenarios.addObject();
+            scenario.put("scenarioId", scenarioId);
+            scenario.put("title", firstNonBlank(
+                    rawScenario.path("title").asText(""),
+                    seedScenario.path("title").asText(""),
+                    "대표 사용 시나리오"
+            ));
+            scenario.put("intent", firstNonBlank(
+                    rawScenario.path("intent").asText(""),
+                    seedScenario.path("intent").asText(""),
+                    "핵심 API를 순서대로 호출해 기능을 완성한다."
+            ));
+            copyTextFields(rawScenario, scenario, SCENARIO_RICH_TEXT_FIELDS);
+
+            ArrayNode steps = scenario.putArray("steps");
+            JsonNode seedSteps = seedScenario.path("steps");
+            JsonNode rawSteps = rawScenario.path("steps");
+            Map<Integer, JsonNode> rawStepByNo = indexStepsByNo(rawSteps);
+            if (rawSteps.isArray()) {
+                rawStepsSeen += rawSteps.size();
+            }
+
+            for (int s = 0; s < seedSteps.size(); s++) {
+                JsonNode seedStep = seedSteps.get(s);
+                int stepNo = seedStep.path("stepNo").asInt(s + 1);
+                JsonNode rawStep = rawStepByNo.get(stepNo);
+                if (rawStep == null) {
+                    rawStep = rawSteps.isArray() && s < rawSteps.size() ? rawSteps.get(s) : NullNode.getInstance();
+                }
+                seedStepSlots++;
+                if (rawStep.isObject()) {
+                    rawStepsConsumed++;
+                    if (!safeText(rawStep.path("description").asText("")).isBlank()) {
+                        slotsFilledByModel++;
+                    }
+                }
+
+                ObjectNode step = steps.addObject();
+                step.put("stepNo", stepNo);
+                // 모델이 description을 안 쓰면 빈 칸으로 둔다. 예전에는 마지막 후보로
+                // "핵심 메서드를 호출한다."를 넣었는데, 시드에서 이름 패턴 추측 문구를
+                // 걷어낸 뒤로는 summarySeed가 비는 경우가 많아 이 리터럴이 실제로 실릴 자리다.
+                // 근거 없는 문장을 채우느니 게이트가 미충족으로 세게 한다.
+                step.put("description", firstNonBlank(
+                        rawStep.path("description").asText(""),
+                        seedStep.path("summarySeed").asText("")
+                ));
+                copyTextFields(rawStep, step, STEP_RICH_TEXT_FIELDS);
+
+                String methodFqn = firstNonBlank(
+                        seedStep.path("methodFqn").asText(""),
+                        rawStep.path("methodFqn").asText("")
+                );
+                String classFqn = firstNonBlank(
+                        seedStep.path("classFqn").asText(""),
+                        rawStep.path("classFqn").asText(""),
+                        ownerFromMethodFqn(methodFqn)
+                );
+                putIfText(step, "classFqn", classFqn);
+                putIfText(step, "methodFqn", methodFqn);
+
+                // 근거 위치는 골격이 우선이다. 모델이 지어낸 evidenceId를 신뢰하지 않는다.
+                ArrayNode evidenceLinks = evidenceLinksFromSeed(seedStep);
+                if (evidenceLinks.isEmpty()) {
+                    evidenceLinks = normalizeEvidenceLinks(rawStep.path("evidenceLinks"), MAX_EVIDENCE_LINKS);
+                }
+                if (evidenceLinks.isEmpty() && !methodFqn.isBlank()) {
+                    evidenceLinks = evidenceLinksFromSeed(methodSeedByFqn.getOrDefault(methodFqn, NullNode.getInstance()));
+                }
+                step.set("evidenceLinks", evidenceLinks);
+                attachStepGuideBundle(step);
+            }
+
+            // 두 모드가 같은 경로에서 재야 A/B가 성립한다. SINGLE은 시나리오마다 한 번씩,
+            // PER_SCENARIO는 호출마다 한 번씩 찍혀 같은 단위로 비교된다.
+            logOffSkeletonSymbolMentions(seedScenario, scenario);
+        }
+
+        logSeedAxisDrops(scenariosRaw, consumedScenarios, seedStepSlots, slotsFilledByModel,
+                rawStepsSeen, rawStepsConsumed);
+        return scenarios;
+    }
+
+    /**
+     * 서술이 이 시나리오 골격 밖의 심볼을 얼마나 끌어오는지 센다.
+     *
+     * <p><b>이것은 hallucination 지표가 아니다.</b> 재는 것은 "골격 밖 방황이 시나리오 바깥에서
+     * 안으로 위치를 옮겼는가"뿐이다. PER_SCENARIO로 쪼개면 프롬프트에 시나리오가 한 장뿐이라
+     * {@code logSeedAxisDrops}의 폐기 수가 구조적으로 0에 수렴하는데, 그때 방황이 사라진 건지
+     * 시나리오 <i>안쪽</i>으로 들어간 건지 구분할 지표가 없어진다. 그 자리를 메운다.</p>
+     *
+     * <p>못 잡는 것이 분명히 있다. "앞서 생성한 객체를 이어서" 같은 대명사적 서술은 심볼을
+     * 쓰지 않으므로 0으로 센다. 그건 이 지표가 아니라 {@code excludedByOtherScenarios}로
+     * 막는다. 이 값이 낮다고 "지어내지 않았다"로 읽으면 안 된다.</p>
+     *
+     * <p>탐지는 humps가 둘 이상인 CamelCase로 한정한다({@code MediaType}, {@code VintageExecutor}).
+     * 한국어 산문과 {@code API} 같은 약어를 오탐하지 않는 선이다.</p>
+     */
+    private void logOffSkeletonSymbolMentions(JsonNode seedScenario, ObjectNode builtScenario) {
+        Set<String> allowed = new HashSet<>();
+        for (JsonNode step : seedScenario.path("steps")) {
+            collectSymbolNames(allowed, step.path("classFqn").asText(""));
+            collectSymbolNames(allowed, step.path("methodFqn").asText(""));
+            // signatureHint의 반환·파라미터 타입도 근거다. 이게 빠져 있어서 SCN-002에서
+            // DiscoverySelectors.parse()의 반환 타입을 설명한 문장 9건이 전부 "골격 밖"으로
+            // 잡혔다. 골격 step은 호출 대상 클래스만 싣기 때문에, 반환값을 설명하는
+            // 정상 서술이 구조적으로 오탐이 되던 것이다.
+            //
+            // 여기서 CAMEL_CASE_SYMBOL을 그대로 쓴다. signatureHint는
+            // "DiscoverySelectorIdentifier -> DiscoverySelector" 같은 형태라
+            // collectSymbolNames의 [.#] split으로는 쪼개지지 않는다. 무엇보다
+            // 탐지와 허용이 같은 규칙을 써야 비대칭 오탐이 생기지 않는다.
+            collectCamelCaseSymbols(allowed, step.path("signatureHint").asText(""));
+        }
+
+        Map<String, Integer> offSkeleton = new LinkedHashMap<>();
+        int scannedChars = 0;
+        for (String field : SCENARIO_RICH_TEXT_FIELDS) {
+            scannedChars += countMentions(builtScenario.path(field).asText(""), allowed, offSkeleton);
+        }
+        for (JsonNode step : builtScenario.path("steps")) {
+            scannedChars += countMentions(step.path("description").asText(""), allowed, offSkeleton);
+            for (String field : STEP_RICH_TEXT_FIELDS) {
+                scannedChars += countMentions(step.path(field).asText(""), allowed, offSkeleton);
+            }
+        }
+
+        if (offSkeleton.isEmpty()) {
+            log.info(
+                    "[LlmScenario] 방황 이동 없음. {} 서술 {}자에 골격 밖 심볼 언급 0건.",
+                    builtScenario.path("scenarioId").asText(""), scannedChars
+            );
+            return;
+        }
+        int total = offSkeleton.values().stream().mapToInt(Integer::intValue).sum();
+        log.warn(
+                "[LlmScenario] 방황 이동 감지. {} 서술 {}자에 골격 밖 심볼 {}건: {}."
+                        + " (hallucination 지표가 아니라 방황 위치 이동 여부만 잰다)",
+                builtScenario.path("scenarioId").asText(""), scannedChars, total, offSkeleton
+        );
+    }
+
+    /** 탐지와 같은 규칙으로 심볼을 뽑아 허용 집합에 넣는다. 규칙이 갈리면 오탐이 생긴다. */
+    private void collectCamelCaseSymbols(Set<String> target, String text) {
+        if (text == null || text.isBlank()) {
+            return;
+        }
+        Matcher matcher = CAMEL_CASE_SYMBOL.matcher(text);
+        while (matcher.find()) {
+            target.add(matcher.group());
+        }
+    }
+
+    /** FQN에서 사람이 서술에 쓸 법한 이름(단순 타입명, 메서드명)을 뽑아 허용 집합에 넣는다. */
+    private void collectSymbolNames(Set<String> target, String fqn) {
+        if (fqn == null || fqn.isBlank()) {
+            return;
+        }
+        for (String part : fqn.split("[.#]")) {
+            if (!part.isBlank()) {
+                target.add(part);
+            }
+        }
+    }
+
+    /** 텍스트에서 CamelCase 심볼을 찾아 허용 집합 밖인 것만 센다. 반환값은 훑은 글자 수다. */
+    private int countMentions(String text, Set<String> allowed, Map<String, Integer> offSkeleton) {
+        if (text == null || text.isBlank()) {
+            return 0;
+        }
+        Matcher matcher = CAMEL_CASE_SYMBOL.matcher(text);
+        while (matcher.find()) {
+            String symbol = matcher.group();
+            if (!allowed.contains(symbol)) {
+                offSkeleton.merge(symbol, 1, Integer::sum);
+            }
+        }
+        return text.length();
+    }
+
+    /**
+     * 골격 축 정규화가 버린 응답 분량을 남긴다.
+     *
+     * <p>모델이 골격 밖 시나리오를 만들면 여기서 전량 폐기되는데, 지금까지는 조용히 사라져서
+     * 프롬프트 준수 여부를 측정할 방법이 없었다. 5차 실행 기준으로 STEP② 출력의 약 58%가
+     * 이 경로로 버려지고 있었다. 이 수치가 0에 수렴하는지가 프롬프트 수정의 성공 판정이다.</p>
+     *
+     * <p>PER_SCENARIO 모드에서는 프롬프트에 시나리오가 한 장뿐이라 이 값이 구조적으로 낮아진다.
+     * 그것만 보고 "방황이 사라졌다"고 읽으면 안 된다 — 짝이 되는 지표가
+     * {@link #logOffSkeletonSymbolMentions}다.</p>
+     */
+    private void logSeedAxisDrops(
+            JsonNode scenariosRaw,
+            Set<JsonNode> consumedScenarios,
+            int seedStepSlots,
+            int slotsFilledByModel,
+            int rawStepsSeen,
+            int rawStepsConsumed
+    ) {
+        int droppedScenarios = 0;
+        for (JsonNode rawScenario : scenariosRaw) {
+            if (rawScenario.isObject() && !consumedScenarios.contains(rawScenario)) {
+                droppedScenarios++;
+            }
+        }
+        int droppedSteps = Math.max(0, rawStepsSeen - rawStepsConsumed);
+
+        if (droppedScenarios > 0 || droppedSteps > 0) {
+            log.warn(
+                    "[LlmScenario] 골격 밖 응답 폐기. 시나리오 {}/{}개, step {}/{}개."
+                            + " 모델이 골격에 없는 항목을 만드는 만큼 서술 예산이 줄어든다.",
+                    droppedScenarios, scenariosRaw.size(), droppedSteps, rawStepsSeen
+            );
+        }
+        if (slotsFilledByModel == 0 && seedStepSlots > 0) {
+            // 전 구간이 시드 문구라는 뜻이라 INFO로 묻히면 안 된다. 34% 채움의 원인이 여기에 있었다.
+            log.warn(
+                    "[LlmScenario] 골격 채움 0/{}. 모델 서술이 한 칸도 실리지 않아 전 구간이 시드 문구입니다.",
+                    seedStepSlots
+            );
+        } else {
+            log.info(
+                    "[LlmScenario] 골격 채움. {}/{} 칸을 모델 서술로 채웠다 (나머지는 시드 문구).",
+                    slotsFilledByModel, seedStepSlots
+            );
+        }
+    }
+
+    private Map<Integer, JsonNode> indexStepsByNo(JsonNode rawSteps) {
+        Map<Integer, JsonNode> out = new HashMap<>();
+        if (rawSteps == null || !rawSteps.isArray()) {
+            return out;
+        }
+        for (JsonNode rawStep : rawSteps) {
+            if (rawStep.isObject() && rawStep.path("stepNo").canConvertToInt()) {
+                out.putIfAbsent(rawStep.path("stepNo").asInt(), rawStep);
+            }
+        }
+        return out;
+    }
+
+    /**
      * 주의사항 생성 실패 시 seed 기반 fallback을 생성한다.
      */
     public JsonNode fallbackCautions(JsonNode structure) {
@@ -397,7 +826,7 @@ public class LlmServiceBuildSupport {
         JsonNode seed = structure.path("cautionSeed").path("cautions");
 
         if (seed.isArray()) {
-            for (int i = 0; i < seed.size() && cautions.size() < MAX_CAUTIONS; i++) {
+            for (int i = 0; i < seed.size() && cautions.size() < llmGenerationProperties.getMaxCautions(); i++) {
                 JsonNode item = seed.get(i);
                 ObjectNode caution = cautions.addObject();
                 caution.put("cautionId", String.format("CAU-%03d", cautions.size()));
@@ -440,6 +869,19 @@ public class LlmServiceBuildSupport {
         ObjectNode out = objectMapper.createObjectNode();
         out.set("overview", normalizeOverview(NullNode.getInstance(), structure));
         out.set("methodFlow", normalizeMethodFlow(NullNode.getInstance(), structure.path("methodFlowSeed")));
+
+        // 골격이 있으면 모델 서술만 빠진 형태로 되돌린다. 시나리오 구조는 그대로 남는다.
+        JsonNode scenarioSeed = structure.path("scenarioSeed");
+        if (scenarioSeed.isArray() && !scenarioSeed.isEmpty()) {
+            out.set("scenarios", buildScenariosFromSeed(
+                    scenarioSeed,
+                    objectMapper.createArrayNode(),
+                    indexMethodSeedByFqn(structure.path("coreMethodSeed"))
+            ));
+            out.put("fallbackApplied", true);
+            return out;
+        }
+
         ArrayNode scenarios = out.putArray("scenarios");
 
         ObjectNode scenario = scenarios.addObject();
@@ -452,7 +894,7 @@ public class LlmServiceBuildSupport {
         ArrayNode steps = scenario.putArray("steps");
 
         ArrayNode flow = out.path("methodFlow").isArray() ? (ArrayNode) out.path("methodFlow") : objectMapper.createArrayNode();
-        for (int i = 0; i < flow.size() && i < MAX_STEPS_PER_SCENARIO; i++) {
+        for (int i = 0; i < flow.size() && i < llmGenerationProperties.getMaxStepsPerScenario(); i++) {
             JsonNode flowStep = flow.get(i);
             ObjectNode step = steps.addObject();
             step.put("stepNo", i + 1);
@@ -614,80 +1056,32 @@ public class LlmServiceBuildSupport {
         putIfText(slotEvidence, "nextAction", evidenceAnchor);
         slotEvidence.put("slotEvidenceConfidence", "method_level");
 
-        double slotCoverage = computeSlotCoverage(before, call, success, failure, next);
-        double evidenceCoverage = evidenceAnchor.isBlank() ? 0.0d : 1.0d;
-        double forbiddenRate = computeForbiddenPhraseRate(narrative);
-        double repetitionRate = computeRepetitionRate(before, call, success, failure, next);
-        double weighted = 0.45d * slotCoverage
-                + 0.25d * evidenceCoverage
-                + 0.15d * (1.0d - forbiddenRate)
-                + 0.15d * (1.0d - repetitionRate);
-        int actionabilityScore = Math.max(0, Math.min(100, (int) Math.round(weighted * 100.0d)));
+        // 산식은 ApiDocGuideSupport 한 곳에만 둔다. 여기 복제본이 targetSuitability를
+        // 빠뜨리는 바람에 buildApiDocQualityGate가 기본값 1.0으로 읽어 P1-3 필터가
+        // rules/cautions 경로에서 통째로 무력화돼 있었다.
+        ApiDocGuideSupport.GuideSlots guideSlots =
+                new ApiDocGuideSupport.GuideSlots(before, call, success, failure, next);
+        ApiDocGuideSupport.GuideQuality scored = ApiDocGuideSupport.scoreSlots(
+                guideSlots, evidenceAnchor, TARGET_SUITABILITY_NOT_MEASURED, "method_level");
+        int actionabilityScore = scored.actionabilityScore();
 
         target.put("guideNarrative", narrative);
         target.put("actionabilityScore", actionabilityScore);
 
         ObjectNode quality = target.putObject("guideQuality");
         quality.put("actionabilityScore", actionabilityScore);
-        quality.put("slotCoverage", round2(slotCoverage));
-        quality.put("evidenceCoverage", round2(evidenceCoverage));
-        quality.put("forbiddenPhraseRate", round2(forbiddenRate));
-        quality.put("repetitionRate", round2(repetitionRate));
+        quality.put("slotCoverage", round2(scored.slotCoverage()));
+        quality.put("evidenceCoverage", round2(scored.evidenceCoverage()));
+        quality.put("forbiddenPhraseRate", round2(scored.forbiddenPhraseRate()));
+        quality.put("repetitionRate", round2(scored.repetitionRate()));
         quality.put("slotEvidenceConfidence", "method_level");
         quality.put("threshold", ACTIONABILITY_THRESHOLD);
-        quality.put("meetsThreshold", actionabilityScore >= ACTIONABILITY_THRESHOLD);
+        // 채움말이 하나라도 섞이면 점수와 무관하게 탈락시킨다. 근거 없는 문구를 담은 항목이
+        // "기준 통과"로 표시되면 게이트가 위반을 측정하는 게 아니라 허가하는 도구가 된다.
+        quality.put("meetsThreshold",
+                actionabilityScore >= ACTIONABILITY_THRESHOLD && scored.forbiddenPhraseRate() == 0.0d);
     }
 
-    /**
-     * 5개 슬롯이 얼마나 채워졌는지(0~1) 계산한다.
-     */
-    private double computeSlotCoverage(String before, String call, String success, String failure, String next) {
-        int filled = 0;
-        for (String value : List.of(before, call, success, failure, next)) {
-            if (!safeText(value).isBlank()) {
-                filled++;
-            }
-        }
-        return (double) filled / 5.0d;
-    }
-
-    /**
-     * 금지 표현 포함 비율을 계산한다.
-     */
-    private double computeForbiddenPhraseRate(String narrative) {
-        String text = safeText(narrative);
-        if (text.isBlank()) {
-            return 1.0d;
-        }
-        int count = 0;
-        for (String phrase : GUIDE_FORBIDDEN_PHRASES) {
-            if (text.contains(phrase)) {
-                count++;
-            }
-        }
-        return Math.min(1.0d, count / 2.0d);
-    }
-
-    /**
-     * 슬롯 문장의 중복 비율을 계산한다.
-     */
-    private double computeRepetitionRate(String before, String call, String success, String failure, String next) {
-        Map<String, Integer> frequency = new LinkedHashMap<>();
-        for (String value : List.of(before, call, success, failure, next)) {
-            String key = safeText(value).replaceAll("\\s+", " ").toLowerCase(Locale.ROOT);
-            if (key.isBlank()) {
-                continue;
-            }
-            frequency.put(key, frequency.getOrDefault(key, 0) + 1);
-        }
-        int duplicates = 0;
-        for (int count : frequency.values()) {
-            if (count > 1) {
-                duplicates += (count - 1);
-            }
-        }
-        return Math.min(1.0d, (double) duplicates / 5.0d);
-    }
 
     /**
      * evidenceIds 배열을 UI 표시용 앵커 문자열로 변환한다.
@@ -865,14 +1259,12 @@ public class LlmServiceBuildSupport {
             return;
         }
 
-        List<String> allScenarioIds = new ArrayList<>();
         Map<String, Set<String>> scenarioIdsByClassFqn = new LinkedHashMap<>();
         for (JsonNode scenario : scenarios) {
             String scenarioId = scenario.path("scenarioId").asText("");
             if (scenarioId.isBlank()) {
                 continue;
             }
-            allScenarioIds.add(scenarioId);
             JsonNode steps = scenario.path("steps");
             if (!steps.isArray()) {
                 continue;
@@ -898,10 +1290,12 @@ public class LlmServiceBuildSupport {
             }
             ObjectNode classObj = (ObjectNode) classNode;
             String fqn = classObj.path("fqn").asText("");
-            Set<String> related = scenarioIdsByClassFqn.getOrDefault(fqn, Set.of());
-            List<String> ids = related.isEmpty() ? allScenarioIds : new ArrayList<>(related);
+            // 매칭되는 시나리오가 없으면 빈 배열로 둔다. 예전에는 전체 시나리오 ID 앞 3개를
+            // fallback으로 넣었는데, 실측에서 coreClasses 20개 중 16개가 이 경로로
+            // "관련 없는 시나리오"를 달고 나갔다. 근거 없는 연결을 지어내지 않는다.
+            List<String> ids = new ArrayList<>(scenarioIdsByClassFqn.getOrDefault(fqn, Set.of()));
             ArrayNode relatedScenarios = classObj.putArray("relatedScenarios");
-            for (int i = 0; i < ids.size() && i < 3; i++) {
+            for (int i = 0; i < ids.size() && i < MAX_RELATED_SCENARIOS; i++) {
                 relatedScenarios.add(ids.get(i));
             }
         }
@@ -933,6 +1327,7 @@ public class LlmServiceBuildSupport {
      */
     public ArrayNode buildSubsystemDocs(JsonNode coreClasses, JsonNode scenarioSpecs, JsonNode refinedRules) {
         Map<String, ObjectNode> byPackage = new LinkedHashMap<>();
+        Map<String, Set<String>> scenarioIdsByPackage = new LinkedHashMap<>();
         if (coreClasses.isArray()) {
             for (JsonNode type : coreClasses) {
                 String packageName = type.path("packageName").asText("");
@@ -949,15 +1344,16 @@ public class LlmServiceBuildSupport {
                     return node;
                 });
                 byPackage.get(key).withArray("topSymbols").add("type:" + type.path("fqn").asText(""));
+                // 멤버 클래스가 이미 갖고 있는 실제 연결을 모은다.
+                // 호출 순서상 fillCoreClassRelatedScenarios가 먼저 돌아
+                // coreClasses에는 이미 올바른 relatedScenarios가 들어 있다.
+                for (JsonNode id : type.path("relatedScenarios")) {
+                    String scenarioId = safeText(id.asText(""));
+                    if (!scenarioId.isBlank()) {
+                        scenarioIdsByPackage.computeIfAbsent(key, k -> new LinkedHashSet<>()).add(scenarioId);
+                    }
+                }
             }
-        }
-
-        ArrayNode scenarios = scenarioSpecs.path("scenarios").isArray()
-                ? (ArrayNode) scenarioSpecs.path("scenarios")
-                : objectMapper.createArrayNode();
-        List<String> scenarioIds = new ArrayList<>();
-        for (int i = 0; i < scenarios.size(); i++) {
-            scenarioIds.add(scenarios.get(i).path("scenarioId").asText(""));
         }
 
         ArrayNode rules = refinedRules.path("rules").isArray()
@@ -974,9 +1370,14 @@ public class LlmServiceBuildSupport {
             if (index++ >= MAX_CORE_CLASSES) {
                 break;
             }
+            // 이 서브시스템에 속한 클래스가 실제로 닿는 시나리오만 단다.
+            // 예전에는 전체 시나리오 ID 앞 3개를 모든 서브시스템에 똑같이 뿌려서,
+            // 서브시스템 12개가 전부 같은 값을 갖고 있었다.
+            String subsystemKey = subsystem.path("label").asText("");
             ArrayNode relatedScenarios = subsystem.withArray("relatedScenarios");
-            for (int i = 0; i < scenarioIds.size() && i < 3; i++) {
-                relatedScenarios.add(scenarioIds.get(i));
+            List<String> ids = new ArrayList<>(scenarioIdsByPackage.getOrDefault(subsystemKey, Set.of()));
+            for (int i = 0; i < ids.size() && i < MAX_RELATED_SCENARIOS; i++) {
+                relatedScenarios.add(ids.get(i));
             }
             ArrayNode relatedRules = subsystem.withArray("ruleIds");
             for (int i = 0; i < ruleIds.size() && i < 4; i++) {
@@ -1029,85 +1430,39 @@ public class LlmServiceBuildSupport {
             String fqn = seed.path("fqn").asText("");
             String methodName = seed.path("methodName").asText("");
             String classFqn = seed.path("classFqn").asText("");
-
-            String whenToUse = inferWhenToUse(methodName);
-
-            List<String> methodCautions =
-                    cautionByMethod.getOrDefault(fqn, List.of());
-
-            /*
-             * 현재 메서드와 연결된 scenario step을 찾는다.
-             *
-             * scenario가 없는 경우 NullNode를 사용하고,
-             * 이후 기본 method guide만으로 카드를 생성한다.
-             */
-            JsonNode scenarioStep =
-                    scenarioStepByMethod.getOrDefault(
-                            fqn,
-                            NullNode.getInstance()
-                    );
-
-            /*
-             * method seed를 기반으로 기본 summary를 생성한다.
-             */
-            ApiDocSummarySupport.SummaryView summary =
-                    ApiDocSummarySupport.fromMethodSeed(
-                            seed,
-                            classFqn,
-                            methodName,
-                            MAX_METHOD_DESCRIPTION_PREVIEW
-                    );
-
-            /*
-             * method 자체의 기본 guide를 생성한다.
-             *
-             * 이후 scenario 정보가 존재하면 attachMethodGuideBundle()에서
-             * scenario의 precondition/action/failureSignal 등을 우선 적용한다.
-             */
-            ApiDocGuideSupport.GuideView guide =
-                    ApiDocGuideSupport.buildGuide(
-                            classFqn,
-                            methodName,
-                            fqn,
-                            summary.summaryRaw(),
-                            whenToUse,
-                            methodCautions,
-                            seed.path("filePath").asText(""),
-                            seed.path("startLine").canConvertToInt()
-                                    ? seed.path("startLine").asInt()
-                                    : null,
-                            seed.path("endLine").canConvertToInt()
-                                    ? seed.path("endLine").asInt()
-                                    : null
-                    );
+            List<String> methodCautions = cautionByMethod.getOrDefault(fqn, List.of());
+            JsonNode scenarioStep = scenarioStepByMethod.getOrDefault(fqn, NullNode.getInstance());
+            ApiDocSummarySupport.SummaryView summary = ApiDocSummarySupport.fromMethodSeed(
+                    seed,
+                    classFqn,
+                    methodName,
+                    MAX_METHOD_DESCRIPTION_PREVIEW
+            );
+            ApiDocGuideSupport.GuideView guide = ApiDocGuideSupport.buildGuide(
+                    classFqn,
+                    methodName,
+                    fqn,
+                    summary.summaryRaw(),
+                    methodCautions,
+                    seed.path("filePath").asText(""),
+                    seed.path("startLine").canConvertToInt() ? seed.path("startLine").asInt() : null,
+                    seed.path("endLine").canConvertToInt() ? seed.path("endLine").asInt() : null
+            );
 
             card.put("methodName", methodName);
             card.put("classFqn", classFqn);
             card.put("fqn", fqn);
             card.put("summaryRaw", guide.summaryRaw());
-
-            /*
-             * 중요:
-             *
-             * scenarioStep이 존재하면 해당 정보가 기본 guide보다 우선한다.
-             *
-             * 이 메서드 내부에서 guideSlots를 다시 생성하면
-             * 여기서 적용한 scenario 정보가 덮어써지므로
-             * attachMethodGuideBundle() 이후 guideSlots를 다시 만들면 안 된다.
-             */
-            attachMethodGuideBundle(
-                    card,
-                    guide,
-                    scenarioStep
-            );
-
-            /*
-             * attachMethodGuideBundle()에서 만들어진 최종 narrative를 사용한다.
-             */
-            String guideNarrative =
-                    card.path("guideNarrative")
-                            .asText(guide.narrative());
-
+            attachMethodGuideBundle(card, guide, scenarioStep);
+            mergeGuideOnlyQualityFields(card, guide);
+            // 슬롯이 비면 narrative도 비고, 그때 fallback 대상은 summaryRaw다.
+            // 그런데 미조인 카드의 summaryRaw 대부분이 이름 규칙 채움말이었으므로
+            // 그대로 떨어뜨릴 수 없다. guide.summaryRaw()는 이미 정화된 값이라
+            // 채움말이면 빈 문자열이고, 비는 것이 사실에 맞는 상태다.
+            String guideNarrative = firstNonBlank(
+                    card.path("guideNarrative").asText(""),
+                    guide.narrative(),
+                    guide.summaryRaw());
             card.put("summaryNarrative", guideNarrative);
             card.put("summaryPreview", guideNarrative);
             card.put("summaryTruncated", false);
@@ -1117,26 +1472,10 @@ public class LlmServiceBuildSupport {
             card.put("whatItDoesFull", guideNarrative);
             card.put("whatItDoesTruncated", false);
 
-            card.put("whenToUse", whenToUse);
+            ObjectNode slotEvidence = card.putObject("slotEvidence");
+            writeSlotEvidence(slotEvidence, guide.slotEvidence());
 
-            /*
-             * guideSlots와 guideQuality는
-             * attachMethodGuideBundle() → attachGuideBundle()에서 이미 생성된다.
-             *
-             * 따라서 여기에서 다시 card.putObject("guideSlots") 또는
-             * card.putObject("guideQuality")를 호출하지 않는다.
-             *
-             * 기존 구현에서는 이 부분에서 기본 guide 값을 다시 넣어
-             * scenario 기반 failureSignal/action 등이 사라지는 버그가 있었다.
-             */
-
-            /*
-             * scenario 정보를 별도의 usageScenario 객체에도 보존한다.
-             */
-            attachUsageScenario(
-                    card,
-                    scenarioStep
-            );
+            attachUsageScenario(card, scenarioStep);
 
             String signatureHint =
                     seed.path("signatureHint").asText("");
@@ -1221,6 +1560,35 @@ public class LlmServiceBuildSupport {
         return out;
     }
 
+    /**
+     * ApiDocGuideSupport에서만 계산되는 지표를 메서드 카드에 얹는다.
+     *
+     * <p>예전에는 {@code attachMethodGuideBundle} 바로 다음에서 guideSlots/guideQuality를
+     * {@code putObject}로 통째로 다시 써서, 방금 병합한 시나리오 서술이 전부 사라졌다.
+     * STEP②가 아무리 좋은 서술을 만들어도 STEP④ 산출물에는 결정론적 기본 문구만 남았고,
+     * {@code attachMethodGuideBundle}의 슬롯 병합은 사실상 죽은 코드였다.
+     * 이제는 덮어쓰지 않고 빠진 값만 채운다.</p>
+     *
+     * <p>{@code targetSuitabilityScore}는 이 경로에서만 계산된다. 빠뜨리면
+     * {@code buildApiDocQualityGate}가 기본값 1.0으로 읽어(해당 코드의 asDouble 기본값)
+     * 합성/예제 대상을 걸러내는 P1-3 조건이 조용히 무력화된다.</p>
+     */
+    private void mergeGuideOnlyQualityFields(ObjectNode card, ApiDocGuideSupport.GuideView guide) {
+        JsonNode qualityNode = card.path("guideQuality");
+        if (!qualityNode.isObject()) {
+            return;
+        }
+        ObjectNode quality = (ObjectNode) qualityNode;
+        double targetSuitability = guide.quality().targetSuitabilityScore();
+        quality.put("targetSuitabilityScore", targetSuitability);
+        // slotEvidence 본문은 guide 값을 쓰므로 신뢰도 라벨도 같은 출처로 맞춘다.
+        quality.put("slotEvidenceConfidence", guide.quality().slotEvidenceConfidence());
+        // P1-3: meetsThreshold = actionability 충족 AND targetSuitability 충족(합성/예제 제외)
+        quality.put("meetsThreshold",
+                quality.path("actionabilityScore").asInt(0) >= ACTIONABILITY_THRESHOLD
+                        && targetSuitability >= 1.0);
+    }
+
     private void attachMethodGuideBundle(
             ObjectNode card,
             ApiDocGuideSupport.GuideView guide,
@@ -1301,18 +1669,44 @@ public class LlmServiceBuildSupport {
         return out;
     }
 
+    /**
+     * caution을 메서드 fqn으로 색인한다.
+     *
+     * <p><b>{@code relatedClass}와 {@code relatedMethod}가 서로 다른 타입을 가리키면 쓰지 않는다.</b>
+     * 두 값은 모델이 준 것을 그대로 옮긴 것인데(:312), 실측 20개 중 6개가 서로 모순이었다 —
+     * {@code CAU-017}은 {@code relatedClass=Launcher}, {@code relatedMethod=MediaType.create},
+     * 메시지는 {@code Operator#createMissingOperandMessage} 이야기였다. 그 결과
+     * {@code MediaType.create} 카드의 failureSymptom에 전혀 다른 클래스의 설명이 붙었다.</p>
+     *
+     * <p>둘이 어긋나면 어느 쪽이 맞는지 알 방법이 없으므로 그 caution을 메서드에 붙이지 않는다.
+     * 한쪽을 골라 쓰면 절반은 틀린 곳에 붙는다. caution 자체는 산출물에 그대로 남고,
+     * 여기서 빠지는 것은 "이 메서드 카드의 근거"라는 주장뿐이다.</p>
+     */
     private Map<String, List<String>> indexCautionsByMethod(JsonNode cautions) {
         Map<String, List<String>> out = new HashMap<>();
         if (!cautions.isArray()) {
             return out;
         }
+        int contradictory = 0;
         for (JsonNode caution : cautions) {
             String method = caution.path("relatedMethod").asText("");
             if (method.isBlank()) {
                 continue;
             }
+            String owner = safeText(caution.path("relatedClass").asText(""));
+            if (!owner.isBlank() && !method.startsWith(owner + ".")) {
+                contradictory++;
+                log.warn("[LlmGuide] caution {} 의 relatedClass({})와 relatedMethod({})가 서로 다른 타입을 가리켜"
+                                + " 메서드 카드에 붙이지 않습니다.",
+                        caution.path("cautionId").asText(""), owner, method);
+                continue;
+            }
             out.computeIfAbsent(method, k -> new ArrayList<>())
                     .add(caution.path("message").asText(""));
+        }
+        if (contradictory > 0) {
+            log.warn("[LlmGuide] relatedClass/relatedMethod가 모순인 caution {}/{}건을 메서드 카드에서 제외했습니다.",
+                    contradictory, cautions.size());
         }
         return out;
     }
@@ -1330,23 +1724,6 @@ public class LlmServiceBuildSupport {
             out.put(method, step.path("order").asInt(0));
         }
         return out;
-    }
-
-    private String inferWhenToUse(String methodName) {
-        String lower = safeText(methodName).toLowerCase(Locale.ROOT);
-        if (lower.contains("parse")) {
-            return "옵션 정의가 끝난 뒤 실제 입력(args)을 해석할 때";
-        }
-        if (lower.contains("add") || lower.contains("required") || lower.contains("builder")) {
-            return "애플리케이션 시작 시 옵션 스키마를 정의할 때";
-        }
-        if (lower.contains("get") || lower.contains("has")) {
-            return "파싱 완료 후 값을 읽거나 분기 처리할 때";
-        }
-        if (lower.contains("help") || lower.contains("print")) {
-            return "오류 처리 또는 사용법 안내를 출력할 때";
-        }
-        return "핵심 흐름 중 해당 기능이 필요할 때";
     }
 
     private String extractInputs(String signatureHint) {
@@ -1497,21 +1874,72 @@ public class LlmServiceBuildSupport {
             entry.put("subsystem", shortenText(method.path("classFqn").asText("core"), 80));
             if (method.has("apiFlowRef")) entry.set("apiFlowRef", method.path("apiFlowRef").deepCopy());
             if (method.has("flowTraceSummary")) entry.put("flowTraceSummary", method.path("flowTraceSummary").asText(""));
+            // 이 자리에 "SCN-001" 리터럴이 박혀 있었다. 32개 엔트리 전부가 같은 값을 달고
+            // 나가서, 시나리오가 아무리 좋아져도 이 필드는 영원히 변하지 않았다.
+            // attachUsageScenario가 카드에 usageScenario.scenarioId를 이미 복사해 두므로
+            // 새 인자 없이 실제 값을 읽을 수 있다. 조인이 안 된 카드는 빈 배열로 둔다 —
+            // 없는 연결을 지어내지 않는다.
             ArrayNode relatedScenarios = entry.putArray("relatedScenarios");
-            relatedScenarios.add("SCN-001");
+            String usageScenarioId = safeText(method.path("usageScenario").path("scenarioId").asText(""));
+            if (!usageScenarioId.isBlank()) {
+                relatedScenarios.add(usageScenarioId);
+            }
         }
         return out;
     }
 
     /**
      * API 카드의 실전 가이드 품질 점수를 집계한다.
+     * 메서드 대상이므로 P1-3 합성/예제 판정을 적용한다.
      */
     public ObjectNode buildApiDocQualityGate(JsonNode coreMethods) {
+        return buildApiDocQualityGate(coreMethods, true, true);
+    }
+
+    /**
+     * 가이드 품질 점수를 집계한다. 서술 가능 여부 분리는 적용하지 않는다.
+     *
+     * @deprecated 메서드 카드에는 3-arg를 쓴다. 이 오버로드는 호출부 호환용으로만 남아 있다.
+     */
+    @Deprecated
+    public ObjectNode buildApiDocQualityGate(JsonNode coreMethods, boolean applyTargetSuitability) {
+        return buildApiDocQualityGate(coreMethods, applyTargetSuitability, false);
+    }
+
+    /**
+     * 가이드 품질 점수를 집계한다.
+     *
+     * <p><b>서술을 가질 수 없는 항목을 분모에서 빼지 않는다.</b> {@code itemCount}는 언제나
+     * 받은 항목 전체이고, 채점 대상이 그보다 적으면 {@code unscorableItemCount}와
+     * {@code unscorableReason}이 <b>같은 객체 안에</b> 함께 나온다. 불편한 항목을 분모에서
+     * 덜어내 좋아 보이게 만드는 것은 이 게이트가 고치려던 실패 그 자체다.</p>
+     *
+     * <p>축을 나누는 이유는 따로 있다. 저장소에 따라 일정 수의 카드는 무엇을 해도 서술을
+     * 가질 수 없다(클래스에 메서드가 하나뿐이라 흐름이 성립하지 않는 경우). 그 수가
+     * {@code belowThresholdCount}에 섞여 있으면 게이트가 절대 초록이 될 수 없고,
+     * 그러면 항상 만점이던 시절과 똑같이 정보량이 0이 된다. 실측에서 junit-framework는
+     * 40장 중 10장이 여기 해당했고, 그 10장 때문에 {@code max-scenarios} 개선(미달 15→2)이
+     * 25→12로 가려져 있었다.</p>
+     *
+     * @param applyTargetSuitability P1-3 합성/예제 판정을 적용할지.
+     *        메서드 카드는 true. rules/cautions는 "메서드 대상"이 아니므로 false다 —
+     *        규칙에 합성 메서드 판정을 적용하는 것 자체가 의미 왜곡이고,
+     *        false로 두면 그 사실이 {@code targetSuitabilityApplied}로 산출물에 남는다.
+     * @param applyNarratability 서술 가능/불가를 나눠 잴지. 메서드 카드는 true,
+     *        rules/cautions는 판정 대상 자체가 아니므로 false다. 적용 여부는
+     *        {@code narratabilityApplied}로 산출물에 남는다.
+     */
+    public ObjectNode buildApiDocQualityGate(
+            JsonNode coreMethods,
+            boolean applyTargetSuitability,
+            boolean applyNarratability
+    ) {
         ObjectNode out = objectMapper.createObjectNode();
         out.put("threshold", ACTIONABILITY_THRESHOLD);
         out.put("metric", "actionabilityScore");
 
         if (!coreMethods.isArray() || coreMethods.isEmpty()) {
+            out.put("itemCount", 0);
             out.put("methodCount", 0);
             out.put("averageActionabilityScore", 0.0d);
             out.put("minActionabilityScore", 0);
@@ -1520,11 +1948,27 @@ public class LlmServiceBuildSupport {
             out.put("evidenceCoverageAvg", 0.0d);
             out.put("forbiddenPhraseRateAvg", 0.0d);
             out.put("repetitionRateAvg", 0.0d);
+            out.put("targetSuitabilityApplied", applyTargetSuitability);
+            out.put("targetSuitabilityMeasuredCount", 0);
+            out.put("targetSuitabilityMissingCount", 0);
             out.put("targetSuitabilityAvg", 0.0d);
             out.put("narrativeDiversityAvg", 0.0d);
+            out.put("narratabilityApplied", applyNarratability);
+            out.put("scoredItemCount", 0);
+            out.put("unscorableItemCount", 0);
+            out.putObject("unscorableReason");
             out.put("meetsThreshold", false);
             return out;
         }
+
+        // 서술을 가질 수 있는 클래스 집합. 판정 규칙은 골격 생성과 공유한다
+        // (ScenarioNarratabilitySupport) — 두 벌이 되면 게이트가 거짓말을 시작한다.
+        Set<String> narratableClasses = applyNarratability
+                ? ScenarioNarratabilitySupport.narratableClassFqns(toMethodRefs(coreMethods))
+                : Set.of();
+
+        int itemCount = coreMethods.size();
+        Map<String, Integer> unscorableReason = new LinkedHashMap<>();
 
         int count = 0;
         int totalScore = 0;
@@ -1536,45 +1980,95 @@ public class LlmServiceBuildSupport {
         double repetitionRateSum = 0.0d;
         double targetSuitabilitySum = 0.0d;
         double narrativeDiversitySum = 0.0d;
+        int suitabilityMeasuredCount = 0;
+        int suitabilityMissing = 0;
 
         for (int i = 0; i < coreMethods.size(); i++) {
             JsonNode method = coreMethods.get(i);
+
+            if (applyNarratability) {
+                ScenarioNarratabilitySupport.MethodRef ref = toMethodRef(method);
+                if (!ScenarioNarratabilitySupport.isNarratable(ref, narratableClasses)) {
+                    // 점수를 매기지 않는다. 다만 사라지지도 않는다 — 아래에서
+                    // unscorableItemCount/unscorableReason으로 같은 객체 안에 남는다.
+                    unscorableReason.merge(
+                            ScenarioNarratabilitySupport.unscorableReason(ref, narratableClasses),
+                            1, Integer::sum);
+                    continue;
+                }
+            }
+
             JsonNode quality = method.path("guideQuality");
             int score = quality.path("actionabilityScore").asInt(method.path("actionabilityScore").asInt(0));
             double slotCoverage = quality.path("slotCoverage").asDouble(0.0d);
             double evidenceCoverage = quality.path("evidenceCoverage").asDouble(0.0d);
             double forbiddenRate = quality.path("forbiddenPhraseRate").asDouble(0.0d);
             double repetitionRate = quality.path("repetitionRate").asDouble(0.0d);
-            // P1-3: targetSuitability + narrativeDiversity (= 1 - repetitionRate)
-            double targetSuitability = quality.path("targetSuitabilityScore").asDouble(1.0d);
             double narrativeDiversity = 1.0d - repetitionRate;
+
+            // 부재를 1.0으로 읽지 않는다. 예전에는 asDouble(1.0d)였는데,
+            // targetSuitabilityScore를 생산하지 않는 경로(attachGuideBundle)의 결과가
+            // 전부 "적합"으로 간주되어 P1-3 필터가 조용히 항상 통과했다.
+            boolean suitabilityMeasured = quality.path("targetSuitabilityScore").isNumber();
+            double targetSuitability = suitabilityMeasured
+                    ? quality.path("targetSuitabilityScore").asDouble()
+                    : 0.0d;
 
             count++;
             totalScore += score;
             minScore = Math.min(minScore, score);
-            // P1-3: meetsThreshold = actionability 기준 AND targetSuitability 충족
-            if (score < ACTIONABILITY_THRESHOLD || targetSuitability < 1.0d) {
+            boolean fillerFree = forbiddenRate == 0.0d;
+            boolean suitabilityOk = !applyTargetSuitability
+                    || (suitabilityMeasured && targetSuitability >= 1.0d);
+            if (score < ACTIONABILITY_THRESHOLD || !fillerFree || !suitabilityOk) {
                 belowThreshold++;
+            }
+            if (applyTargetSuitability && !suitabilityMeasured) {
+                suitabilityMissing++;
             }
             slotCoverageSum += slotCoverage;
             evidenceCoverageSum += evidenceCoverage;
             forbiddenRateSum += forbiddenRate;
             repetitionRateSum += repetitionRate;
-            targetSuitabilitySum += targetSuitability;
+            if (suitabilityMeasured) {
+                targetSuitabilitySum += targetSuitability;
+                suitabilityMeasuredCount++;
+            }
             narrativeDiversitySum += narrativeDiversity;
         }
 
-        out.put("methodCount", count);
-        out.put("averageActionabilityScore", round2((double) totalScore / count));
+        // itemCount는 언제나 받은 항목 전체다. 채점 대상이 줄어도 여기는 줄지 않는다 —
+        // 분모에서 덜어내 좋아 보이게 만드는 것이 이 게이트가 고치려던 실패다.
+        out.put("itemCount", itemCount);
+        // methodCount는 하위호환용으로 남긴다. refined_rules에서는 실제로
+        // rules + cautions 개수라 이름이 오독을 부른다. itemCount를 쓴다.
+        out.put("methodCount", itemCount);
+        out.put("narratabilityApplied", applyNarratability);
+        out.put("scoredItemCount", count);
+        out.put("unscorableItemCount", itemCount - count);
+        ObjectNode reason = out.putObject("unscorableReason");
+        for (Map.Entry<String, Integer> entry : unscorableReason.entrySet()) {
+            reason.put(entry.getKey(), entry.getValue());
+        }
+
+        // 아래 평균은 전부 채점 대상(scoredItemCount) 기준이다.
+        out.put("averageActionabilityScore", count == 0 ? 0.0d : round2((double) totalScore / count));
         out.put("minActionabilityScore", minScore == Integer.MAX_VALUE ? 0 : minScore);
         out.put("belowThresholdCount", belowThreshold);
-        out.put("slotCoverageAvg", round2(slotCoverageSum / count));
-        out.put("evidenceCoverageAvg", round2(evidenceCoverageSum / count));
-        out.put("forbiddenPhraseRateAvg", round2(forbiddenRateSum / count));
-        out.put("repetitionRateAvg", round2(repetitionRateSum / count));
-        out.put("targetSuitabilityAvg", round2(targetSuitabilitySum / count));
-        out.put("narrativeDiversityAvg", round2(narrativeDiversitySum / count));
-        out.put("meetsThreshold", belowThreshold == 0);
+        out.put("slotCoverageAvg", count == 0 ? 0.0d : round2(slotCoverageSum / count));
+        out.put("evidenceCoverageAvg", count == 0 ? 0.0d : round2(evidenceCoverageSum / count));
+        out.put("forbiddenPhraseRateAvg", count == 0 ? 0.0d : round2(forbiddenRateSum / count));
+        out.put("repetitionRateAvg", count == 0 ? 0.0d : round2(repetitionRateSum / count));
+        out.put("targetSuitabilityApplied", applyTargetSuitability);
+        out.put("targetSuitabilityMeasuredCount", suitabilityMeasuredCount);
+        out.put("targetSuitabilityMissingCount", suitabilityMissing);
+        // 측정된 항목만으로 평균을 낸다. 미측정을 1.0으로 셔서 더하면
+        // 측정하지 않은 것이 평균을 올리는 이상한 지표가 된다.
+        out.put("targetSuitabilityAvg",
+                suitabilityMeasuredCount == 0 ? 0.0d : round2(targetSuitabilitySum / suitabilityMeasuredCount));
+        out.put("narrativeDiversityAvg", count == 0 ? 0.0d : round2(narrativeDiversitySum / count));
+        // 채점 대상이 하나도 없으면 통과시키지 않는다. 잴 것이 없는 것과 통과는 다르다.
+        out.put("meetsThreshold", count > 0 && belowThreshold == 0);
         return out;
     }
 
@@ -1583,6 +2077,94 @@ public class LlmServiceBuildSupport {
      */
     public ObjectNode buildFileTreeDocQualityGate(JsonNode coreMethods) {
         return buildApiDocQualityGate(coreMethods);
+    }
+
+    /**
+     * 시나리오 서술의 채움률을 집계한다.
+     *
+     * <p>STEP②는 5개 산출물 중 유일하게 품질 게이트가 없었다. 호출 분해로 서술 칸 채움을
+     * 36/88에서 85/88로 올렸는데 그 값이 어디에도 기록되지 않아, 개선을 로그로만 확인하고
+     * 산출물로는 증명할 수 없었다.</p>
+     *
+     * <p><b>guideSlots를 세면 안 된다.</b> {@code attachStepGuideBundle}의 폴백 체인
+     * ({@code precondition→description}, {@code userAction→evidenceInterpretation})이 빈칸을
+     * 가려서, 서술이 36/88이던 실행에서도 step의 {@code slotCoverage}는 1.0이었다.
+     * 그래서 {@link #STEP_RICH_TEXT_FIELDS}의 원본 필드를 직접 센다.</p>
+     *
+     * <p>채운 칸 수와 별개로 {@code fillerFieldCount}를 함께 낸다. 채운 것과 제대로 채운 것은
+     * 다르다 — 실측에서 85칸 중 1칸이 채움말이었다. 채움 수만 세면 모델이 채움말로 88칸을
+     * 메웠을 때 100%로 보이고, 그건 지금 고치고 있는 바로 그 실패를 새 게이트에 다시 만드는 것이다.</p>
+     */
+    public ObjectNode buildScenarioSpecsQualityGate(JsonNode scenarios, JsonNode overview) {
+        ObjectNode out = objectMapper.createObjectNode();
+        out.put("threshold", SCENARIO_NARRATIVE_THRESHOLD);
+        out.put("metric", "narrativeFieldCoverage");
+
+        // description + STEP_RICH_TEXT_FIELDS 8개 = 9필드. 전부 PROMPT_SCENARIO_ONE의
+        // 출력 스키마에 있는 필드다. 수기 집계 때는 confidenceReason을 빼고 8필드로 셌기 때문에
+        // 예전 보고값(36/88, 85/88)과 분모가 다르다. 비율은 같은 결론을 준다(36% vs 92%).
+        List<String> fields = new ArrayList<>();
+        fields.add("description");
+        fields.addAll(STEP_RICH_TEXT_FIELDS);
+
+        Map<String, Integer> filledByField = new LinkedHashMap<>();
+        for (String field : fields) {
+            filledByField.put(field, 0);
+        }
+
+        int scenarioCount = 0;
+        int stepCount = 0;
+        int filled = 0;
+        int fillerCount = 0;
+
+        if (scenarios != null && scenarios.isArray()) {
+            for (JsonNode scenario : scenarios) {
+                scenarioCount++;
+                for (JsonNode step : scenario.path("steps")) {
+                    stepCount++;
+                    for (String field : fields) {
+                        String value = step.path(field).asText("");
+                        if (safeText(value).isBlank()) {
+                            continue;
+                        }
+                        filled++;
+                        filledByField.merge(field, 1, Integer::sum);
+                        if (ApiDocGuideSupport.isFiller(value)) {
+                            fillerCount++;
+                        }
+                    }
+                }
+            }
+        }
+
+        int total = stepCount * fields.size();
+        double coverage = total == 0 ? 0.0d : (double) filled / total;
+
+        int overviewFilled = 0;
+        if (overview != null && overview.isObject()) {
+            for (JsonNode value : overview) {
+                if (!safeText(value.asText("")).isBlank()) {
+                    overviewFilled++;
+                }
+            }
+        }
+
+        out.put("scenarioCount", scenarioCount);
+        out.put("stepCount", stepCount);
+        out.put("narrativeFieldTotal", total);
+        out.put("narrativeFieldFilled", filled);
+        out.put("narrativeFieldCoverage", round2(coverage));
+        out.put("fillerFieldCount", fillerCount);
+        out.put("overviewFieldFilled", overviewFilled);
+
+        ObjectNode byField = out.putObject("fieldCoverageByName");
+        for (Map.Entry<String, Integer> entry : filledByField.entrySet()) {
+            byField.put(entry.getKey(), entry.getValue());
+        }
+
+        // 채움말이 섞이면 채움률과 무관하게 통과시키지 않는다.
+        out.put("meetsThreshold", coverage >= SCENARIO_NARRATIVE_THRESHOLD && fillerCount == 0);
+        return out;
     }
 
     /**
@@ -1596,10 +2178,36 @@ public class LlmServiceBuildSupport {
         if (cautions != null && cautions.isArray()) {
             merged.addAll((ArrayNode) cautions);
         }
-        ObjectNode gate = buildApiDocQualityGate(merged);
+        // rules/cautions는 메서드 대상이 아니므로 합성/예제 판정도, 서술 가능 판정도
+        // 적용하지 않는다. 규칙에 "이 클래스에 메서드가 몇 개냐"를 묻는 것 자체가 무의미하다.
+        ObjectNode gate = buildApiDocQualityGate(merged, false, false);
         gate.put("ruleCount", countArray(rules));
         gate.put("cautionCount", countArray(cautions));
         return gate;
+    }
+
+    /**
+     * 카드 JSON을 서술 가능 판정용 최소 표현으로 옮긴다.
+     *
+     * <p>{@code fqn}은 {@code com.foo.Bar.baz} 형태라 마지막 마디가 메서드 이름이다.
+     * 카드에 {@code methodName}이 따로 있으면 그것을 먼저 쓴다.</p>
+     */
+    private ScenarioNarratabilitySupport.MethodRef toMethodRef(JsonNode method) {
+        String fqn = safeText(method.path("fqn").asText(""));
+        String methodName = safeText(method.path("methodName").asText(""));
+        if (methodName.isBlank() && fqn.contains(".")) {
+            methodName = fqn.substring(fqn.lastIndexOf('.') + 1);
+        }
+        return new ScenarioNarratabilitySupport.MethodRef(
+                safeText(method.path("classFqn").asText("")), fqn, methodName);
+    }
+
+    private List<ScenarioNarratabilitySupport.MethodRef> toMethodRefs(JsonNode coreMethods) {
+        List<ScenarioNarratabilitySupport.MethodRef> refs = new ArrayList<>();
+        for (JsonNode method : coreMethods) {
+            refs.add(toMethodRef(method));
+        }
+        return refs;
     }
 
     /**
@@ -1739,6 +2347,8 @@ public class LlmServiceBuildSupport {
     ) {
         ObjectNode context = objectMapper.createObjectNode();
         context.set("overviewSeed", structure.path("overviewSeed"));
+        // scenarioSeed가 이 단계의 출력 골격이다. 모델은 여기에 서술만 채운다.
+        context.set("scenarioSeed", structure.path("scenarioSeed"));
         context.set("coreClassSeed", takeFirst(structure.path("coreClassSeed"), 8));
         context.set("coreMethodSeed", takeFirst(structure.path("coreMethodSeed"), 14));
         context.set("methodFlowSeed", takeFirst(structure.path("methodFlowSeed"), 6));
@@ -1768,11 +2378,28 @@ public class LlmServiceBuildSupport {
             JsonNode scenarioSpecs,
             JsonNode refinedRules
     ) {
-        List<String> scenarioIds = collectIds(scenarioSpecs.path("scenarios"), "scenarioId");
         List<String> ruleIds = collectIds(refinedRules.path("rules"), "ruleId");
 
-        // coreClass fqn → super-cluster displayName 매핑
+        // 이 두 줄은 계산만 되고 한 번도 읽힐지 않는 죽은 코드였다.
+        // 설계자가 서브시스템별 실제 연결을 넣으려고 통로를 뚫어 둔 것으로 보이는데
+        // 연결하지 않았고, 그 사이 relatedScenarios는 전체 시나리오 앞 3개를
+        // 모든 서브시스템에 똑같이 넣고 있었다. 이제 원래 용도대로 쓴다.
         Map<String, String> packageToSuperLabel = buildPackageToSuperLabel(superSubsystems);
+        Map<String, Set<String>> scenarioIdsBySuperLabel = new LinkedHashMap<>();
+        if (coreClasses != null && coreClasses.isArray()) {
+            for (JsonNode type : coreClasses) {
+                String label = resolveSuperLabel(packageToSuperLabel, type.path("packageName").asText(""));
+                if (label == null || label.isBlank()) {
+                    continue;
+                }
+                for (JsonNode id : type.path("relatedScenarios")) {
+                    String scenarioId = safeText(id.asText(""));
+                    if (!scenarioId.isBlank()) {
+                        scenarioIdsBySuperLabel.computeIfAbsent(label, k -> new LinkedHashSet<>()).add(scenarioId);
+                    }
+                }
+            }
+        }
 
         ArrayNode out = objectMapper.createArrayNode();
         if (!superSubsystems.isArray()) return out;
@@ -1814,10 +2441,12 @@ public class LlmServiceBuildSupport {
                 }
             }
 
-            // relatedScenarios (전체 시나리오를 공유, 최대 3개)
+            // relatedScenarios: 이 모듈에 속한 클래스가 실제로 닿는 시나리오만.
             ArrayNode relatedScenarios = item.putArray("relatedScenarios");
-            for (int j = 0; j < scenarioIds.size() && j < 3; j++) {
-                relatedScenarios.add(scenarioIds.get(j));
+            List<String> supScenarioIds =
+                    new ArrayList<>(scenarioIdsBySuperLabel.getOrDefault(displayName, Set.of()));
+            for (int j = 0; j < supScenarioIds.size() && j < MAX_RELATED_SCENARIOS; j++) {
+                relatedScenarios.add(supScenarioIds.get(j));
             }
 
             // ruleIds (전체 규칙을 공유, 최대 4개)
@@ -1851,6 +2480,38 @@ public class LlmServiceBuildSupport {
             label.put("memberCount", sup.path("memberCount").asInt(0));
         }
         return out;
+    }
+
+    /**
+     * 클래스의 패키지가 어느 super-cluster에 속하는지 최장 접두사로 찾는다.
+     *
+     * <p>{@code packageRoots}는 {@code org.junit.jupiter.api}처럼 전체 패키지명인데
+     * 클래스의 패키지는 {@code org.junit.jupiter.api.extension}처럼 더 깊다.
+     * 정확 일치로 찾으면 대부분 미스가 나고, {@code topPackageKey}로 자르면
+     * {@code org.junit.jupiter}가 되어 아예 어긋난다. 그래서 접두사로 맞춘다.</p>
+     *
+     * <p>여러 super-cluster가 같은 root를 공유하는 경우가 있는데
+     * ({@code org.junit.jupiter.api}가 engine과 params 양쪽에 등장한다)
+     * {@code buildPackageToSuperLabel}의 {@code putIfAbsent}가 먼저 등록된 쪽을 남긴다.
+     * 기존 동작이므로 여기서 바꾸지 않는다.</p>
+     */
+    private String resolveSuperLabel(Map<String, String> packageToSuperLabel, String packageName) {
+        String pkg = safeText(packageName);
+        if (pkg.isBlank() || packageToSuperLabel.isEmpty()) {
+            return "";
+        }
+        String bestRoot = "";
+        for (Map.Entry<String, String> entry : packageToSuperLabel.entrySet()) {
+            String root = safeText(entry.getKey());
+            if (root.isBlank()) {
+                continue;
+            }
+            boolean matches = pkg.equals(root) || pkg.startsWith(root + ".");
+            if (matches && root.length() > bestRoot.length()) {
+                bestRoot = root;
+            }
+        }
+        return bestRoot.isBlank() ? "" : packageToSuperLabel.get(bestRoot);
     }
 
     private Map<String, String> buildPackageToSuperLabel(JsonNode superSubsystems) {
@@ -2205,12 +2866,18 @@ public class LlmServiceBuildSupport {
         return value;
     }
 
+    /**
+     * 문장 공백만 정리한다. 값이 없으면 빈 문자열을 그대로 돌려준다.
+     *
+     * <p>예전에는 빈 슬롯을 "핵심 동작 수행"으로 채웠는데 두 가지 문제가 있었다.
+     * 첫째, 이 문구는 프롬프트가 금지한 표현이라({@code GUIDE_FORBIDDEN_PHRASES})
+     * 코드가 스스로 주입하고 {@code computeForbiddenPhraseRate}가 그걸 다시 감점했다.
+     * 둘째, 빈 슬롯이 사라지면서 {@code computeSlotCoverage}가 항상 1.0을 반환해
+     * 점수 가중치의 45%가 상수가 됐다(실측: 두 차례 실행 20개 step 전부 1.0).
+     * 없는 값은 없는 채로 두고 지표가 그것을 드러내게 한다.</p>
+     */
     private String normalizeSentence(String text) {
-        String normalized = safeText(text).replaceAll("\\s+", " ").trim();
-        if (normalized.isBlank()) {
-            return "핵심 동작 수행";
-        }
-        return normalized;
+        return safeText(text).replaceAll("\\s+", " ").trim();
     }
 
     private String toJson(Object obj) {

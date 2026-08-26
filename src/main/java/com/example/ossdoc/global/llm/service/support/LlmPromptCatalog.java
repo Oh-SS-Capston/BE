@@ -54,17 +54,23 @@ public final class LlmPromptCatalog {
             """;
 
     public static final String PROMPT_SCENARIOS = """
-            역할: 처음 사용하는 개발자 관점의 "시작 가이드 시나리오"와 API 사용 흐름을 작성한다.
+            역할: 입력의 scenarioSeed에 담긴 시나리오 골격을 받아, 비어 있는 서술 필드를 채운다.
+            골격은 코드 분석으로 이미 확정된 것이다. 시나리오를 새로 발명하지 않는다.
             반드시 아래 출력 계약을 따른다.
             1) overview: 문제/목적/적합한 사용 상황/핵심 기능/시작 가이드/아키텍처 요약/데이터 흐름
-            2) scenarios: 각 단계의 classFqn, methodFqn, evidenceLinks, 근거 해석, 성공/실패 신호
+            2) scenarios: scenarioSeed의 각 단계에 서술을 채운 결과
             3) methodFlow: 실제 호출 순서(order, title, methodFqn)와 단계별 전제/결과/위험
-            제약:
-            - scenarios 최대 %d개
-            - scenario 당 steps 최대 %d개
-            - step.description은 호출 전 체크 -> 호출 -> 성공 신호 -> 실패 시 조치 흐름을 반영한다.
+            골격 유지 규칙:
+            - scenarioSeed의 scenarioId, 단계 순서(stepNo), classFqn, methodFqn을 그대로 옮긴다. 바꾸지 않는다.
+            - 시나리오나 단계를 추가하지도 빼지도 않는다. 골격에 있는 것만 쓴다.
+            - scenarios는 최대 %d개, scenario 당 steps는 최대 %d개다.
+            서술 작성 규칙:
+            - 각 step의 description, precondition, action, successSignal, failureSignal, userAction,
+              evidenceInterpretation을 모두 채운다. 빈 문자열이나 생략으로 두지 않는다.
+            - 각 단계의 근거는 골격이 준 summarySeed와 filePath/startLine이다. 그 범위를 넘는 내용은 쓰지 않는다.
             - step.evidenceInterpretation에는 해당 코드 위치가 왜 이 단계의 근거인지 설명한다.
-            - 근거 링크가 없는 단계는 만들지 말거나 confidence를 낮추고 "추정"으로 표시한다.
+            - evidenceLinks의 filePath/lines는 골격에 주어진 값을 그대로 옮긴다. 새 값을 지어내지 않는다.
+            - 근거가 약하면 confidence를 낮추고 "추정"이라고 밝힌다.
             - 금지 표현("핵심 동작 수행", "입력 조건 기반 로직")은 그대로 사용하지 않는다.
             출력 스키마(JSON):
             {"overview":{"project":"string","purpose":"string","fitSituation":"string","coreFeatures":"string",
@@ -80,11 +86,12 @@ public final class LlmPromptCatalog {
             """;
 
     public static final String PROMPT_SCENARIOS_COMPACT = """
-            역할: 시작 시나리오를 compact 모드로 작성한다.
+            역할: 입력의 scenarioSeed 골격에 서술을 채운다. compact 모드다.
             제약:
+            - scenarioSeed의 scenarioId, stepNo, classFqn, methodFqn을 그대로 옮긴다. 시나리오나 단계를 늘리지 않는다.
             - scenarios 최대 %d개
-            - 각 step은 description, action, successSignal, failureSignal, evidenceInterpretation을 우선 보존한다.
-            - 근거 링크가 없는 문장은 최소화한다.
+            - 각 step은 description, action, successSignal, failureSignal, evidenceInterpretation을 우선 채운다.
+            - 골격의 summarySeed와 근거 위치를 벗어난 내용은 쓰지 않는다.
             출력 스키마(JSON):
             {"overview":{"project":"string","purpose":"string","fitSituation":"string","coreFeatures":"string",
             "startGuide":"string","architectureSummary":"string","dataFlow":"string","confidenceNote":"string"},
@@ -96,5 +103,80 @@ public final class LlmPromptCatalog {
             "confidence":0.0,"evidenceLinks":[{"evidenceId":1,"filePath":"path","lines":"10-20"}]}]}],
             "methodFlow":[{"order":1,"title":"string","description":"string","precondition":"string",
             "result":"string","risk":"string","evidenceInterpretation":"string","methodFqn":"pkg.Type.method"}]}
+            """;
+
+    /**
+     * PER_SCENARIO 모드: 개요만 만드는 소형 호출.
+     * 시나리오를 여기서 다루지 않으므로 "몇 개까지 썼나"를 모델이 판단할 일이 없다.
+     */
+    public static final String PROMPT_OVERVIEW = """
+            역할: 입력 시드를 근거로 이 라이브러리의 개요 8필드를 채운다. 그 외에는 아무것도 만들지 않는다.
+            규칙:
+            - 시드(overviewSeed, coreClassSeed, cautions)에 없는 사실을 지어내지 않는다.
+            - 각 필드는 두세 문장으로 쓴다. 빈 문자열로 두지 않는다.
+            - 근거가 약한 문장은 confidenceNote에 어디가 추정인지 밝힌다.
+            - 금지 표현("핵심 동작 수행", "입력 조건 기반 로직")은 그대로 사용하지 않는다.
+            출력 스키마(JSON):
+            {"overview":{"project":"string","purpose":"string","fitSituation":"string","coreFeatures":"string",
+            "startGuide":"string","architectureSummary":"string","dataFlow":"string","confidenceNote":"string"}}
+            """;
+
+    /**
+     * PER_SCENARIO 모드: 시나리오 <b>한 장</b>의 빈칸만 채우는 호출.
+     *
+     * <p>SINGLE 모드 프롬프트와 결정적으로 다른 점은 "몇 개를 쓸지"를 아예 묻지 않는다는 것이다.
+     * 골격이 한 장뿐이므로 모델이 순회를 관리할 필요가 없고, 따라서 중간에 "다 썼다"고
+     * 판단할 자리도 없다. 순회는 호출자가 for문으로 한다.</p>
+     *
+     * <p>{@code excludedByOtherScenarios}는 이 시나리오 골격에서 빠진 메서드와 그것을 가져간
+     * 시나리오를 알려준다. 골격은 같은 메서드를 두 시나리오에 넣지 않기 때문에, 이 정보가 없으면
+     * 격리된 모델이 "앞서 만든 객체를" 같은 근거 없는 서술로 빈자리를 메운다.</p>
+     *
+     * <p>근거 목록에서 {@code summarySeed}를 유일한 축으로 삼지 않는다. 예전에는 근거를
+     * "summarySeed와 filePath/startLine, 그리고 evidence"로 못 박았는데, 실측 40개 메서드 중
+     * 39개는 실제 요약이 없어 {@code summarySeed}가 이름 패턴 추측 문구였다. 모델은 지시대로
+     * 그것을 근거 삼아 베꼈고, 그 결과가 산출물의 채움말이었다. 시드에서 추측 문구를 걷어냈으므로
+     * (그 자리는 이제 빈다) 프롬프트도 실제로 존재하는 근거를 가리켜야 한다.</p>
+     */
+    public static final String PROMPT_SCENARIO_ONE = """
+            역할: 아래 시나리오 골격 한 장의 비어 있는 서술 필드를 채운다.
+            골격은 코드 분석으로 확정된 것이다. 시나리오를 새로 만들지 않는다.
+            채울 칸:
+            - steps의 각 항목마다 description, precondition, action, successSignal, failureSignal,
+              userAction, dataHandled, evidenceInterpretation 여덟 개를 검토한다.
+              이 여덟 개가 이 작업의 전부다.
+            - 칸마다 따로 판정한다. 실패는 두 가지이고 둘 다 똑같이 실패다.
+              · 근거가 있는데 비운 칸 — 실패다. 근거가 있으면 반드시 채운다.
+              · 근거가 없는데 채운 칸 — 실패다. 근거가 없으면 반드시 비운다.
+            - 근거가 있다는 것은 이런 경우다. 시그니처에 인자가 있으면 그 인자가 근거다
+              (precondition·action·dataHandled를 인자의 타입과 이름으로 쓸 수 있다).
+              스니펫이 있으면 그 코드가 근거다. 반환 타입이 시그니처에 있으면 그것이 근거다.
+            - 시나리오 수준의 whyThisMatters, entryPoint, expectedOutcome도 같은 기준으로 쓴다.
+            골격 유지 규칙:
+            - scenarioId와 각 step의 stepNo, methodFqn을 그대로 옮긴다. 서술을 붙일 칸을 가리킨다.
+            - 골격에 없는 step을 추가하지 않는다. 다른 시나리오를 만들지 않는다.
+            - classFqn과 evidenceLinks는 응답에 넣지 않는다. 골격 값이 쓰이므로 버려진다.
+            서술 작성 규칙:
+            - 근거는 골격이 준 signatureHint(메서드 시그니처), filePath/startLine, evidence(코드 스니펫),
+              그리고 summarySeed가 있을 때 그것뿐이다. 그 범위를 넘지 않는다.
+            - summarySeed는 없을 수 있다. 없으면 signatureHint와 evidence로 쓴다.
+              시그니처의 인자 이름·타입과 스니펫의 실제 코드가 가장 확실한 근거다.
+            - excludedByOtherScenarios에 있는 메서드는 다른 시나리오가 다룬다.
+              이 시나리오의 step으로 삼지 말고, 필요하면 "그 시나리오에서 다룬다"고만 언급한다.
+            - 스니펫과 시그니처에 없는 것은 쓰지 않는다. 시그니처에 없는 반환 타입, 코드에 없는
+              예외 이름, 확인되지 않은 호출 순서를 지어내지 않는다. 코드가 "null이면 안 된다"고만
+              말한다면 어떤 예외가 던져지는지는 모르는 것이다. 모르는 것은 비운다.
+              반대로 시그니처나 스니펫에 있는 것은 근거이므로 그대로 쓴다.
+            - 인자가 없는 메서드에는 인자에 대한 사전조건이 없다. 없는 것을 지어내지 말고 비운다.
+            - 근거가 약하면 confidence를 낮춘다. 다만 confidence를 낮춘다고 해서 근거에 없는
+              사실을 쓸 수 있게 되는 것은 아니다. 그럴 때도 비운다.
+            - 금지 표현("핵심 동작 수행", "입력 조건 기반 로직")은 그대로 사용하지 않는다.
+            출력 스키마(JSON):
+            {"scenarios":[{"scenarioId":"%s","title":"string","intent":"string","whyThisMatters":"string",
+            "entryPoint":"string","expectedOutcome":"string",
+            "steps":[{"stepNo":1,"description":"string","precondition":"string","action":"string",
+            "successSignal":"string","failureSignal":"string","userAction":"string","dataHandled":"string",
+            "evidenceInterpretation":"string","confidenceReason":"string",
+            "methodFqn":"pkg.Type.method","confidence":0.0}]}]}
             """;
 }

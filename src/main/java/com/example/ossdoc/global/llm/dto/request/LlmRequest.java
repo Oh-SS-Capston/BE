@@ -40,6 +40,15 @@ public class LlmRequest {
      */
     private Boolean preferKorean;
 
+    /**
+     * 사용할 LLM 제공자. {@code "ollama"} 또는 {@code "claude"}.
+     *
+     * <p>null/빈 값이면 run에 기록된 제공자, 그것도 없으면 {@code ossdoc.llm.provider} 설정값을 쓴다.
+     * 문자열로 받는 이유는 HTTP 요청에서 대소문자를 가리지 않고 받기 위해서다.
+     * 인식할 수 없는 값은 기본값으로 흘리지 않고 실패로 처리한다.</p>
+     */
+    private String provider;
+
     public boolean useAutoAssemble() {
         return autoAssemble == null || autoAssemble;
     }
