@@ -1,0 +1,252 @@
+package com.example.ossdoc.domain.extraction.service.extractor;
+
+import com.example.ossdoc.domain.extraction.dto.context.ExtractionSink;
+import com.example.ossdoc.domain.extraction.dto.model.EvidenceFact;
+import com.example.ossdoc.domain.extraction.dto.model.ExtractionAggregate;
+import com.example.ossdoc.domain.extraction.dto.model.ObservationFact;
+import com.example.ossdoc.domain.extraction.dto.model.SymbolFact;
+import com.example.ossdoc.domain.extraction.enums.AccessLevel;
+import com.example.ossdoc.domain.extraction.enums.EvidenceType;
+import com.example.ossdoc.domain.extraction.enums.FactOriginKind;
+import com.example.ossdoc.domain.extraction.enums.ObservationKind;
+import com.example.ossdoc.domain.extraction.service.support.util.EvidenceIdGenerator;
+import com.example.ossdoc.domain.extraction.service.support.util.RepoPathUtils;
+import com.example.ossdoc.domain.extraction.service.support.util.SymbolIdFactory;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Component;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Stream;
+
+/**
+ * README 코드 블록에서 대문자 시작 식별자를 추출해 public 타입 목록과 대조한다.
+ * 단일 매칭 시 README_MENTION ObservationFact를 생성한다.
+ * 청크 병합 완료 후 호출해야 public surface가 확보된다.
+ */
+@Slf4j
+@Component
+public class ReadmeObservationScanner {
+
+    private static final List<String> README_CANDIDATES = List.of(
+            "README.md", "QUICKSTART.md", "QUICK_START.md",
+            "docs/usage.md", "docs/getting-started.md",
+            "docs/Usage.md", "docs/Getting-Started.md"
+    );
+
+    // 코드 펜스 블록 (``` 또는 ~~~)
+    private static final Pattern CODE_FENCE =
+            Pattern.compile("(?:```|~~~)[\\w]*\\n([\\s\\S]*?)(?:```|~~~)", Pattern.MULTILINE);
+
+    // 인라인 코드 (`…`)
+    private static final Pattern INLINE_CODE =
+            Pattern.compile("`([^`\n]{2,80})`");
+
+    // import/usage 문에서 FQCN 추출 — 마지막 대문자 세그먼트를 식별자로 사용
+    private static final Pattern FQCN_IN_TEXT =
+            Pattern.compile("[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]+)+\\.([A-Z][A-Za-z0-9]+)");
+
+    private static final Pattern IDENTIFIER =
+            Pattern.compile("[A-Z][A-Za-z0-9]{1,}");
+
+    private static final Pattern SECTION_HEADER =
+            Pattern.compile("(?i)^#{1,3}\\s+(quick\\s+start|getting\\s+started|usage|example|tutorial)",
+                    Pattern.MULTILINE);
+
+    // 섹션 끝 경계 산출용 — 모든 h1~h3 헤더 위치를 수집한다
+    private static final Pattern ANY_HEADER =
+            Pattern.compile("^#{1,3}\\s+\\S", Pattern.MULTILINE);
+
+    private static final Set<String> EXCLUDED = Set.of(
+            "String", "Integer", "Long", "Double", "Float", "Boolean", "Object",
+            "List", "Map", "Set", "Optional", "Stream", "Collection", "Iterable",
+            "Exception", "RuntimeException", "Override", "Deprecated", "SuppressWarnings",
+            "System", "Thread", "Class", "Enum", "Number", "Math", "Arrays", "Collections",
+            "StringBuilder", "StringBuffer", "Runnable", "Comparable", "Serializable",
+            "Void", "Byte", "Short", "Character"
+    );
+
+    public void scan(Path repoRoot, ExtractionAggregate aggregate, ExtractionSink sink) {
+        Path readmeFile = findReadme(repoRoot);
+        if (readmeFile == null) {
+            return;
+        }
+
+        Map<String, String> publicSurface = buildPublicSurface(aggregate);
+        if (publicSurface.isEmpty()) {
+            return;
+        }
+
+        String content;
+        try {
+            content = Files.readString(readmeFile);
+        } catch (IOException e) {
+            log.warn("[README-SCAN] README 읽기 실패: {}", readmeFile, e);
+            return;
+        }
+
+        String relativePath = RepoPathUtils.toRepoRelative(repoRoot, readmeFile);
+        String siteSymbol = SymbolIdFactory.module("default");
+
+        Set<String> found = extractIdentifiers(content);
+
+        for (String id : found) {
+            if (!publicSurface.containsKey(id)) continue;
+            String fqcn = publicSurface.get(id);
+            if (fqcn == null) continue; // 동명 타입 복수 — 오탐 방지
+
+            EvidenceFact evidence = EvidenceFact.builder()
+                    .id(EvidenceIdGenerator.generate(EvidenceType.README, relativePath,
+                            null, null, null, null, fqcn))
+                    .type(EvidenceType.README)
+                    .path(relativePath)
+                    .symbol(fqcn)
+                    .build();
+            sink.addEvidence(evidence);
+
+            sink.addObservation(ObservationFact.builder()
+                    .kind(ObservationKind.README_MENTION)
+                    .siteSymbol(siteSymbol)
+                    .targetSymbol(fqcn)
+                    .origin(FactOriginKind.RESOURCE)
+                    .confidenceHint(0.6)
+                    .evidenceIds(List.of(evidence.id()))
+                    .build());
+        }
+    }
+
+    private Map<String, String> buildPublicSurface(ExtractionAggregate aggregate) {
+        Map<String, String> surface = new HashMap<>();
+        if (aggregate.symbols() == null || aggregate.symbols().types() == null) {
+            return surface;
+        }
+        for (SymbolFact type : aggregate.symbols().types()) {
+            if (type.access() != AccessLevel.PUBLIC) continue;
+            String qn = type.qualifiedName();
+            if (qn == null || qn.isBlank()) continue;
+            String simpleName = simpleName(qn);
+            if (surface.containsKey(simpleName)) {
+                surface.put(simpleName, null); // 동명 타입 충돌 표시
+            } else {
+                surface.put(simpleName, qn);
+            }
+        }
+        return surface;
+    }
+
+    private Set<String> extractIdentifiers(String content) {
+        String targetContent = scopeToTargetSections(content);
+        Set<String> identifiers = new HashSet<>();
+
+        // 1) 코드 펜스 블록 내 대문자 식별자
+        Matcher fence = CODE_FENCE.matcher(targetContent);
+        while (fence.find()) {
+            extractUppercaseTokens(fence.group(1), identifiers);
+        }
+
+        // 2) 인라인 코드(`…`) 내 대문자 식별자
+        Matcher inline = INLINE_CODE.matcher(targetContent);
+        while (inline.find()) {
+            extractUppercaseTokens(inline.group(1), identifiers);
+        }
+
+        // 3) FQCN 패턴에서 마지막 대문자 세그먼트(예: import org.junit.Test → "Test")
+        Matcher fqcn = FQCN_IN_TEXT.matcher(targetContent);
+        while (fqcn.find()) {
+            String token = fqcn.group(1);
+            if (!EXCLUDED.contains(token)) {
+                identifiers.add(token);
+            }
+        }
+
+        return identifiers;
+    }
+
+    private void extractUppercaseTokens(String text, Set<String> identifiers) {
+        Matcher id = IDENTIFIER.matcher(text);
+        while (id.find()) {
+            String token = id.group();
+            if (!EXCLUDED.contains(token)) {
+                identifiers.add(token);
+            }
+        }
+    }
+
+    private String scopeToTargetSections(String content) {
+        // 모든 헤더 위치 수집 → 각 타깃 섹션의 끝 경계 산출에 사용
+        List<Integer> allHeaderStarts = new ArrayList<>();
+        Matcher anyHeader = ANY_HEADER.matcher(content);
+        while (anyHeader.find()) {
+            allHeaderStarts.add(anyHeader.start());
+        }
+
+        // 타깃 섹션(Quick Start / Usage 등)마다 [sectionStart, 다음 헤더) 구간만 추출
+        Matcher target = SECTION_HEADER.matcher(content);
+        StringBuilder result = new StringBuilder();
+        while (target.find()) {
+            int sectionStart = target.start();
+            int sectionEnd = nextHeaderStartAfter(allHeaderStarts, sectionStart, content.length());
+            result.append(content, sectionStart, sectionEnd);
+        }
+
+        // 타깃 섹션이 없으면 전체 README 사용 (기존 동작 유지)
+        return result.isEmpty() ? content : result.toString();
+    }
+
+    private int nextHeaderStartAfter(List<Integer> headerStarts, int sectionStart, int fallbackEnd) {
+        // ANY_HEADER matcher가 앞에서부터 수집한 순서를 유지하므로
+        // 타깃 섹션마다 stream으로 전체 헤더를 다시 훑지 않고 이진 탐색으로 다음 헤더를 찾는다.
+        int left = 0;
+        int right = headerStarts.size() - 1;
+        int candidate = fallbackEnd;
+
+        while (left <= right) {
+            int mid = left + (right - left) / 2;
+            Integer headerStart = headerStarts.get(mid);
+            if (headerStart != null && headerStart > sectionStart) {
+                candidate = headerStart;
+                right = mid - 1;
+            } else {
+                left = mid + 1;
+            }
+        }
+
+        return candidate;
+    }
+
+    private Path findReadme(Path repoRoot) {
+        for (String candidate : README_CANDIDATES) {
+            Path p = repoRoot.resolve(candidate);
+            if (Files.isRegularFile(p)) return p;
+        }
+        // 루트 디렉토리에서 대소문자 무관하게 README 파일 탐색
+        try (Stream<Path> files = Files.list(repoRoot)) {
+            return files
+                    .filter(Files::isRegularFile)
+                    .filter(p -> {
+                        String name = p.getFileName().toString().toLowerCase(Locale.ROOT);
+                        return name.matches("readme(\\.(md|rst|txt|adoc))?");
+                    })
+                    .findFirst()
+                    .orElse(null);
+        } catch (IOException e) {
+            log.warn("[README-SCAN] 루트 디렉토리 탐색 실패: {}", repoRoot, e);
+            return null;
+        }
+    }
+
+    private static String simpleName(String fqcn) {
+        int dot = fqcn.lastIndexOf('.');
+        return dot >= 0 ? fqcn.substring(dot + 1) : fqcn;
+    }
+}

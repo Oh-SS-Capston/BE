@@ -1,0 +1,95 @@
+package com.example.ossdoc.domain.extraction.service.extractor;
+import com.example.ossdoc.domain.extraction.dto.context.ExtractionContext;
+
+import com.example.ossdoc.domain.extraction.dto.model.ChunkDescriptor;
+import com.example.ossdoc.domain.extraction.dto.request.FactsExtractRequest;
+import com.example.ossdoc.domain.extraction.service.support.preflight.ExtractionPreflightResult;
+import org.springframework.stereotype.Component;
+
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Objects;
+
+@Component
+public class ExtractionContextFactory {
+
+    public ExtractionContext create(
+            FactsExtractRequest request,
+            ExtractionPreflightResult preflightResult,
+            Path repoRoot,
+            ChunkDescriptor chunk
+    ) {
+        Objects.requireNonNull(preflightResult, "preflightResult must not be null");
+        Objects.requireNonNull(repoRoot, "repoRoot must not be null");
+        Objects.requireNonNull(chunk, "chunk must not be null");
+
+        Path normalizedRepoRoot = repoRoot.normalize();
+        Path rootPath = resolve(normalizedRepoRoot, chunk.rootPath());
+        List<Path> files = chunk.files().stream()
+                .map(file -> resolve(normalizedRepoRoot, file))
+                .toList();
+
+        ExtractionPreflightResult.ModuleNormalizedContext moduleContext = findModuleContext(preflightResult, chunk.module());
+        List<Path> astLookupRoots = astLookupRoots(request, moduleContext, chunk, rootPath);
+
+        return ExtractionContext.builder()
+                .repoRoot(normalizedRepoRoot)
+                .chunk(chunk)
+                .module(chunk.module())
+                .rootPath(rootPath)
+                .files(files)
+                .astLookupRoots(astLookupRoots)
+                .compileClasspathEntries(preflightResult.normalizedContext().compileClasspath())
+                .runtimeClasspathEntries(preflightResult.normalizedContext().runtimeClasspath())
+                .includeObservations(request != null && request.includeObservations())
+                .build();
+    }
+
+    private ExtractionPreflightResult.ModuleNormalizedContext findModuleContext(
+            ExtractionPreflightResult preflightResult,
+            String moduleName
+    ) {
+        return preflightResult.normalizedContext().modules().stream()
+                .filter(module -> Objects.equals(module.moduleName(), moduleName))
+                .findFirst()
+                .orElse(null);
+    }
+
+    private List<Path> astLookupRoots(
+            FactsExtractRequest request,
+            ExtractionPreflightResult.ModuleNormalizedContext moduleContext,
+            ChunkDescriptor chunk,
+            Path fallbackRoot
+    ) {
+        if (chunk.kind() != com.example.ossdoc.domain.extraction.enums.ChunkKind.AST) {
+            return List.of();
+        }
+
+        if (moduleContext == null) {
+            return List.of(fallbackRoot);
+        }
+
+        List<Path> lookupRoots = new ArrayList<>(moduleContext.sourceRoots());
+        if (request != null && request.includeTests()) {
+            lookupRoots.addAll(moduleContext.testRoots());
+        }
+
+        if (lookupRoots.isEmpty()) {
+            lookupRoots.add(fallbackRoot);
+        }
+        // source/test root가 같은 경로를 가리키면 Symbol Solver에 같은 JavaParserTypeSolver가
+        // 반복 등록되므로, 순서를 유지한 채 중복 root만 제거한다.
+        return List.copyOf(new LinkedHashSet<>(lookupRoots));
+    }
+
+    private Path resolve(Path repoRoot, String rawPath) {
+        if (rawPath == null || rawPath.isBlank()) {
+            throw new IllegalArgumentException("rawPath must not be blank");
+        }
+
+        Path path = Path.of(rawPath);
+        return path.isAbsolute() ? path.normalize() : repoRoot.resolve(path).normalize();
+    }
+}

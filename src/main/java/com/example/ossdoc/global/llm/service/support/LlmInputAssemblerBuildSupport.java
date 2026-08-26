@@ -1,0 +1,2216 @@
+package com.example.ossdoc.global.llm.service.support;
+
+import com.example.ossdoc.global.llm.config.LlmGenerationProperties;
+import com.example.ossdoc.global.llm.dto.request.LlmRequest;
+import com.example.ossdoc.global.llm.model.CoreMethodSeed;
+import com.example.ossdoc.global.llm.model.CoreTypeSeed;
+import com.example.ossdoc.global.llm.model.RankingSymbol;
+import com.example.ossdoc.global.llm.model.SourceAnchor;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.NullNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Component;
+
+import java.time.OffsetDateTime;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+
+import static com.example.ossdoc.global.llm.service.support.LlmInputAssemblerSupport.*;
+
+/**
+ * LlmInputAssemblerService의 구조 시드 생성/근거 조합 세부 로직을 분리한 지원 컴포넌트.
+ * 서비스 본체는 아티팩트 조회와 흐름 제어만 담당한다.
+ */
+@Component
+@RequiredArgsConstructor
+public class LlmInputAssemblerBuildSupport {
+
+    // 자동 조합 시 사용하는 출력 제한값
+    private static final int MAX_AUTO_EVIDENCE = 60;
+    private static final int MAX_CAUTIONS = 20;
+    private static final int MAX_CORE_CLASSES = 24;
+    private static final int MAX_CORE_METHODS = 48;
+    private static final int MAX_METHODS_PER_CLASS = 10;
+    private static final int MAX_METHOD_FLOW = 16;
+    private static final int MAX_EXTENSION_POINTS = 20;
+    private static final int MAX_DIRECTORIES = 24;
+    private static final int MAX_EVIDENCE_PER_CAUTION = 5;
+
+    private final ObjectMapper objectMapper;
+    private final LlmGenerationProperties llmGenerationProperties;
+
+    /**
+     * symbol_source_index를 symbolId 기준으로 인덱싱한다.
+     */
+    public Map<String, SourceAnchor> indexSourceAnchorBySymbolId(JsonNode symbolSourceIndex) {
+        Map<String, SourceAnchor> out = new HashMap<>();
+        JsonNode symbols = symbolSourceIndex.path("symbols");
+        if (!symbols.isArray()) {
+            return out;
+        }
+        for (JsonNode item : symbols) {
+            String symbolId = safeText(item.path("symbol_id").asText(""));
+            if (symbolId.isBlank()) {
+                continue;
+            }
+            String fqn = sanitizeQualifiedName(item.path("fqn").asText(""));
+            String sourceFile = toUserFacingSourcePath(firstNonBlank(
+                    item.path("source_file").asText(""),
+                    item.path("sourceFile").asText("")
+            ));
+            Integer startLine = asNullableInt(item.path("start_line"));
+            Integer endLine = asNullableInt(item.path("end_line"));
+            double confidence = item.path("confidence").isNumber() ? item.path("confidence").asDouble(0.0d) : 0.0d;
+
+            out.put(symbolId, new SourceAnchor(symbolId, fqn, sourceFile, startLine, endLine, confidence));
+        }
+        return out;
+    }
+
+    /**
+     * symbol_source_index.json을 fqn 기준으로 인덱싱한다.
+     * - 동일 fqn 충돌 시 confidence가 더 높은 항목을 채택한다.
+     */
+    /**
+     * symbol_source_index를 FQN 기준으로 인덱싱한다.
+     */
+    public Map<String, SourceAnchor> indexSourceAnchorByFqn(JsonNode symbolSourceIndex) {
+        Map<String, SourceAnchor> out = new HashMap<>();
+        JsonNode symbols = symbolSourceIndex.path("symbols");
+        if (!symbols.isArray()) {
+            return out;
+        }
+        for (JsonNode item : symbols) {
+            String fqn = sanitizeQualifiedName(item.path("fqn").asText(""));
+            if (fqn.isBlank()) {
+                continue;
+            }
+            String symbolId = safeText(item.path("symbol_id").asText(""));
+            String sourceFile = toUserFacingSourcePath(firstNonBlank(
+                    item.path("source_file").asText(""),
+                    item.path("sourceFile").asText("")
+            ));
+            Integer startLine = asNullableInt(item.path("start_line"));
+            Integer endLine = asNullableInt(item.path("end_line"));
+            double confidence = item.path("confidence").isNumber() ? item.path("confidence").asDouble(0.0d) : 0.0d;
+
+            SourceAnchor next = new SourceAnchor(symbolId, fqn, sourceFile, startLine, endLine, confidence);
+            SourceAnchor prev = out.get(fqn);
+            if (prev == null || next.confidence() > prev.confidence()) {
+                out.put(fqn, next);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * core class seed에 소스 앵커를 보강한다.
+     */
+    /**
+     * core type seed에 source anchor를 보강한다.
+     */
+    public List<CoreTypeSeed> applyTypeSourceAnchors(
+            List<CoreTypeSeed> coreTypes,
+            Map<String, SourceAnchor> sourceAnchorBySymbolId,
+            Map<String, SourceAnchor> sourceAnchorByFqn
+    ) {
+        if (coreTypes == null || coreTypes.isEmpty()) {
+            return List.of();
+        }
+        List<CoreTypeSeed> out = new ArrayList<>(coreTypes.size());
+        for (CoreTypeSeed seed : coreTypes) {
+            SourceAnchor anchor = resolveBestAnchor(
+                    seed.symbolId(),
+                    seed.fqn(),
+                    sourceAnchorBySymbolId,
+                    sourceAnchorByFqn
+            );
+            if (anchor == null) {
+                out.add(seed);
+                continue;
+            }
+            out.add(new CoreTypeSeed(
+                    seed.symbolId(),
+                    seed.fqn(),
+                    seed.packageName(),
+                    seed.className(),
+                    firstNonBlank(seed.filePath(), anchor.sourceFile()),
+                    seed.role(),
+                    seed.usage(),
+                    seed.importance(),
+                    firstNonNullInt(seed.startLine(), anchor.startLine()),
+                    firstNonNullInt(seed.endLine(), anchor.endLine())
+            ));
+        }
+        return List.copyOf(out);
+    }
+
+    /**
+     * core method seed에 소스 앵커를 보강한다.
+     */
+    /**
+     * core method seed에 source anchor를 보강한다.
+     */
+    public List<CoreMethodSeed> applyMethodSourceAnchors(
+            List<CoreMethodSeed> coreMethods,
+            Map<String, SourceAnchor> sourceAnchorBySymbolId,
+            Map<String, SourceAnchor> sourceAnchorByFqn
+    ) {
+        if (coreMethods == null || coreMethods.isEmpty()) {
+            return List.of();
+        }
+        List<CoreMethodSeed> out = new ArrayList<>(coreMethods.size());
+        for (CoreMethodSeed seed : coreMethods) {
+            SourceAnchor anchor = resolveBestAnchor(
+                    seed.symbolId(),
+                    seed.fqn(),
+                    sourceAnchorBySymbolId,
+                    sourceAnchorByFqn
+            );
+            if (anchor == null) {
+                out.add(seed);
+                continue;
+            }
+            out.add(new CoreMethodSeed(
+                    seed.symbolId(),
+                    seed.classSymbolId(),
+                    seed.classFqn(),
+                    seed.className(),
+                    seed.methodName(),
+                    seed.fqn(),
+                    firstNonBlank(seed.filePath(), anchor.sourceFile()),
+                    seed.importance(),
+                    firstNonBlank(seed.signatureHint(), signatureFromAnchor(anchor.fqn(), seed.methodName())),
+                    seed.summarySeed(),
+                    seed.scenarioHint(),
+                    firstNonNullInt(seed.startLine(), anchor.startLine()),
+                    firstNonNullInt(seed.endLine(), anchor.endLine())
+            ));
+        }
+        return collapseDuplicateOverloads(out);
+    }
+
+    /**
+     * 동일 methodFqn + 동일(정규화) 시그니처를 가진 메서드 시드를 하나로 합친다.
+     * symbol_source_index에 같은 메서드가 단순명/FQN 파라미터 등 서로 다른 symbolId로 중복 등록되어
+     * 오버로딩처럼 보이는 가짜 중복(예: SuiteTestEngine.discover x2)을 제거한다.
+     * 시그니처가 다르면(진짜 오버로딩) 합치지 않고, 시그니처가 비어 있으면 구분 불가하므로 합치지 않는다.
+     */
+    private List<CoreMethodSeed> collapseDuplicateOverloads(List<CoreMethodSeed> methods) {
+        Map<String, CoreMethodSeed> merged = new LinkedHashMap<>();
+        int blankSeq = 0;
+        for (CoreMethodSeed seed : methods) {
+            String normalizedSig = normalizeSignatureForDedup(seed.signatureHint());
+            String key = normalizedSig.isBlank()
+                    ? "BLANK#" + (blankSeq++)            // 시그니처 미상 → 구분 불가하므로 합치지 않음
+                    : seed.fqn() + "##" + normalizedSig;
+            CoreMethodSeed prev = merged.get(key);
+            merged.put(key, prev == null ? seed : preferRicherMethodSeed(prev, seed));
+        }
+        return List.copyOf(merged.values());
+    }
+
+    /**
+     * 정밀 위치(실라인)가 있는 시드를 우선하고, 동률이면 중요도가 높은 시드를 택한다.
+     * 채택된 시드의 중요도는 두 시드 중 큰 값으로 보정한다.
+     */
+    private CoreMethodSeed preferRicherMethodSeed(CoreMethodSeed a, CoreMethodSeed b) {
+        boolean aPrecise = a.startLine() != null;
+        boolean bPrecise = b.startLine() != null;
+        CoreMethodSeed base = (aPrecise != bPrecise)
+                ? (aPrecise ? a : b)
+                : (a.importance() >= b.importance() ? a : b);
+        int importance = Math.max(a.importance(), b.importance());
+        if (importance == base.importance()) {
+            return base;
+        }
+        return new CoreMethodSeed(
+                base.symbolId(), base.classSymbolId(), base.classFqn(), base.className(),
+                base.methodName(), base.fqn(), base.filePath(), importance,
+                base.signatureHint(), base.summarySeed(), base.scenarioHint(),
+                base.startLine(), base.endLine()
+        );
+    }
+
+    /**
+     * 시그니처 힌트를 dedup 비교용으로 정규화한다(공백 제거 + 소문자화).
+     */
+    private static String normalizeSignatureForDedup(String signatureHint) {
+        return safeText(signatureHint).replaceAll("\\s+", "").toLowerCase(Locale.ROOT);
+    }
+
+    private SourceAnchor resolveBestAnchor(
+            String symbolId,
+            String fqn,
+            Map<String, SourceAnchor> sourceAnchorBySymbolId,
+            Map<String, SourceAnchor> sourceAnchorByFqn
+    ) {
+        SourceAnchor byId = sourceAnchorBySymbolId.get(safeText(symbolId));
+        if (byId != null) {
+            return byId;
+        }
+        return sourceAnchorByFqn.get(sanitizeQualifiedName(fqn));
+    }
+
+    /**
+     * 개요 시드 생성.
+     */
+    /**
+     * 프로젝트 개요 seed를 생성한다.
+     * repoName: RepoRun.repoName — apiMap overview에 project명이 없을 때 폴백으로 사용한다.
+     */
+    public JsonNode buildOverviewSeed(String runId, JsonNode apiMap, JsonNode rankings, JsonNode subsystems,
+            String repoName) {
+        ObjectNode out = objectMapper.createObjectNode();
+        out.put("runId", runId);
+        putIfText(out, "project", firstText(apiMap.path("overview"), "project", "name"));
+        putIfText(out, "purpose", firstText(apiMap.path("overview"), "purpose"));
+        putIfText(out, "fitSituation", firstText(apiMap.path("overview"), "fitSituation", "scope"));
+        putIfText(out, "coreFeatures", firstText(apiMap.path("overview"), "coreFeatures"));
+        putIfText(out, "repoUrl", firstText(apiMap.path("overview"), "repoUrl", "repositoryUrl"));
+
+        int symbolRankCount = countArray(rankings.path("symbolRankings"));
+        int subsystemCount = countArray(subsystems.path("subsystems"));
+        out.put("symbolRankCount", symbolRankCount);
+        out.put("subsystemCount", subsystemCount);
+        out.put("apiMapPresent", !apiMap.isMissingNode() && !apiMap.isNull() && !apiMap.isEmpty());
+
+        // P2-4: repoName 폴백 — apiMap에 project명이 없으면 repo 이름을 그대로 사용
+        if (!out.hasNonNull("project")) {
+            String fallback = (repoName != null && !repoName.isBlank()) ? repoName : "오픈소스 프로젝트";
+            out.put("project", fallback);
+        }
+        if (!out.hasNonNull("purpose")) {
+            out.put("purpose", "핵심 API와 사용 순서를 빠르게 이해하도록 돕는다.");
+        }
+        if (!out.hasNonNull("fitSituation")) {
+            out.put("fitSituation", "처음 라이브러리를 도입하거나 유지보수 중 구조를 빠르게 파악할 때");
+        }
+        if (!out.hasNonNull("coreFeatures")) {
+            out.put("coreFeatures", "핵심 클래스/메서드, 시나리오, 주의사항, 확장 포인트 제공");
+        }
+        return out;
+    }
+
+    /**
+     * 핵심 클래스 추출.
+     */
+    /**
+     * api_map/rankings/subsystems를 합쳐 핵심 타입 목록을 추출한다.
+     */
+    public List<CoreTypeSeed> extractCoreTypes(
+            JsonNode apiMap,
+            JsonNode rankings,
+            JsonNode subsystems,
+            Map<String, String> publicApiTypeBySymbolId
+    ) {
+        Map<String, CoreTypeSeed> byFqn = new LinkedHashMap<>();
+
+        // 1) api_map 기반 (가장 신뢰)
+        appendTypesFromApiMap(byFqn, apiMap.path("coreClasses"), 12, publicApiTypeBySymbolId);
+        appendTypesFromApiMap(byFqn, apiMap.path("classes"), 10, publicApiTypeBySymbolId);
+        appendTypesFromApiMap(byFqn, apiMap.path("types"), 8, publicApiTypeBySymbolId);
+        appendTypesFromApiMap(byFqn, apiMap.path("entry_points"), 12, publicApiTypeBySymbolId);
+        appendTypesFromApiMap(byFqn, apiMap.path("entryPoints"), 12, publicApiTypeBySymbolId);
+        appendTypesFromApiMap(byFqn, apiMap.path("extension_points"), 10, publicApiTypeBySymbolId);
+        appendTypesFromApiMap(byFqn, apiMap.path("extensionPoints"), 10, publicApiTypeBySymbolId);
+
+        // 2) rankings 기반 보강
+        JsonNode symbolRankings = rankings.path("symbolRankings");
+        if (symbolRankings.isArray()) {
+            for (JsonNode rank : symbolRankings) {
+                String qualifiedName = resolveTypeQualifiedName(rank);
+                if (qualifiedName.isBlank()) {
+                    continue;
+                }
+                CoreTypeSeed seed = byFqn.get(qualifiedName);
+                int importance = scoreToImportance(rank.path("score").asDouble(0.0d), rank.path("apiScore").asDouble(0.0d));
+                if (seed == null) {
+                    byFqn.put(qualifiedName, new CoreTypeSeed(
+                            rank.path("symbolId").asText(""),
+                            qualifiedName,
+                            extractPackageName(qualifiedName),
+                            extractSimpleName(qualifiedName),
+                            "",
+                            inferClassRole(extractSimpleName(qualifiedName), qualifiedName),
+                            inferClassUsage(extractSimpleName(qualifiedName), qualifiedName),
+                            importance,
+                            null,
+                            null
+                    ));
+                } else if (importance > seed.importance()) {
+                    byFqn.put(qualifiedName, seed.withImportance(importance));
+                }
+            }
+        }
+
+        // 3) subsystem entry/core symbol 반영
+        Map<String, RankingSymbol> symbolById = indexRankingSymbols(symbolRankings);
+        JsonNode subsystemList = subsystems.path("subsystems");
+        if (subsystemList.isArray()) {
+            for (JsonNode subsystem : subsystemList) {
+                boostTypesBySymbolIds(byFqn, symbolById, subsystem.path("entrySymbolIds"), 2);
+                boostTypesBySymbolIds(byFqn, symbolById, subsystem.path("coreSymbolIds"), 3);
+            }
+        }
+
+        // 사용자-대면 호출 API(Assertions/Assumptions/DiscoverySelectors/Launcher 등)가
+        // 구조 중심 타입에 밀려 컷오프 밖으로 떨어지지 않도록 보장 목록을 만든다.
+        Set<String> guaranteedEntryApiFqns = rankGuaranteedEntryApiTypes(apiMap);
+
+        List<CoreTypeSeed> out = new ArrayList<>(byFqn.values());
+        out.sort(Comparator.comparingInt(CoreTypeSeed::importance).reversed().thenComparing(CoreTypeSeed::fqn));
+        return List.copyOf(capCoreTypesWithGuarantee(out, guaranteedEntryApiFqns, MAX_CORE_CLASSES));
+    }
+
+    private static final int GUARANTEED_ENTRY_API_SLOTS = 12;
+
+    /**
+     * 코어 클래스 컷오프에서 반드시 보존할 "사용자-대면 호출 API" 타입 목록을 만든다.
+     * - role=PRIMARY 이고 entry_methods(호출 표면)가 1개 이상인 타입만 후보.
+     * - type_kind=annotation 은 entry_methods가 속성 메서드라 호출 API가 아니므로 제외.
+     * - (호출 메서드 수 + confidence + 정적/문서 진입 신호)로 점수화해 상위 N개만 보장한다.
+     */
+    private Set<String> rankGuaranteedEntryApiTypes(JsonNode apiMap) {
+        JsonNode entryPoints = firstArray(apiMap, "entry_points", "entryPoints");
+        if (!entryPoints.isArray()) {
+            return Set.of();
+        }
+        Map<String, Integer> scoreByFqn = new LinkedHashMap<>();
+        for (JsonNode ep : entryPoints) {
+            if (!"PRIMARY".equalsIgnoreCase(ep.path("role").asText(""))) {
+                continue;
+            }
+            String typeKind = firstNonBlank(ep.path("type_kind").asText(""), ep.path("typeKind").asText(""));
+            if ("annotation".equalsIgnoreCase(typeKind)) {
+                continue;
+            }
+            String ownerFqn = sanitizeQualifiedName(firstNonBlank(
+                    ep.path("owner_type_fqn").asText(""),
+                    ep.path("ownerTypeFqn").asText(""),
+                    ep.path("qualified_name").asText(""),
+                    ep.path("qualifiedName").asText(""),
+                    ep.path("fqn").asText("")
+            ));
+            if (ownerFqn.isBlank() || isMethodQualifiedName(ownerFqn)) {
+                continue;
+            }
+            JsonNode entryMethods = firstArray(ep, "entry_methods", "entryMethods");
+            int methodCount = entryMethods.isArray() ? entryMethods.size() : 0;
+            if (methodCount < 1) {
+                continue;
+            }
+            // 호출 메서드 수 가중은 6에서 포화시켜, 메서드가 많은 유틸 파사드가
+            // 문서화된 진입 인터페이스(Launcher 등)를 무조건 밀어내지 않도록 한다.
+            int score = Math.min(6, methodCount)
+                    + confidenceToImportanceBoost(ep.path("confidence").asText(""))
+                    + entryApiSignalBoost(ep.path("signals"));
+            scoreByFqn.merge(ownerFqn, score, Math::max);
+        }
+
+        List<Map.Entry<String, Integer>> entries = new ArrayList<>(scoreByFqn.entrySet());
+        entries.sort(Map.Entry.<String, Integer>comparingByValue().reversed()
+                .thenComparing(Map.Entry.comparingByKey()));
+        Set<String> guaranteed = new LinkedHashSet<>();
+        for (Map.Entry<String, Integer> entry : entries) {
+            if (guaranteed.size() >= GUARANTEED_ENTRY_API_SLOTS) {
+                break;
+            }
+            guaranteed.add(entry.getKey());
+        }
+        return guaranteed;
+    }
+
+    /**
+     * api_map의 진입점 signals에서 정적 API/문서화 진입 신호를 가중치로 변환한다.
+     */
+    private int entryApiSignalBoost(JsonNode signals) {
+        if (!signals.isArray()) {
+            return 0;
+        }
+        boolean staticApi = false;
+        boolean javadocEntry = false;
+        boolean namingHigh = false;
+        for (JsonNode signal : signals) {
+            String value = signal.asText("").toUpperCase(Locale.ROOT);
+            if (value.contains("PUBLIC_STATIC_API")) {
+                staticApi = true;
+            }
+            if (value.contains("JAVADOC_ENTRY_POINT")) {
+                javadocEntry = true;
+            }
+            if (value.contains("NAMING_HIGH")) {
+                namingHigh = true;
+            }
+        }
+        int boost = (staticApi ? 2 : 0) + (javadocEntry ? 3 : 0) + (namingHigh ? 1 : 0);
+        return Math.min(5, boost);
+    }
+
+    /**
+     * 중요도 내림차순 정렬된 코어 타입에서 상위 cap개를 남기되,
+     * guaranteedFqns에 해당하는 타입은 컷오프 밖이라도 비보장 최하위 타입과 교체해 보존한다.
+     */
+    private List<CoreTypeSeed> capCoreTypesWithGuarantee(List<CoreTypeSeed> sorted, Set<String> guaranteedFqns, int cap) {
+        if (sorted.size() <= cap) {
+            return sorted;
+        }
+        List<CoreTypeSeed> kept = new ArrayList<>(sorted.subList(0, cap));
+        if (guaranteedFqns.isEmpty()) {
+            return kept;
+        }
+        Set<String> keptFqns = new HashSet<>();
+        for (CoreTypeSeed seed : kept) {
+            keptFqns.add(seed.fqn());
+        }
+        for (int i = cap; i < sorted.size(); i++) {
+            CoreTypeSeed candidate = sorted.get(i);
+            if (!guaranteedFqns.contains(candidate.fqn()) || keptFqns.contains(candidate.fqn())) {
+                continue;
+            }
+            int evictIdx = -1;
+            for (int j = kept.size() - 1; j >= 0; j--) {
+                if (!guaranteedFqns.contains(kept.get(j).fqn())) {
+                    evictIdx = j;
+                    break;
+                }
+            }
+            if (evictIdx < 0) {
+                break; // 더 이상 축출할 비보장 타입이 없음
+            }
+            keptFqns.remove(kept.get(evictIdx).fqn());
+            kept.set(evictIdx, candidate);
+            keptFqns.add(candidate.fqn());
+        }
+        kept.sort(Comparator.comparingInt(CoreTypeSeed::importance).reversed().thenComparing(CoreTypeSeed::fqn));
+        return kept;
+    }
+
+    private void appendTypesFromApiMap(
+            Map<String, CoreTypeSeed> byFqn,
+            JsonNode array,
+            int baseImportance,
+            Map<String, String> publicApiTypeBySymbolId
+    ) {
+        if (!array.isArray()) {
+            return;
+        }
+        for (JsonNode item : array) {
+            String symbolId = firstNonBlank(
+                    item.path("symbolId").asText(""),
+                    item.path("symbol_id").asText("")
+            );
+            String fqn = firstNonBlank(
+                    item.path("fqn").asText(""),
+                    item.path("qualifiedName").asText(""),
+                    item.path("qualified_name").asText(""),
+                    item.path("classFqn").asText(""),
+                    item.path("class_fqn").asText("")
+            );
+            if (fqn.isBlank() && symbolId != null && !symbolId.isBlank()) {
+                fqn = firstNonBlank(
+                        publicApiTypeBySymbolId.get(symbolId),
+                        symbolId.startsWith("type:") ? sanitizeQualifiedName(symbolId) : ""
+                );
+            }
+            fqn = sanitizeQualifiedName(fqn);
+            if (fqn.isBlank() || isMethodQualifiedName(fqn)) {
+                continue;
+            }
+            String className = firstNonBlank(
+                    item.path("className").asText(""),
+                    item.path("simpleName").asText(""),
+                    item.path("simple_name").asText(""),
+                    extractSimpleName(fqn)
+            );
+            String packageName = firstNonBlank(
+                    item.path("packageName").asText(""),
+                    item.path("package_name").asText(""),
+                    extractPackageName(fqn)
+            );
+            String role = firstNonBlank(item.path("role").asText(""), inferClassRole(className, fqn));
+            String usage = firstNonBlank(item.path("usage").asText(""), inferClassUsage(className, fqn));
+            int score = item.path("score").asInt(0);
+            int confidenceBoost = confidenceToImportanceBoost(item.path("confidence").asText(""));
+            // 진입점 항목은 역할(PRIMARY)과 호출 표면(entry_methods 수)으로 사용자-대면 API 가중을 보강한다.
+            // 어노테이션은 entry_methods가 속성(attribute) 메서드라 과대평가되므로 가중을 약하게 둔다.
+            int roleBoost = "PRIMARY".equalsIgnoreCase(item.path("role").asText("")) ? 3 : 0;
+            String typeKind = firstNonBlank(item.path("type_kind").asText(""), item.path("typeKind").asText(""));
+            JsonNode entryMethodsNode = firstArray(item, "entry_methods", "entryMethods");
+            int entryMethodCount = entryMethodsNode.isArray() ? entryMethodsNode.size() : 0;
+            int surfaceBoost = "annotation".equalsIgnoreCase(typeKind)
+                    ? Math.min(2, entryMethodCount)
+                    : Math.min(8, entryMethodCount);
+            int importance = Math.max(baseImportance, item.path("importance").asInt(baseImportance));
+            importance = Math.max(importance, baseImportance + confidenceBoost + roleBoost + surfaceBoost + Math.min(4, Math.max(0, score / 2)));
+            String resolvedFilePath = toUserFacingSourcePath(firstNonBlank(
+                    item.path("filePath").asText(""),
+                    item.path("file_path").asText(""),
+                    item.path("sourceFile").asText(""),
+                    item.path("source_file").asText("")
+            ));
+
+            CoreTypeSeed prev = byFqn.get(fqn);
+            CoreTypeSeed next = new CoreTypeSeed(
+                    firstNonBlank(symbolId, prev == null ? "" : prev.symbolId()),
+                    fqn,
+                    packageName,
+                    className,
+                    firstNonBlank(
+                            resolvedFilePath,
+                            prev == null ? "" : prev.filePath()
+                    ),
+                    role,
+                    usage,
+                    importance,
+                    firstNonNullInt(asNullableInt(item.path("startLine")), asNullableInt(item.path("start_line"))),
+                    firstNonNullInt(asNullableInt(item.path("endLine")), asNullableInt(item.path("end_line")))
+            );
+            if (prev == null || next.importance() > prev.importance()) {
+                byFqn.put(fqn, next);
+            }
+        }
+    }
+
+    private void boostTypesBySymbolIds(
+            Map<String, CoreTypeSeed> byFqn,
+            Map<String, RankingSymbol> symbolById,
+            JsonNode symbolIds,
+            int bonus
+    ) {
+        if (!symbolIds.isArray()) {
+            return;
+        }
+        for (JsonNode idNode : symbolIds) {
+            String symbolId = idNode.asText("");
+            RankingSymbol ranking = symbolById.get(symbolId);
+            if (ranking == null || ranking.qualifiedName().isBlank() || isMethodQualifiedName(ranking.qualifiedName())) {
+                continue;
+            }
+            CoreTypeSeed seed = byFqn.get(ranking.qualifiedName());
+            if (seed != null) {
+                byFqn.put(ranking.qualifiedName(), seed.withImportance(seed.importance() + bonus));
+            }
+        }
+    }
+
+    /**
+     * 핵심 메서드 추출.
+     */
+    /**
+     * api_map/rankings/rule_candidates를 합쳐 핵심 메서드 목록을 추출한다.
+     */
+    public List<CoreMethodSeed> extractCoreMethods(
+            JsonNode apiMap,
+            JsonNode rankings,
+            List<CoreTypeSeed> coreTypes,
+            JsonNode ruleCandidates,
+            Map<String, String> publicApiTypeBySymbolId
+    ) {
+        Set<String> coreTypeFqns = new HashSet<>();
+        for (CoreTypeSeed type : coreTypes) {
+            coreTypeFqns.add(type.fqn());
+        }
+
+        Map<String, CoreMethodSeed> byFqn = new LinkedHashMap<>();
+        appendMethodsFromApiMap(byFqn, apiMap.path("coreMethods"), coreTypeFqns, 12);
+        appendMethodsFromApiMap(byFqn, apiMap.path("core_methods"), coreTypeFqns, 12);
+        appendMethodsFromApiMap(byFqn, apiMap.path("methods"), coreTypeFqns, 10);
+        appendMethodsFromApiMap(byFqn, apiMap.path("apiEntries"), coreTypeFqns, 9);
+        appendMethodsFromApiMap(byFqn, apiMap.path("api_entries"), coreTypeFqns, 9);
+        appendMethodsFromApiMap(byFqn, firstArray(apiMap, "methodFlow", "methodUsageOrder", "method_flow", "method_usage_order"), coreTypeFqns, 11);
+        // api_map 스키마상 진입점 메서드는 entry_points[].entry_methods에 중첩되어 있으므로 별도 수확한다.
+        appendMethodsFromEntryPoints(byFqn, apiMap, coreTypeFqns, 12);
+
+        JsonNode symbolRankings = rankings.path("symbolRankings");
+        if (symbolRankings.isArray()) {
+            for (JsonNode rank : symbolRankings) {
+                String qualifiedName = resolveMethodQualifiedName(rank);
+                if (qualifiedName.isBlank()) {
+                    continue;
+                }
+                String ownerFqn = extractOwnerFqn(qualifiedName);
+                if (!coreTypeFqns.contains(ownerFqn)) {
+                    continue;
+                }
+
+                String methodName = extractMethodName(qualifiedName);
+                String methodFqn = toApiFqn(ownerFqn, methodName, "<init>".equals(methodName));
+                String symbolId = rank.path("symbolId").asText("");
+                String seedKey = methodSeedKey(methodFqn, symbolId);
+                int importance = scoreToImportance(rank.path("score").asDouble(0.0d), rank.path("apiScore").asDouble(0.0d));
+                String className = extractSimpleName(ownerFqn);
+
+                CoreMethodSeed prev = byFqn.get(seedKey);
+                CoreMethodSeed next = new CoreMethodSeed(
+                        firstNonBlank(symbolId, prev == null ? "" : prev.symbolId()),
+                        prev == null ? "" : prev.classSymbolId(),
+                        ownerFqn,
+                        className,
+                        methodName,
+                        methodFqn,
+                        prev == null ? "" : prev.filePath(),
+                        Math.max(importance, methodHeuristicBonus(methodName)),
+                        prev == null ? "" : prev.signatureHint(),
+                        "",  // 실제 요약이 없으면 빈 칸으로 둔다. 이름 패턴 추측을 근거로 실어 보내지 않는다.
+                        inferScenarioHint(methodName),
+                        prev == null ? null : prev.startLine(),
+                        prev == null ? null : prev.endLine()
+                );
+                if (prev == null || next.importance() > prev.importance()) {
+                    byFqn.put(seedKey, next);
+                }
+            }
+        }
+
+        if (byFqn.isEmpty()) {
+            // rule_candidates의 method_cards를 먼저 반영해 "규칙 후보가 없는 메서드"도 코어 메서드 씨앗으로 포함한다.
+            appendMethodsFromApiMap(byFqn, ruleCandidates.path("methodCards"), coreTypeFqns, 9);
+            appendMethodsFromApiMap(byFqn, ruleCandidates.path("method_cards"), coreTypeFqns, 9);
+            appendMethodsFromRuleCandidates(byFqn, ruleCandidates, coreTypeFqns, 8, publicApiTypeBySymbolId);
+        } else {
+            // 이미 seed가 있더라도 method_cards를 낮은 가중치로 합쳐 coverage를 넓힌다.
+            appendMethodsFromApiMap(byFqn, ruleCandidates.path("methodCards"), coreTypeFqns, 7);
+            appendMethodsFromApiMap(byFqn, ruleCandidates.path("method_cards"), coreTypeFqns, 7);
+            appendMethodsFromRuleCandidates(byFqn, ruleCandidates, coreTypeFqns, 6, publicApiTypeBySymbolId);
+        }
+
+        List<CoreMethodSeed> out = new ArrayList<>(byFqn.values());
+        out.sort(Comparator.comparingInt(CoreMethodSeed::importance).reversed().thenComparing(CoreMethodSeed::fqn));
+        if (out.size() > MAX_CORE_METHODS) {
+            return List.copyOf(out.subList(0, MAX_CORE_METHODS));
+        }
+        return List.copyOf(out);
+    }
+
+    private void appendMethodsFromApiMap(
+            Map<String, CoreMethodSeed> byFqn,
+            JsonNode array,
+            Set<String> coreTypeFqns,
+            int baseImportance
+    ) {
+        if (!array.isArray()) {
+            return;
+        }
+        for (JsonNode item : array) {
+            String methodFqn = firstNonBlank(
+                    item.path("methodFqn").asText(""),
+                    item.path("method_fqn").asText(""),
+                    item.path("fqn").asText(""),
+                    item.path("qualifiedName").asText(""),
+                    item.path("qualified_name").asText("")
+            );
+            String classFqn = firstNonBlank(
+                    item.path("classFqn").asText(""),
+                    item.path("class_fqn").asText(""),
+                    extractOwnerFqn(methodFqn)
+            );
+            methodFqn = sanitizeQualifiedName(methodFqn);
+            classFqn = sanitizeQualifiedName(classFqn);
+
+            if (methodFqn.isBlank() && !classFqn.isBlank()) {
+                String methodNameFromField = firstNonBlank(item.path("methodName").asText(""), item.path("name").asText(""));
+                if (!methodNameFromField.isBlank()) {
+                    methodFqn = classFqn + "." + methodNameFromField;
+                }
+            }
+            if (methodFqn.isBlank()) {
+                continue;
+            }
+            if (!isMethodFqnShape(methodFqn)) {
+                continue;
+            }
+
+            if (classFqn.isBlank()) {
+                classFqn = extractOwnerFqn(methodFqn);
+            }
+            if (!classFqn.isBlank() && !coreTypeFqns.isEmpty() && !coreTypeFqns.contains(classFqn)) {
+                continue;
+            }
+
+            String methodName = firstNonBlank(
+                    item.path("methodName").asText(""),
+                    item.path("method_name").asText(""),
+                    item.path("name").asText(""),
+                    extractMethodName(methodFqn)
+            );
+            methodFqn = toApiFqn(
+                    firstNonBlank(classFqn, extractOwnerFqn(methodFqn)),
+                    methodName,
+                    "<init>".equals(methodName)
+            );
+            String className = firstNonBlank(item.path("className").asText(""), extractSimpleName(classFqn));
+            if (className.isBlank()) {
+                className = firstNonBlank(item.path("class_name").asText(""), extractSimpleName(classFqn));
+            }
+            String signatureHint = firstNonBlank(item.path("signatureHint").asText(""), item.path("signature").asText(""));
+            // 실제 요약이 없으면 빈 칸으로 둔다. 예전에는 inferMethodUsage(이름 패턴 추측)를
+            // 마지막 후보로 넣었는데, 실측 40개 중 39개가 그 문구로 채워져 프롬프트에 실려 나갔다.
+            String summarySeed = firstNonBlank(
+                    item.path("summary").asText(""),
+                    item.path("summaryHint").asText(""),
+                    item.path("summary_hint").asText("")
+            );
+            int importance = Math.max(baseImportance, item.path("importance").asInt(baseImportance) + methodHeuristicBonus(methodName));
+
+            String symbolId = firstNonBlank(
+                    item.path("symbolId").asText(""),
+                    item.path("symbol_id").asText(""),
+                    item.path("methodSymbolId").asText(""),
+                    item.path("method_symbol_id").asText("")
+            );
+            String seedKey = methodSeedKey(methodFqn, symbolId);
+            CoreMethodSeed prev = byFqn.get(seedKey);
+            CoreMethodSeed next = new CoreMethodSeed(
+                    firstNonBlank(
+                            symbolId,
+                            prev == null ? "" : prev.symbolId()
+                    ),
+                    firstNonBlank(
+                            item.path("classSymbolId").asText(""),
+                            item.path("class_symbol_id").asText(""),
+                            prev == null ? "" : prev.classSymbolId()
+                    ),
+                    classFqn,
+                    className,
+                    methodName,
+                    methodFqn,
+                    firstNonBlank(
+                            toUserFacingSourcePath(firstNonBlank(
+                                    item.path("filePath").asText(""),
+                                    item.path("file_path").asText(""),
+                                    item.path("sourceFile").asText(""),
+                                    item.path("source_file").asText("")
+                            )),
+                            prev == null ? "" : prev.filePath()
+                    ),
+                    importance,
+                    signatureHint,
+                    normalizeSummarySeed(summarySeed),
+                    firstNonBlank(
+                            item.path("scenarioHint").asText(""),
+                            item.path("scenario_hint").asText(""),
+                            inferScenarioHint(methodName)
+                    ),
+                    firstNonNullInt(asNullableInt(item.path("startLine")), asNullableInt(item.path("start_line"))),
+                    firstNonNullInt(asNullableInt(item.path("endLine")), asNullableInt(item.path("end_line")))
+            );
+            if (prev == null || next.importance() > prev.importance()) {
+                byFqn.put(seedKey, next);
+            }
+        }
+    }
+
+    private void appendMethodsFromRuleCandidates(
+            Map<String, CoreMethodSeed> byFqn,
+            JsonNode ruleCandidates,
+            Set<String> coreTypeFqns,
+            int baseImportance,
+            Map<String, String> publicApiTypeBySymbolId
+    ) {
+        JsonNode candidates = ruleCandidates.path("candidates");
+        if (!candidates.isArray()) {
+            return;
+        }
+        for (JsonNode candidate : candidates) {
+            String subjectSymbolId = safeText(candidate.path("subjectSymbolId").asText(""));
+            String methodQualifiedName = sanitizeQualifiedName(candidate.path("subjectQualifiedName").asText(""));
+            if (methodQualifiedName.isBlank()) {
+                methodQualifiedName = methodQualifiedNameFromSymbolId(subjectSymbolId);
+            }
+            if (methodQualifiedName.isBlank() || !isMethodQualifiedName(methodQualifiedName)) {
+                continue;
+            }
+
+            String ownerFqn = extractOwnerFqn(methodQualifiedName);
+            ownerFqn = sanitizeQualifiedName(ownerFqn);
+            if (ownerFqn.isBlank()) {
+                continue;
+            }
+
+            if (!coreTypeFqns.isEmpty() && !coreTypeFqns.contains(ownerFqn)) {
+                // core type 목록에 없으면 공개 API 타입 인덱스로 한 번 더 확인
+                String publicApiType = firstNonBlank(
+                        publicApiTypeBySymbolId.get(subjectSymbolId),
+                        publicApiTypeBySymbolId.get(firstNonBlank(
+                                candidate.path("subjectTypeSymbolId").asText(""),
+                                candidate.path("subjectTypeSymbol").asText("")
+                        ))
+                );
+                if (publicApiType.isBlank() || !coreTypeFqns.contains(publicApiType)) {
+                    continue;
+                }
+            }
+
+            String methodName = extractMethodName(methodQualifiedName);
+            if (methodName.isBlank()) {
+                continue;
+            }
+            String methodFqn = toApiFqn(ownerFqn, methodName, "<init>".equals(methodName));
+            String className = extractSimpleName(ownerFqn);
+
+            JsonNode firstEvidence = firstArray(candidate, "evidences").isArray()
+                    && !firstArray(candidate, "evidences").isEmpty()
+                    ? firstArray(candidate, "evidences").get(0)
+                    : NullNode.getInstance();
+
+            String filePath = firstNonBlank(
+                    firstEvidence.path("filePath").asText(""),
+                    firstEvidence.path("file_path").asText(""),
+                    firstEvidence.path("sourceFile").asText(""),
+                    firstEvidence.path("source_file").asText("")
+            );
+            filePath = toUserFacingSourcePath(filePath);
+            Integer startLine = firstNonNullInt(
+                    asNullableInt(firstEvidence.path("startLine")),
+                    asNullableInt(firstEvidence.path("start_line"))
+            );
+            Integer endLine = firstNonNullInt(
+                    asNullableInt(firstEvidence.path("endLine")),
+                    asNullableInt(firstEvidence.path("end_line"))
+            );
+            String summarySeed = firstNonBlank(
+                    candidate.path("description").asText(""),
+                    candidate.path("qualityReason").asText("")
+            );
+            int importance = Math.max(
+                    baseImportance,
+                    baseImportance + (int) Math.round(Math.max(0.0d, candidate.path("score").asDouble(0.0d)) * 10.0d)
+            );
+
+            String seedKey = methodSeedKey(methodFqn, subjectSymbolId);
+            CoreMethodSeed prev = byFqn.get(seedKey);
+            CoreMethodSeed next = new CoreMethodSeed(
+                    firstNonBlank(subjectSymbolId, prev == null ? "" : prev.symbolId()),
+                    prev == null ? "" : prev.classSymbolId(),
+                    ownerFqn,
+                    className,
+                    methodName,
+                    methodFqn,
+                    firstNonBlank(filePath, prev == null ? "" : prev.filePath()),
+                    Math.max(importance, methodHeuristicBonus(methodName)),
+                    prev == null ? "" : prev.signatureHint(),
+                    normalizeSummarySeed(summarySeed),
+                    inferScenarioHint(methodName),
+                    firstNonNullInt(startLine, prev == null ? null : prev.startLine()),
+                    firstNonNullInt(endLine, prev == null ? null : prev.endLine())
+            );
+            if (prev == null || next.importance() > prev.importance()) {
+                byFqn.put(seedKey, next);
+            }
+        }
+    }
+
+    /**
+     * 규칙 후보를 사용자 주의사항 씨앗으로 변환한다.
+     */
+    /**
+     * 규칙 후보를 caution seed로 변환한다.
+     */
+    public JsonNode buildCautionSeed(
+            JsonNode ruleCandidates,
+            List<CoreTypeSeed> coreTypes,
+            List<CoreMethodSeed> coreMethods
+    ) {
+        Map<String, CoreTypeSeed> typeBySimple = new HashMap<>();
+        for (CoreTypeSeed type : coreTypes) {
+            typeBySimple.put(type.className().toLowerCase(Locale.ROOT), type);
+        }
+
+        ObjectNode out = objectMapper.createObjectNode();
+        ArrayNode cautions = out.putArray("cautions");
+        JsonNode candidates = ruleCandidates.path("candidates");
+
+        if (candidates.isArray()) {
+            int seq = 1;
+            for (int i = 0; i < candidates.size() && cautions.size() < MAX_CAUTIONS; i++) {
+                JsonNode candidate = candidates.get(i);
+                String title = firstNonBlank(
+                        candidate.path("title").asText(""),
+                        candidate.path("ruleKey").asText(""),
+                        candidate.path("candidateKind").asText("")
+                );
+                if (title.isBlank()) {
+                    continue;
+                }
+
+                ObjectNode caution = cautions.addObject();
+                caution.put("cautionId", String.format("CAU-%03d", seq++));
+                caution.put("title", shortenText(title, 70));
+                caution.put("message", shortenText(firstNonBlank(
+                        candidate.path("description").asText(""),
+                        candidate.path("qualityReason").asText(""),
+                        "호출 전 입력값과 호출 순서를 점검해야 합니다."
+                ), 180));
+                caution.put("classification", normalizeClassification(candidate.path("candidateKind").asText("")));
+                caution.put("when", inferWhenText(candidate));
+
+                ArrayNode evidenceIds = caution.putArray("evidenceIds");
+                JsonNode evidences = candidate.path("evidences");
+                if (evidences.isArray()) {
+                    Set<String> seenEv = new LinkedHashSet<>();
+                    for (int e = 0; e < evidences.size() && evidenceIds.size() < MAX_EVIDENCE_PER_CAUTION; e++) {
+                        JsonNode evidence = evidences.get(e);
+                        String rawId = evidence.path("rawId").asText("");
+                        if (!rawId.isBlank() && seenEv.add(rawId)) {
+                            evidenceIds.add(rawId);
+                        }
+                    }
+                }
+                caution.put("confidence", round3(candidate.path("score").asDouble(0.72d)));
+
+                JsonNode candidateSummary = candidate.path("summary");
+                if (candidateSummary.isObject()) {
+                    String condition = candidateSummary.path("condition").asText("");
+                    String action    = candidateSummary.path("action").asText("");
+                    if (!condition.isBlank()) caution.put("condition", condition);
+                    if (!action.isBlank())    caution.put("action", action);
+                }
+
+                String relatedClass = guessRelatedClass(candidate, typeBySimple);
+                putIfText(caution, "relatedClass", relatedClass);
+                putIfText(caution, "relatedMethod", guessRelatedMethod(candidate, coreMethods));
+            }
+        }
+
+        if (cautions.isEmpty()) {
+            ObjectNode caution = cautions.addObject();
+            caution.put("cautionId", "CAU-001");
+            caution.put("title", "입력 검증");
+            caution.put("message", "필수 입력값이 누락되면 예외가 발생할 수 있으므로 호출 전 검증하세요.");
+            caution.put("classification", "defensive");
+            caution.put("when", "API 호출 전");
+            caution.putArray("evidenceIds");
+            caution.put("confidence", 0.6d);
+        }
+
+        out.put("count", cautions.size());
+        return out;
+    }
+
+    private String inferWhenText(JsonNode candidate) {
+        String kind = candidate.path("candidateKind").asText("").toLowerCase(Locale.ROOT);
+        if (kind.contains("null") || kind.contains("guard") || kind.contains("require")) {
+            return "메서드 호출 전 파라미터를 구성할 때";
+        }
+        if (kind.contains("state") || kind.contains("mutat")) {
+            return "옵션/설정 값을 변경한 직후";
+        }
+        return "핵심 API 호출 흐름을 조합할 때";
+    }
+
+    private String guessRelatedClass(JsonNode candidate, Map<String, CoreTypeSeed> typeBySimple) {
+        String text = (candidate.path("title").asText("") + " " + candidate.path("description").asText(""))
+                .toLowerCase(Locale.ROOT);
+        for (Map.Entry<String, CoreTypeSeed> entry : typeBySimple.entrySet()) {
+            if (text.contains(entry.getKey())) {
+                return entry.getValue().fqn();
+            }
+        }
+        return "";
+    }
+
+    private String guessRelatedMethod(JsonNode candidate, List<CoreMethodSeed> coreMethods) {
+        String text = (candidate.path("title").asText("") + " " + candidate.path("description").asText(""))
+                .toLowerCase(Locale.ROOT);
+        for (CoreMethodSeed method : coreMethods) {
+            if (text.contains(method.methodName().toLowerCase(Locale.ROOT))) {
+                return method.fqn();
+            }
+        }
+        return "";
+    }
+
+    /**
+     * 클래스 시드 JSON.
+     */
+    /**
+     * core type seed를 JSON 배열로 직렬화한다.
+     */
+    public JsonNode buildCoreClassSeed(List<CoreTypeSeed> coreTypes) {
+        ArrayNode out = objectMapper.createArrayNode();
+        for (CoreTypeSeed type : coreTypes) {
+            ObjectNode node = out.addObject();
+            node.put("symbolId", type.symbolId());
+            node.put("fqn", type.fqn());
+            node.put("packageName", type.packageName());
+            node.put("className", type.className());
+            node.put("role", type.role());
+            node.put("usage", type.usage());
+            node.put("importance", type.importance());
+            putIfText(node, "filePath", type.filePath());
+            if (type.startLine() != null) {
+                node.put("startLine", type.startLine());
+            }
+            if (type.endLine() != null) {
+                node.put("endLine", type.endLine());
+            }
+        }
+        return out;
+    }
+
+    /**
+     * 메서드 시드 JSON.
+     */
+    /**
+     * core method seed를 JSON 배열로 직렬화한다.
+     */
+    public JsonNode buildCoreMethodSeed(List<CoreMethodSeed> coreMethods) {
+        ArrayNode out = objectMapper.createArrayNode();
+        for (CoreMethodSeed method : coreMethods) {
+            ObjectNode node = out.addObject();
+            node.put("symbolId", method.symbolId());
+            node.put("classSymbolId", method.classSymbolId());
+            node.put("classFqn", method.classFqn());
+            node.put("className", method.className());
+            node.put("methodName", method.methodName());
+            node.put("fqn", method.fqn());
+            node.put("signatureHint", method.signatureHint());
+            node.put("summarySeed", method.summarySeed());
+            node.put("scenarioHint", method.scenarioHint());
+            node.put("importance", method.importance());
+            putIfText(node, "filePath", method.filePath());
+            if (method.startLine() != null) {
+                node.put("startLine", method.startLine());
+            }
+            if (method.endLine() != null) {
+                node.put("endLine", method.endLine());
+            }
+        }
+        return out;
+    }
+
+    /**
+     * 메서드 사용 순서 시드.
+     */
+    /**
+     * 메서드 사용 순서 seed를 생성한다.
+     */
+    public JsonNode buildMethodFlowSeed(JsonNode apiMap, List<CoreMethodSeed> coreMethods) {
+        // api_map에 순서 정보가 있으면 우선 사용
+        JsonNode flowFromMap = firstArray(apiMap, "methodFlow", "methodUsageOrder", "method_flow", "method_usage_order");
+        if (flowFromMap.isArray() && !flowFromMap.isEmpty()) {
+            ArrayNode out = objectMapper.createArrayNode();
+            for (int i = 0; i < flowFromMap.size() && out.size() < MAX_METHOD_FLOW; i++) {
+                JsonNode raw = flowFromMap.get(i);
+                ObjectNode step = out.addObject();
+                step.put("order", raw.path("order").asInt(i + 1));
+                step.put("title", shortenText(raw.path("title").asText("단계"), 50));
+                step.put("description", shortenText(raw.path("description").asText("핵심 메서드를 호출한다."), 120));
+                putIfText(step, "classFqn", firstNonBlank(raw.path("classFqn").asText(""), raw.path("class_fqn").asText("")));
+                putIfText(step, "methodFqn", firstNonBlank(raw.path("methodFqn").asText(""), raw.path("method_fqn").asText(""), raw.path("fqn").asText("")));
+                putIfText(step, "filePath", firstNonBlank(raw.path("filePath").asText(""), raw.path("file_path").asText("")));
+                if (raw.path("startLine").canConvertToInt()) {
+                    step.put("startLine", raw.path("startLine").asInt());
+                } else if (raw.path("start_line").canConvertToInt()) {
+                    step.put("startLine", raw.path("start_line").asInt());
+                }
+                if (raw.path("endLine").canConvertToInt()) {
+                    step.put("endLine", raw.path("endLine").asInt());
+                } else if (raw.path("end_line").canConvertToInt()) {
+                    step.put("endLine", raw.path("end_line").asInt());
+                }
+            }
+            return out;
+        }
+
+        // 없으면 핵심 메서드 이름 패턴으로 유도한다.
+        // 이 경로는 근거가 아니라 추측이다. 아래 4개 묶음은 인자 파서 계열의 어휘라
+        // 다른 형태의 라이브러리에서는 매칭되지 않거나 엉뚱한 메서드를 집는다.
+        // (junit 실측: 4개 중 2개만 매칭됐고 그 2개도 서로 이어지지 않는 호출이었다)
+        // 그래서 각 단계에 derived 표식을 남겨, 호출 순서 근거가 필요한 곳에서 구분할 수 있게 한다.
+        ArrayNode flow = objectMapper.createArrayNode();
+        int order = 1;
+        order = appendFlowStep(flow, order, "옵션 정의", "필수/선택 옵션을 먼저 구성합니다.", findByKeyword(coreMethods, "add", "required", "builder", "set"));
+        order = appendFlowStep(flow, order, "파싱 실행", "입력 인자를 파서에 전달해 결과 객체를 만듭니다.", findByKeyword(coreMethods, "parse", "build", "create"));
+        order = appendFlowStep(flow, order, "결과 조회", "파싱 결과에서 옵션 존재 여부와 값을 확인합니다.", findByKeyword(coreMethods, "get", "has", "value"));
+        appendFlowStep(flow, order, "도움말/예외 처리", "오류 상황에서는 도움말 출력 및 예외 처리를 연결합니다.", findByKeyword(coreMethods, "help", "print", "format"));
+        for (JsonNode step : flow) {
+            ((ObjectNode) step).put("derived", true);
+        }
+        return flow;
+    }
+
+    /**
+     * 시나리오 골격 시드를 생성한다.
+     *
+     * <p>시나리오는 지금까지 유일하게 시드 없이 모델이 맨땅에서 만들어내는 산출물이었다.
+     * 그 결과 실행마다 편차가 컸다 — 한 실행에서는 12개 step 중 8개가 필드 하나 없는
+     * 빈 객체였고, 다른 실행에서는 8개 step 전부 description만 있었다. 반면 시드가 있는
+     * methodFlow는 두 실행에서 바이트 단위로 동일했다. 골격은 코드가 확정하고
+     * 모델은 서술만 채우게 해 이 편차를 없앤다.</p>
+     *
+     * <p>대상은 라이브러리형 오픈소스다. 라이브러리 사용자에게 시나리오란 공개 API를
+     * 옆으로 이어 부르는 순서이지, 호출 깊이를 따라 내려가는 경로가 아니다.
+     * 그래서 골격의 기본 단위는 <b>타입</b>이다 — 한 타입의 공개 메서드를 순서대로 쓰는 흐름은
+     * 라이브러리 문서가 실제로 조직되는 방식과 같고, 저장소 종류를 가리지 않는다.</p>
+     *
+     * <p>{@code methodFlowSeed}는 api_map이 실제 호출 순서를 준 경우에만 첫 시나리오가 된다.
+     * 이름 키워드로 유도된({@code derived}) 흐름은 근거가 아니라 추측이므로 쓰지 않는다.
+     * junit 실측에서 그 경로는 4단계 중 2개가 비었고, 남은 2개도 서로 이어지지 않는
+     * 호출이라 모델이 스스로 고른 흐름보다 못했다.</p>
+     */
+    public JsonNode buildScenarioSeed(JsonNode methodFlowSeed, List<CoreMethodSeed> coreMethods) {
+        int maxScenarios = llmGenerationProperties.getMaxScenarios();
+        int maxSteps = llmGenerationProperties.getMaxStepsPerScenario();
+
+        ArrayNode out = objectMapper.createArrayNode();
+        if (maxScenarios <= 0 || maxSteps <= 0) {
+            return out;
+        }
+
+        // 같은 메서드가 여러 시나리오에 중복 등장하면 단계가 서로 구분되지 않는다.
+        Set<String> usedFqn = new LinkedHashSet<>();
+        appendFlowScenario(out, methodFlowSeed, maxSteps, usedFqn);
+        appendClassScenarios(out, coreMethods, maxScenarios, maxSteps, usedFqn);
+        return out;
+    }
+
+    /**
+     * 시나리오 단계로 삼을 수 없는 메서드인지 판정한다.
+     *
+     * <p>판정 자체는 {@link ScenarioNarratabilitySupport#isObjectMethod}에 있다.
+     * 품질 게이트가 "이 카드가 빈 것이 구조적 한계인지"를 가를 때 같은 규칙을 써야 하는데,
+     * 규칙이 두 벌이면 한쪽만 바뀌는 순간 게이트가 거짓말을 시작하기 때문이다.</p>
+     */
+    private boolean isNonScenarioMethod(String methodName) {
+        return ScenarioNarratabilitySupport.isObjectMethod(methodName);
+    }
+
+    /**
+     * api_map이 실제 호출 순서를 준 경우에만 대표 호출 흐름 시나리오를 만든다.
+     *
+     * <p>이름 키워드로 유도된 흐름({@code derived})은 쓰지 않는다. 단계 수가
+     * {@link ScenarioNarratabilitySupport#MIN_SCENARIO_STEPS}에 못 미치는 흐름도 만들지 않는다 — 단계가 하나뿐인 것은
+     * 흐름이 아니고, 시나리오 자리만 차지해 더 나은 후보를 밀어낸다.</p>
+     */
+    private void appendFlowScenario(ArrayNode out, JsonNode methodFlowSeed, int maxSteps, Set<String> usedFqn) {
+        if (methodFlowSeed == null || !methodFlowSeed.isArray() || methodFlowSeed.isEmpty()) {
+            return;
+        }
+
+        ArrayNode steps = objectMapper.createArrayNode();
+        for (int i = 0; i < methodFlowSeed.size() && steps.size() < maxSteps; i++) {
+            JsonNode flow = methodFlowSeed.get(i);
+            if (flow.path("derived").asBoolean(false)) {
+                return;
+            }
+            String methodFqn = safeText(flow.path("methodFqn").asText(""));
+            if (methodFqn.isBlank() || isNonScenarioMethod(extractMethodName(methodFqn))) {
+                continue;
+            }
+            if (containsFqn(steps, methodFqn)) {
+                continue;
+            }
+            ObjectNode step = steps.addObject();
+            step.put("stepNo", steps.size());
+            putIfText(step, "classFqn", firstNonBlank(
+                    flow.path("classFqn").asText(""),
+                    extractOwnerFqn(methodFqn)
+            ));
+            step.put("methodFqn", methodFqn);
+            putIfText(step, "summarySeed", flow.path("description").asText(""));
+            copySourceAnchor(step, flow.path("filePath").asText(""),
+                    asNullableInt(flow.path("startLine")), asNullableInt(flow.path("endLine")));
+        }
+
+        if (steps.size() < ScenarioNarratabilitySupport.MIN_SCENARIO_STEPS) {
+            return;
+        }
+        for (JsonNode step : steps) {
+            usedFqn.add(step.path("methodFqn").asText(""));
+        }
+        ObjectNode scenario = out.addObject();
+        scenario.put("scenarioId", String.format("SCN-%03d", out.size()));
+        scenario.put("title", "대표 호출 흐름");
+        scenario.put("intent", "핵심 API를 순서대로 호출해 기본 기능을 완성한다.");
+        scenario.set("steps", steps);
+    }
+
+    /**
+     * 남은 시나리오 자리를 타입별 사용 흐름으로 채운다.
+     *
+     * <p>라이브러리에서 한 타입의 공개 메서드를 순서대로 쓰는 것은 실제 사용 형태이고
+     * 라이브러리 문서가 조직되는 방식이기도 하다. 저장소 종류에 의존하지 않는 축이다.</p>
+     *
+     * <p>단계를 {@link ScenarioNarratabilitySupport#MIN_SCENARIO_STEPS}개 이상 낼 수 있는 타입만 후보가 된다.
+     * 이 자격 검사를 통과한 뒤에는 importance가 순위를 정한다. 자격을 개수로 두고
+     * 순위를 importance로 두는 이유는, 개수를 순위로 쓰면 getter만 잔뜩 있는 설정 인터페이스가
+     * 핵심 타입을 밀어내기 때문이다.</p>
+     */
+    private void appendClassScenarios(
+            ArrayNode out,
+            List<CoreMethodSeed> coreMethods,
+            int maxScenarios,
+            int maxSteps,
+            Set<String> usedFqn
+    ) {
+        if (coreMethods == null || coreMethods.isEmpty()) {
+            return;
+        }
+
+        Map<String, List<CoreMethodSeed>> byClass = new LinkedHashMap<>();
+        for (CoreMethodSeed method : coreMethods) {
+            String classFqn = safeText(method.classFqn());
+            String fqn = safeText(method.fqn());
+            if (classFqn.isBlank() || fqn.isBlank()) {
+                continue;
+            }
+            if (isNonScenarioMethod(method.methodName()) || usedFqn.contains(fqn)) {
+                continue;
+            }
+            List<CoreMethodSeed> bucket = byClass.computeIfAbsent(classFqn, key -> new ArrayList<>());
+            // 오버로드는 fqn이 같다. 단계로는 한 번만 쓴다.
+            boolean duplicate = bucket.stream().anyMatch(m -> fqn.equals(m.fqn()));
+            if (!duplicate) {
+                bucket.add(method);
+            }
+        }
+
+        List<Map.Entry<String, List<CoreMethodSeed>>> candidates = new ArrayList<>();
+        for (Map.Entry<String, List<CoreMethodSeed>> entry : byClass.entrySet()) {
+            if (entry.getValue().size() >= ScenarioNarratabilitySupport.MIN_SCENARIO_STEPS) {
+                candidates.add(entry);
+            }
+        }
+        candidates.sort(Comparator
+                .comparingInt((Map.Entry<String, List<CoreMethodSeed>> e) ->
+                        e.getValue().stream().mapToInt(CoreMethodSeed::importance).max().orElse(0))
+                .reversed()
+                .thenComparing(e -> -e.getValue().size()));
+
+        for (Map.Entry<String, List<CoreMethodSeed>> entry : candidates) {
+            if (out.size() >= maxScenarios) {
+                return;
+            }
+
+            List<CoreMethodSeed> methods = new ArrayList<>(entry.getValue());
+            methods.sort(Comparator.comparingInt(CoreMethodSeed::importance).reversed());
+
+            ArrayNode steps = objectMapper.createArrayNode();
+            for (CoreMethodSeed method : methods) {
+                if (steps.size() >= maxSteps) {
+                    break;
+                }
+                usedFqn.add(method.fqn());
+                ObjectNode step = steps.addObject();
+                step.put("stepNo", steps.size());
+                step.put("classFqn", method.classFqn());
+                step.put("methodFqn", method.fqn());
+                putIfText(step, "summarySeed", method.summarySeed());
+                putIfText(step, "signatureHint", method.signatureHint());
+                copySourceAnchor(step, method.filePath(), method.startLine(), method.endLine());
+            }
+
+            String className = extractSimpleName(entry.getKey());
+            ObjectNode scenario = out.addObject();
+            scenario.put("scenarioId", String.format("SCN-%03d", out.size()));
+            scenario.put("title", className + " 사용 흐름");
+            scenario.put("intent", className + "의 공개 메서드를 순서대로 사용해 기능을 구성한다.");
+            scenario.set("steps", steps);
+        }
+    }
+
+    private boolean containsFqn(ArrayNode steps, String methodFqn) {
+        for (JsonNode step : steps) {
+            if (methodFqn.equals(step.path("methodFqn").asText(""))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 근거 위치를 시드 단계에 옮긴다. 사용자에게 보여줄 수 없는 경로는 싣지 않는다.
+     */
+    private void copySourceAnchor(ObjectNode target, String filePath, Integer startLine, Integer endLine) {
+        String path = safeText(filePath);
+        if (path.isBlank() || !isUserFacingSourcePath(path)) {
+            return;
+        }
+        target.put("filePath", path);
+        if (startLine != null) {
+            target.put("startLine", startLine);
+        }
+        if (endLine != null) {
+            target.put("endLine", endLine);
+        }
+    }
+
+    private CoreMethodSeed findByKeyword(List<CoreMethodSeed> methods, String... keywords) {
+        for (CoreMethodSeed method : methods) {
+            String lower = method.methodName().toLowerCase(Locale.ROOT);
+            for (String keyword : keywords) {
+                if (lower.contains(keyword)) {
+                    return method;
+                }
+            }
+        }
+        return null;
+    }
+
+    private int appendFlowStep(ArrayNode flow, int order, String title, String description, CoreMethodSeed method) {
+        ObjectNode step = flow.addObject();
+        step.put("order", order);
+        step.put("title", title);
+        step.put("description", description);
+        if (method != null) {
+            step.put("classFqn", method.classFqn());
+            step.put("methodFqn", method.fqn());
+            putIfText(step, "filePath", method.filePath());
+            if (method.startLine() != null) {
+                step.put("startLine", method.startLine());
+            }
+            if (method.endLine() != null) {
+                step.put("endLine", method.endLine());
+            }
+        }
+        return order + 1;
+    }
+
+    /**
+     * 확장 포인트 시드.
+     */
+    /**
+     * 확장 포인트 seed를 생성한다.
+     */
+    public JsonNode buildExtensionSeed(JsonNode apiMap, List<CoreTypeSeed> coreTypes, JsonNode subsystems) {
+        ArrayNode out = objectMapper.createArrayNode();
+
+        JsonNode extensionArray = firstArray(apiMap, "extensionPoints", "extensions", "extension_points");
+        if (extensionArray.isArray()) {
+            for (JsonNode item : extensionArray) {
+                if (out.size() >= MAX_EXTENSION_POINTS) {
+                    break;
+                }
+                ObjectNode node = out.addObject();
+                putIfText(node, "symbolId", firstNonBlank(item.path("symbolId").asText(""), item.path("symbol_id").asText("")));
+                putIfText(node, "fqn", firstNonBlank(
+                        item.path("fqn").asText(""),
+                        item.path("classFqn").asText(""),
+                        item.path("class_fqn").asText(""),
+                        item.path("qualifiedName").asText(""),
+                        item.path("qualified_name").asText("")
+                ));
+                putIfText(node, "className", firstNonBlank(
+                        item.path("className").asText(""),
+                        item.path("simpleName").asText(""),
+                        item.path("simple_name").asText(""),
+                        extractSimpleName(node.path("fqn").asText(""))
+                ));
+                JsonNode semanticRelations = firstArray(item, "semantic_relations", "semanticRelations");
+                JsonNode signals = firstArray(item, "signals");
+                String semanticReason = extensionSemanticReason(semanticRelations, signals);
+                node.put("reason", firstNonBlank(
+                        item.path("reason").asText(""),
+                        semanticReason,
+                        "확장 가능 지점"
+                ));
+                node.put("confidenceSource", firstNonBlank(
+                        item.path("confidenceSource").asText(""),
+                        semanticRelations.isArray() && !semanticRelations.isEmpty() ? "의미그래프" : "구조"
+                ));
+                putIfText(node, "confidence", item.path("confidence").asText(""));
+                if (signals.isArray() && !signals.isEmpty()) {
+                    node.set("signals", signals);
+                }
+                if (semanticRelations.isArray() && !semanticRelations.isEmpty()) {
+                    node.set("semanticRelations", semanticRelations);
+                }
+                putIfText(node, "filePath", firstNonBlank(item.path("filePath").asText(""), item.path("file_path").asText("")));
+            }
+        }
+
+        if (out.size() < MAX_EXTENSION_POINTS) {
+            for (CoreTypeSeed type : coreTypes) {
+                if (out.size() >= MAX_EXTENSION_POINTS) {
+                    break;
+                }
+                String reason = resolveExtensionReasonByName(type.className());
+                if (reason.isBlank()) {
+                    continue;
+                }
+                ObjectNode node = out.addObject();
+                node.put("symbolId", type.symbolId());
+                node.put("fqn", type.fqn());
+                node.put("className", type.className());
+                node.put("reason", reason);
+                node.put("confidenceSource", reason.contains("추론") ? "추론" : "구조");
+                putIfText(node, "filePath", type.filePath());
+            }
+        }
+
+        // subsystem 패키지 루트 기반 보강
+        JsonNode subsystemList = subsystems.path("subsystems");
+        if (out.size() < MAX_EXTENSION_POINTS && subsystemList.isArray()) {
+            for (JsonNode subsystem : subsystemList) {
+                if (out.size() >= MAX_EXTENSION_POINTS) {
+                    break;
+                }
+                JsonNode roots = subsystem.path("packageRoots");
+                if (!roots.isArray() || roots.isEmpty()) {
+                    continue;
+                }
+                ObjectNode node = out.addObject();
+                node.put("symbolId", "");
+                node.put("fqn", roots.get(0).asText(""));
+                node.put("className", firstNonBlank(subsystem.path("name").asText(""), "Subsystem"));
+                node.put("reason", "패키지 루트 기반 확장 후보(추론)");
+                node.put("confidenceSource", "추론");
+                node.put("filePath", "");
+            }
+        }
+
+        return out;
+    }
+
+    private String extensionSemanticReason(JsonNode semanticRelations, JsonNode signals) {
+        if (semanticRelations != null && semanticRelations.isArray()) {
+            for (JsonNode relation : semanticRelations) {
+                String edgeType = firstNonBlank(
+                        relation.path("edge_type").asText(""),
+                        relation.path("edgeType").asText("")
+                ).toUpperCase(Locale.ROOT);
+                if ("PROVIDES_SPI".equals(edgeType)) {
+                    return "SPI provider 등록으로 확인된 확장 지점";
+                }
+                if ("LOADS_SERVICE".equals(edgeType)) {
+                    return "ServiceLoader 사용으로 확인된 확장 지점";
+                }
+            }
+        }
+        if (signals != null && signals.isArray()) {
+            for (JsonNode signal : signals) {
+                String value = signal.asText("").toUpperCase(Locale.ROOT);
+                if (value.startsWith("SPI_RELATION")) {
+                    return "SPI 의미 관계로 확인된 확장 지점";
+                }
+            }
+        }
+        return "";
+    }
+
+    private String resolveExtensionReasonByName(String className) {
+        String lower = className.toLowerCase(Locale.ROOT);
+        if (lower.contains("interface") || lower.contains("listener") || lower.contains("callback")) {
+            return "인터페이스 기반 확장 지점";
+        }
+        if (lower.contains("abstract")) {
+            return "추상 타입 기반 확장 지점";
+        }
+        if (lower.contains("provider") || lower.contains("factory") || lower.contains("builder")) {
+            return "구조 기반 확장 후보(추론)";
+        }
+        return "";
+    }
+
+    /**
+     * 디렉터리/클래스/메서드 시드.
+     */
+    /**
+     * 디렉터리/파일/클래스/메서드 트리 seed를 생성한다.
+     */
+    public JsonNode buildDirectories(JsonNode apiMap, List<CoreTypeSeed> coreTypes, List<CoreMethodSeed> coreMethods) {
+        JsonNode directoriesFromMap = apiMap.path("directories");
+        if (directoriesFromMap.isArray() && !directoriesFromMap.isEmpty()) {
+            ArrayNode trimmed = objectMapper.createArrayNode();
+            for (int i = 0; i < directoriesFromMap.size() && trimmed.size() < MAX_DIRECTORIES; i++) {
+                trimmed.add(directoriesFromMap.get(i));
+            }
+            return trimmed;
+        }
+
+        Map<String, List<CoreTypeSeed>> typesByDir = new LinkedHashMap<>();
+        Map<String, String> typeFilePathByFqn = new HashMap<>();
+        for (CoreTypeSeed type : coreTypes) {
+            String userFacingFilePath = toUserFacingSourcePath(type.filePath());
+            if (!isUserFacingSourcePath(userFacingFilePath)) {
+                continue;
+            }
+            String dir = extractDirectoryPath(userFacingFilePath);
+            typesByDir.computeIfAbsent(dir, k -> new ArrayList<>()).add(type);
+            typeFilePathByFqn.put(type.fqn(), userFacingFilePath);
+        }
+
+        Map<String, List<CoreMethodSeed>> methodsByClass = new HashMap<>();
+        for (CoreMethodSeed method : coreMethods) {
+            methodsByClass.computeIfAbsent(method.classFqn(), k -> new ArrayList<>()).add(method);
+        }
+        for (List<CoreMethodSeed> methods : methodsByClass.values()) {
+            methods.sort(Comparator.comparingInt(CoreMethodSeed::importance).reversed());
+        }
+
+        // core type에서 파일 경로를 찾지 못한 경우에도 core method 기준 최소 파일 트리를 만든다.
+        if (typesByDir.isEmpty()) {
+            return buildDirectoriesFromMethods(coreMethods);
+        }
+
+        ArrayNode directories = objectMapper.createArrayNode();
+        int dirCount = 0;
+        for (Map.Entry<String, List<CoreTypeSeed>> entry : typesByDir.entrySet()) {
+            if (dirCount++ >= MAX_DIRECTORIES) {
+                break;
+            }
+            ObjectNode dirNode = directories.addObject();
+            dirNode.put("path", entry.getKey());
+            ArrayNode files = dirNode.putArray("files");
+
+            for (CoreTypeSeed type : entry.getValue()) {
+                ObjectNode fileNode = files.addObject();
+                fileNode.put("path", firstNonBlank(
+                        typeFilePathByFqn.get(type.fqn()),
+                        toUserFacingSourcePath(type.filePath())
+                ));
+                ArrayNode classes = fileNode.putArray("classes");
+                ObjectNode classNode = classes.addObject();
+                classNode.put("symbolId", type.symbolId());
+                classNode.put("name", type.className());
+                classNode.put("summary", type.role());
+                classNode.put("estimated", false);
+
+                ArrayNode methods = classNode.putArray("methods");
+                List<CoreMethodSeed> classMethods = methodsByClass.getOrDefault(type.fqn(), List.of());
+                for (int i = 0; i < classMethods.size() && i < MAX_METHODS_PER_CLASS; i++) {
+                    CoreMethodSeed method = classMethods.get(i);
+                    ObjectNode methodNode = methods.addObject();
+                    methodNode.put("symbolId", method.symbolId());
+                    methodNode.put("name", method.methodName());
+                    methodNode.put("summary", method.summarySeed());
+                    methodNode.put("estimated", false);
+                }
+            }
+        }
+
+        return directories;
+    }
+
+    /**
+     * core type seed가 비어도 core method seed를 이용해 최소 파일 트리를 구성한다.
+     */
+    private JsonNode buildDirectoriesFromMethods(List<CoreMethodSeed> coreMethods) {
+        Map<String, Map<String, List<CoreMethodSeed>>> methodsByDirAndClass = new LinkedHashMap<>();
+        Map<String, String> classFileByFqn = new HashMap<>();
+        Map<String, String> classNameByFqn = new HashMap<>();
+        Map<String, String> classSymbolIdByFqn = new HashMap<>();
+
+        for (CoreMethodSeed method : coreMethods) {
+            String filePath = toUserFacingSourcePath(method.filePath());
+            if (!isUserFacingSourcePath(filePath)) {
+                continue;
+            }
+            String classFqn = sanitizeQualifiedName(firstNonBlank(
+                    method.classFqn(),
+                    extractOwnerFqn(method.fqn())
+            ));
+            if (classFqn.isBlank()) {
+                continue;
+            }
+            String directory = extractDirectoryPath(filePath);
+            methodsByDirAndClass
+                    .computeIfAbsent(directory, k -> new LinkedHashMap<>())
+                    .computeIfAbsent(classFqn, k -> new ArrayList<>())
+                    .add(method);
+            classFileByFqn.putIfAbsent(classFqn, filePath);
+            classNameByFqn.putIfAbsent(classFqn, firstNonBlank(method.className(), extractSimpleName(classFqn)));
+            classSymbolIdByFqn.putIfAbsent(classFqn, method.classSymbolId());
+        }
+
+        ArrayNode directories = objectMapper.createArrayNode();
+        int dirCount = 0;
+        for (Map.Entry<String, Map<String, List<CoreMethodSeed>>> dirEntry : methodsByDirAndClass.entrySet()) {
+            if (dirCount++ >= MAX_DIRECTORIES) {
+                break;
+            }
+
+            ObjectNode dirNode = directories.addObject();
+            dirNode.put("path", dirEntry.getKey());
+            ArrayNode files = dirNode.putArray("files");
+
+            for (Map.Entry<String, List<CoreMethodSeed>> classEntry : dirEntry.getValue().entrySet()) {
+                String classFqn = classEntry.getKey();
+                List<CoreMethodSeed> classMethods = classEntry.getValue();
+                classMethods.sort(Comparator.comparingInt(CoreMethodSeed::importance).reversed());
+
+                ObjectNode fileNode = files.addObject();
+                fileNode.put("path", classFileByFqn.getOrDefault(classFqn, ""));
+                ArrayNode classes = fileNode.putArray("classes");
+                ObjectNode classNode = classes.addObject();
+                putIfText(classNode, "symbolId", classSymbolIdByFqn.getOrDefault(classFqn, ""));
+                classNode.put("name", classNameByFqn.getOrDefault(classFqn, extractSimpleName(classFqn)));
+                classNode.put("summary", "핵심 메서드 기반으로 추정한 클래스");
+                classNode.put("estimated", true);
+
+                ArrayNode methods = classNode.putArray("methods");
+                for (int i = 0; i < classMethods.size() && i < MAX_METHODS_PER_CLASS; i++) {
+                    CoreMethodSeed method = classMethods.get(i);
+                    ObjectNode methodNode = methods.addObject();
+                    methodNode.put("symbolId", method.symbolId());
+                    methodNode.put("name", method.methodName());
+                    methodNode.put("summary", method.summarySeed());
+                    methodNode.put("estimated", true);
+                }
+            }
+        }
+        return directories;
+    }
+
+    /**
+     * 근거 인덱스.
+     */
+    /**
+     * 화면 표시에 사용할 근거 인덱스를 생성한다.
+     */
+    public JsonNode buildEvidenceIndex(
+            List<CoreTypeSeed> coreTypes,
+            List<CoreMethodSeed> coreMethods,
+            JsonNode ruleCandidates
+    ) {
+        ArrayNode out = objectMapper.createArrayNode();
+        Set<String> dedupe = new LinkedHashSet<>();
+
+        for (CoreTypeSeed type : coreTypes) {
+            String filePath = toUserFacingSourcePath(type.filePath());
+            if (!isUserFacingSourcePath(filePath)) {
+                continue;
+            }
+            String key = "TYPE|" + type.fqn() + "|" + filePath + "|" + type.startLine() + "|" + type.endLine();
+            if (!dedupe.add(key)) {
+                continue;
+            }
+            ObjectNode node = out.addObject();
+            node.put("kind", "TYPE");
+            putIfText(node, "symbolId", type.symbolId());
+            putIfText(node, "fqn", type.fqn());
+            putIfText(node, "filePath", filePath);
+            if (type.startLine() != null) {
+                node.put("startLine", type.startLine());
+            }
+            if (type.endLine() != null) {
+                node.put("endLine", type.endLine());
+            }
+        }
+
+        for (CoreMethodSeed method : coreMethods) {
+            String filePath = toUserFacingSourcePath(method.filePath());
+            if (!isUserFacingSourcePath(filePath)) {
+                continue;
+            }
+            String key = "METHOD|" + method.fqn() + "|" + filePath + "|" + method.startLine() + "|" + method.endLine();
+            if (!dedupe.add(key)) {
+                continue;
+            }
+            ObjectNode node = out.addObject();
+            node.put("kind", "METHOD");
+            putIfText(node, "symbolId", method.symbolId());
+            putIfText(node, "fqn", method.fqn());
+            putIfText(node, "filePath", filePath);
+            if (method.startLine() != null) {
+                node.put("startLine", method.startLine());
+            }
+            if (method.endLine() != null) {
+                node.put("endLine", method.endLine());
+            }
+        }
+
+        JsonNode candidates = ruleCandidates.path("candidates");
+        if (candidates.isArray()) {
+            for (JsonNode candidate : candidates) {
+                JsonNode evidences = candidate.path("evidences");
+                if (!evidences.isArray()) {
+                    continue;
+                }
+                for (JsonNode evidence : evidences) {
+                    Long evidenceId = evidence.path("evidenceId").canConvertToLong() ? evidence.path("evidenceId").asLong() : null;
+                    String rawFilePath = firstNonBlank(
+                            evidence.path("filePath").asText(""),
+                            evidence.path("file_path").asText(""),
+                            evidence.path("sourceFile").asText(""),
+                            evidence.path("source_file").asText("")
+                    );
+                    String filePath = toUserFacingSourcePath(rawFilePath);
+                    if (!isUserFacingSourcePath(filePath)) {
+                        continue;
+                    }
+                    Integer startLine = asNullableInt(evidence.path("startLine"));
+                    Integer endLine = asNullableInt(evidence.path("endLine"));
+                    String key = "RULE|" + evidenceId + "|" + filePath + "|" + startLine + "|" + endLine;
+                    if (!dedupe.add(key)) {
+                        continue;
+                    }
+                    ObjectNode node = out.addObject();
+                    node.put("kind", "RULE_EVIDENCE");
+                    if (evidenceId != null) {
+                        node.put("evidenceId", evidenceId);
+                    }
+                    putIfText(node, "filePath", filePath);
+                    if (startLine != null) {
+                        node.put("startLine", startLine);
+                    }
+                    if (endLine != null) {
+                        node.put("endLine", endLine);
+                    }
+                    // bytecode 경로 또는 BYTECODE 타입 evidence의 snippet은 제외한다.
+                    boolean isBytecodeEvidence = isBytecodeFilePath(rawFilePath)
+                            || "BYTECODE".equalsIgnoreCase(evidence.path("evidenceType").asText(""));
+                    if (!isBytecodeEvidence) {
+                        putIfText(node, "snippet", trimSnippet(evidence.path("snippet").asText("")));
+                    }
+
+                    // semantic graph relation metadata를 최종 LLM evidenceIndex까지 전달한다.
+                    // rule_candidates 1.4 이전 artifact에는 필드가 없으므로 모두 선택적으로 복사한다.
+                    putIfText(node, "edgeType", evidence.path("edgeType").asText(""));
+                    putIfText(node, "edgeOrigin", evidence.path("edgeOrigin").asText(""));
+                    putIfText(node, "edgeDerivationKind", evidence.path("edgeDerivationKind").asText(""));
+                    putIfText(node, "edgeResolution", evidence.path("edgeResolution").asText(""));
+                    putIfText(node, "edgeResolutionReason", evidence.path("edgeResolutionReason").asText(""));
+                    if (evidence.path("edgeConfidence").isNumber()) {
+                        node.set("edgeConfidence", evidence.path("edgeConfidence"));
+                    }
+                    if (evidence.path("edgeCallSiteLine").canConvertToInt()) {
+                        node.put("edgeCallSiteLine", evidence.path("edgeCallSiteLine").asInt());
+                    }
+                    if (evidence.path("edgeDefaultVisible").isBoolean()) {
+                        node.put("edgeDefaultVisible", evidence.path("edgeDefaultVisible").asBoolean());
+                    }
+                    if (!evidence.path("edgeAttrs").isMissingNode() && !evidence.path("edgeAttrs").isNull()) {
+                        node.set("edgeAttrs", evidence.path("edgeAttrs"));
+                    }
+                    if (evidence.path("signalConfidenceHint").isNumber()) {
+                        node.set("signalConfidenceHint", evidence.path("signalConfidenceHint"));
+                    }
+                    if (!evidence.path("signalMeta").isMissingNode() && !evidence.path("signalMeta").isNull()) {
+                        node.set("signalMeta", evidence.path("signalMeta"));
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * 품질 게이트 요약.
+     */
+    /**
+     * 입력 품질 게이트 요약을 생성한다.
+     */
+    public JsonNode buildQualityGate(
+            JsonNode apiMap,
+            JsonNode ruleCandidates,
+            JsonNode rankings,
+            JsonNode subsystems,
+            JsonNode symbolSourceIndex
+    ) {
+        ObjectNode out = objectMapper.createObjectNode();
+        out.put("apiMapPresent", !apiMap.isMissingNode() && !apiMap.isNull() && !apiMap.isEmpty());
+        out.put("ruleCandidateCount", countArray(ruleCandidates.path("candidates")));
+        out.put("rankingCount", countArray(rankings.path("symbolRankings")));
+        out.put("subsystemCount", countArray(subsystems.path("subsystems")));
+        out.put("symbolSourceAnchorCount", countArray(symbolSourceIndex.path("symbols")));
+        out.put("inputSourcePolicy", "api_map + rule_candidates + rankings + subsystems + optional(symbol_source_index)");
+        return out;
+    }
+
+    /**
+     * UI 호환 API 엔트리 시드.
+     */
+    /**
+     * UI 호환용 apiEntries를 생성한다.
+     */
+    public JsonNode buildApiEntries(List<CoreMethodSeed> methods) {
+        ArrayNode out = objectMapper.createArrayNode();
+        for (CoreMethodSeed method : methods) {
+            ObjectNode node = out.addObject();
+            node.put("fqn", method.fqn());
+            node.put("summary", method.summarySeed());
+            node.put("subsystem", method.scenarioHint());
+            node.putArray("relatedScenarios");
+            putIfText(node, "filePath", method.filePath());
+            if (method.startLine() != null) {
+                node.put("startLine", method.startLine());
+            }
+            if (method.endLine() != null) {
+                node.put("endLine", method.endLine());
+            }
+        }
+        return out;
+    }
+
+    /**
+     * 자동 근거 번들 생성.
+     */
+    /**
+     * 요청/시드 정보를 이용해 evidence bundle을 구성한다.
+     */
+    public List<LlmRequest.EvidenceSnippet> resolveEvidenceBundle(LlmRequest request, JsonNode cautionSeed) {
+        if (request.getEvidenceBundle() != null && !request.getEvidenceBundle().isEmpty()) {
+            return trimEvidenceSnippets(request.getEvidenceBundle(), MAX_AUTO_EVIDENCE);
+        }
+
+        List<LlmRequest.EvidenceSnippet> out = new ArrayList<>();
+        Set<String> dedupe = new HashSet<>();
+        JsonNode cautions = cautionSeed.path("cautions");
+        if (cautions.isArray()) {
+            for (JsonNode caution : cautions) {
+                if (out.size() >= MAX_AUTO_EVIDENCE) {
+                    break;
+                }
+                JsonNode ids = caution.path("evidenceIds");
+                if (!ids.isArray()) {
+                    continue;
+                }
+                for (JsonNode id : ids) {
+                    if (out.size() >= MAX_AUTO_EVIDENCE || !id.canConvertToLong()) {
+                        break;
+                    }
+                    Long evidenceId = id.asLong();
+                    String key = "id:" + evidenceId;
+                    if (!dedupe.add(key)) {
+                        continue;
+                    }
+                    out.add(new LlmRequest.EvidenceSnippet(
+                            evidenceId,
+                            "",
+                            null,
+                            null,
+                            "",
+                            "RULE_EVIDENCE"
+                    ));
+                }
+            }
+        }
+        return trimEvidenceSnippets(out, MAX_AUTO_EVIDENCE);
+    }
+
+    /**
+     * evidence snippet 길이와 개수를 제한해 정규화한다.
+     */
+    public List<LlmRequest.EvidenceSnippet> trimEvidenceSnippets(List<LlmRequest.EvidenceSnippet> evidences, int limit) {
+        if (evidences == null || evidences.isEmpty()) {
+            return List.of();
+        }
+        List<LlmRequest.EvidenceSnippet> out = new ArrayList<>();
+        for (LlmRequest.EvidenceSnippet evidence : evidences) {
+            if (out.size() >= limit || evidence == null) {
+                break;
+            }
+            boolean isBytecode = "BYTECODE".equalsIgnoreCase(safeText(evidence.getEvidenceType()))
+                    || isBytecodeFilePath(evidence.getFilePath());
+            out.add(new LlmRequest.EvidenceSnippet(
+                    evidence.getEvidenceId(),
+                    safeText(evidence.getFilePath()),
+                    evidence.getStartLine(),
+                    evidence.getEndLine(),
+                    isBytecode ? "" : safeText(trimSnippet(evidence.getSnippet())),
+                    safeText(evidence.getEvidenceType())
+            ));
+        }
+        return List.copyOf(out);
+    }
+
+    private int countArray(JsonNode node) {
+        return node != null && node.isArray() ? node.size() : 0;
+    }
+
+    private JsonNode firstArray(JsonNode node, String... keys) {
+        if (node == null || node.isNull() || node.isMissingNode()) {
+            return NullNode.getInstance();
+        }
+        for (String key : keys) {
+            JsonNode value = node.path(key);
+            if (value.isArray() && !value.isEmpty()) {
+                return value;
+            }
+        }
+        return NullNode.getInstance();
+    }
+
+    /**
+     * 공개 API 타입을 symbolId 기준으로 인덱싱한다.
+     */
+    public Map<String, String> indexPublicApiTypeBySymbolId(JsonNode apiMap, JsonNode apiSurface) {
+        Map<String, String> out = new HashMap<>();
+
+        appendPublicApiTypeIndex(out, apiMap.path("coreClasses"));
+        appendPublicApiTypeIndex(out, apiMap.path("classes"));
+        appendPublicApiTypeIndex(out, apiMap.path("types"));
+        appendPublicApiTypeIndex(out, apiMap.path("entry_points"));
+        appendPublicApiTypeIndex(out, apiMap.path("entryPoints"));
+        appendPublicApiTypeIndex(out, apiMap.path("extension_points"));
+        appendPublicApiTypeIndex(out, apiMap.path("extensionPoints"));
+
+        appendPublicApiTypeIndex(out, apiSurface.path("entry_points"));
+        appendPublicApiTypeIndex(out, apiSurface.path("extension_points"));
+
+        return out;
+    }
+
+    private void appendPublicApiTypeIndex(Map<String, String> out, JsonNode array) {
+        if (!array.isArray()) {
+            return;
+        }
+        for (JsonNode item : array) {
+            String symbolId = firstNonBlank(item.path("symbolId").asText(""), item.path("symbol_id").asText(""));
+            if (symbolId.isBlank()) {
+                continue;
+            }
+            String fqn = firstNonBlank(
+                    item.path("fqn").asText(""),
+                    item.path("qualifiedName").asText(""),
+                    item.path("qualified_name").asText(""),
+                    item.path("classFqn").asText(""),
+                    item.path("class_fqn").asText("")
+            );
+            if (fqn.isBlank() && symbolId.startsWith("type:")) {
+                fqn = symbolId;
+            }
+            fqn = sanitizeQualifiedName(fqn);
+            if (fqn.isBlank() || isMethodQualifiedName(fqn)) {
+                continue;
+            }
+            out.putIfAbsent(symbolId, fqn);
+        }
+    }
+
+    private Map<String, RankingSymbol> indexRankingSymbols(JsonNode symbolRankings) {
+        Map<String, RankingSymbol> out = new HashMap<>();
+        if (!symbolRankings.isArray()) {
+            return out;
+        }
+        for (JsonNode rank : symbolRankings) {
+            String symbolId = rank.path("symbolId").asText("");
+            if (symbolId.isBlank()) {
+                continue;
+            }
+            out.put(symbolId, new RankingSymbol(
+                    symbolId,
+                    sanitizeQualifiedName(rank.path("qualifiedName").asText("")),
+                    rank.path("score").asDouble(0.0d),
+                    rank.path("apiScore").asDouble(0.0d)
+            ));
+        }
+        return out;
+    }
+
+    private int scoreToImportance(double score, double apiScore) {
+        double normalized = Math.max(score, 0.0d) + Math.max(apiScore, 0.0d) * 0.7d;
+        int importance = (int) Math.round(normalized * 10.0d);
+        return Math.max(1, Math.min(100, importance));
+}
+
+    /**
+     * 메서드 시드 dedup 키. 오버로딩(동일 ownerFqn+simpleName, 다른 symbolId) 충돌을 막기 위해
+     * symbolId가 있으면 키에 함께 포함하고, 없을 때만 methodFqn 단독 키로 폴백한다.
+     */
+    private static String methodSeedKey(String methodFqn, String symbolId) {
+        String fqn = safeText(methodFqn);
+        String sym = safeText(symbolId);
+        return sym.isBlank() ? fqn : fqn + '\0' + sym;
+    }
+
+    /**
+     * api_map의 entry_points[].entry_methods를 코어 메서드 시드로 수확한다.
+     * entry_method에는 fqn/시그니처가 없으므로 부모 entry_point의 owner_type_fqn으로 소유 타입을 복원하고
+     * methodFqn = ownerFqn + simpleName 으로 조립한다. 정밀 위치/시그니처는 applyMethodSourceAnchors가 symbolId로 보강한다.
+     */
+    private void appendMethodsFromEntryPoints(
+            Map<String, CoreMethodSeed> byFqn,
+            JsonNode apiMap,
+            Set<String> coreTypeFqns,
+            int baseImportance
+    ) {
+        JsonNode entryPoints = firstArray(apiMap, "entry_points", "entryPoints");
+        if (!entryPoints.isArray()) {
+            return;
+        }
+        for (JsonNode ep : entryPoints) {
+            String ownerFqn = sanitizeQualifiedName(firstNonBlank(
+                    ep.path("owner_type_fqn").asText(""),
+                    ep.path("ownerTypeFqn").asText(""),
+                    ep.path("qualified_name").asText(""),
+                    ep.path("qualifiedName").asText(""),
+                    ep.path("fqn").asText("")
+            ));
+            if (ownerFqn.isBlank() || isMethodQualifiedName(ownerFqn)) {
+                continue;
+            }
+            if (!coreTypeFqns.isEmpty() && !coreTypeFqns.contains(ownerFqn)) {
+                continue;
+            }
+
+            String className = firstNonBlank(
+                    ep.path("simple_name").asText(""),
+                    ep.path("simpleName").asText(""),
+                    extractSimpleName(ownerFqn)
+            );
+            String classSymbolId = firstNonBlank(
+                    ep.path("symbol_id").asText(""),
+                    ep.path("symbolId").asText("")
+            );
+            String ownerSourceFile = toUserFacingSourcePath(firstNonBlank(
+                    ep.path("source_file").asText(""),
+                    ep.path("sourceFile").asText("")
+            ));
+            int roleBoost = "PRIMARY".equalsIgnoreCase(ep.path("role").asText("")) ? 3 : 0;
+            int confidenceBoost = confidenceToImportanceBoost(ep.path("confidence").asText(""));
+
+            JsonNode entryMethods = firstArray(ep, "entry_methods", "entryMethods");
+            if (!entryMethods.isArray()) {
+                continue;
+            }
+            for (JsonNode em : entryMethods) {
+                String methodName = firstNonBlank(
+                        em.path("simple_name").asText(""),
+                        em.path("simpleName").asText("")
+                );
+                if (methodName.isBlank()) {
+                    continue;
+                }
+                boolean constructor = "<init>".equals(methodName) || methodName.equals(className);
+                String resolvedName = constructor ? "<init>" : methodName;
+                String methodFqn = toApiFqn(ownerFqn, resolvedName, constructor);
+                String symbolId = firstNonBlank(
+                        em.path("symbol_id").asText(""),
+                        em.path("symbolId").asText("")
+                );
+                int importance = baseImportance + roleBoost + confidenceBoost
+                        + entryMethodReasonBoost(em.path("reason").asText(""))
+                        + methodHeuristicBonus(methodName);
+                HttpEndpointSeed endpointSeed = resolveHttpEndpointSeed(em);
+
+                String seedKey = methodSeedKey(methodFqn, symbolId);
+                CoreMethodSeed prev = byFqn.get(seedKey);
+                CoreMethodSeed next = new CoreMethodSeed(
+                        firstNonBlank(symbolId, prev == null ? "" : prev.symbolId()),
+                        firstNonBlank(classSymbolId, prev == null ? "" : prev.classSymbolId()),
+                        ownerFqn,
+                        className,
+                        resolvedName,
+                        methodFqn,
+                        firstNonBlank(prev == null ? "" : prev.filePath(), ownerSourceFile),
+                        importance,
+                        prev == null ? "" : prev.signatureHint(),
+                        // endpointSeed는 HANDLES_ENDPOINT 엣지(HTTP 메서드 + 경로)에서 나온 근거 기반 문장이다.
+                        // 이름 패턴 추측이 아니라 그래프에 실재하는 엣지를 옮긴 것이므로 근거 채널인
+                        // summarySeed에 실어도 된다. 다만 inferMethodUsage 폴백은 되살리지 않는다.
+                        // 빈 값은 그대로 빈 칸으로 둔다 - normalizeSummarySeed는 빈 입력에
+                        // "핵심 동작을 수행합니다."(FILLER_EXACT 등재)를 채워 넣으므로 통과시키지 않는다.
+                        endpointSeed.summarySeed().isBlank()
+                                ? ""
+                                : normalizeSummarySeed(endpointSeed.summarySeed()),
+                        firstNonBlank(endpointSeed.scenarioHint(), inferScenarioHint(methodName)),
+                        prev == null ? null : prev.startLine(),
+                        prev == null ? null : prev.endLine()
+                );
+                if (prev == null || next.importance() > prev.importance()) {
+                    byFqn.put(seedKey, next);
+                }
+            }
+        }
+    }
+
+    /**
+     * entry_method의 reason 신호를 importance 가중치로 변환한다.
+     */
+    private int entryMethodReasonBoost(String reason) {
+        String normalized = safeText(reason).toUpperCase(Locale.ROOT);
+        return switch (normalized) {
+            case "HTTP_ENDPOINT" -> 5;
+            case "STATIC_FACTORY", "PUBLIC_CONSTRUCTOR" -> 4;
+            case "PUBLIC_STATIC" -> 2;
+            case "PUBLIC_INSTANCE" -> 1;
+            default -> 0;
+        };
+    }
+
+    /**
+     * entry_method에 연결된 HANDLES_ENDPOINT 메타데이터를 LLM용 메서드 시드로 축약한다.
+     * 가장 신뢰도가 높은 endpoint 하나를 대표값으로 선택하되, 원본 endpoint 목록은 api_map에 그대로 유지한다.
+     */
+    private HttpEndpointSeed resolveHttpEndpointSeed(JsonNode entryMethod) {
+        JsonNode endpoints = firstArray(entryMethod, "http_endpoints", "httpEndpoints");
+        if (!endpoints.isArray() || endpoints.isEmpty()) {
+            return HttpEndpointSeed.EMPTY;
+        }
+
+        JsonNode best = null;
+        double bestConfidence = -1.0d;
+        for (JsonNode endpoint : endpoints) {
+            double confidence = endpoint.path("confidence").isNumber()
+                    ? endpoint.path("confidence").asDouble(0.0d)
+                    : 0.0d;
+            if (best == null || confidence > bestConfidence) {
+                best = endpoint;
+                bestConfidence = confidence;
+            }
+        }
+        if (best == null) {
+            return HttpEndpointSeed.EMPTY;
+        }
+
+        String httpMethod = safeText(firstNonBlank(
+                best.path("http_method").asText(""),
+                best.path("httpMethod").asText("")
+        )).toUpperCase(Locale.ROOT);
+        String path = safeText(best.path("path").asText(""));
+        String endpointLabel = (httpMethod + " " + path).trim();
+        if (endpointLabel.isBlank()) {
+            // 엔드포인트는 있는데 HTTP 메서드/경로가 둘 다 비면 남는 것은 "HTTP 진입점이다"뿐이다.
+            // 참이지만 정보량이 0인 문장이고, summarySeed는 프롬프트가 근거로 못 박는 채널이라
+            // 같은 문장이 여러 메서드에 복제되면 모델이 그것을 근거 삼아 서술을 부풀린다.
+            // 근거가 없으면 비운다는 PROMPT_SCENARIO_ONE 규칙에 맞춰 빈 시드로 떨어뜨린다.
+            return HttpEndpointSeed.EMPTY;
+        }
+        return new HttpEndpointSeed(
+                "HTTP " + endpointLabel + " 요청을 처리하는 외부 API 진입 메서드입니다.",
+                "HTTP " + endpointLabel + " 요청 처리"
+        );
+    }
+
+    private record HttpEndpointSeed(String summarySeed, String scenarioHint) {
+        private static final HttpEndpointSeed EMPTY = new HttpEndpointSeed("", "");
+    }
+
+    /**
+     * symbol_source_index의 fqn(예: org...ExecutionRequest#create(TestDescriptor,...))에서
+     * 파라미터 타입을 단순명으로 줄여 'create(TestDescriptor, EngineExecutionListener)' 형태의 시그니처 힌트를 만든다.
+     * 오버로딩 구분 표시용. 파라미터 정보가 없으면 빈 문자열을 반환한다.
+     */
+    private String signatureFromAnchor(String anchorFqn, String methodName) {
+        String fqn = safeText(anchorFqn);
+        int paren = fqn.indexOf('(');
+        if (paren < 0 || !fqn.endsWith(")")) {
+            return "";
+        }
+        String params = fqn.substring(paren + 1, fqn.length() - 1).trim();
+        StringBuilder simpleParams = new StringBuilder();
+        if (!params.isBlank()) {
+            String[] parts = params.split(",");
+            for (int i = 0; i < parts.length; i++) {
+                if (i > 0) {
+                    simpleParams.append(", ");
+                }
+                simpleParams.append(extractSimpleName(parts[i].trim()));
+            }
+        }
+        String name = methodName;
+        int hash = fqn.indexOf('#');
+        if ((name == null || name.isBlank() || "<init>".equals(name)) && hash >= 0 && hash < paren) {
+            name = fqn.substring(hash + 1, paren);
+        }
+        return shortenText(safeText(name) + "(" + simpleParams + ")", 120);
+    }
+}
+
+
+

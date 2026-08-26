@@ -1,0 +1,125 @@
+package com.example.ossdoc.domain.build.support;
+
+import com.example.ossdoc.domain.build.dto.json.BuildFailure;
+import com.example.ossdoc.domain.build.dto.json.BuildModuleManifest;
+import com.example.ossdoc.domain.build.exception.code.BuildErrorCode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Component;
+
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/**
+ * 역할:
+ * Gradle init script(ossdocDump) 출력 문자열을 모듈 매니페스트로 변환한다.
+ *
+ * 책임:
+ * 1) OSS_DOC_DUMP JSON 라인 추출
+ * 2) source/test/resource/classes/classpath 경로 정규화
+ * 3) 모듈 상태(OK/PARTIAL/SKIPPED/FAILED) 판정
+ * 4) 파싱 실패를 BuildFailure로 누적
+ */
+@Component
+@RequiredArgsConstructor
+public class GradleDumpParser {
+
+    private final ObjectMapper objectMapper;
+    private final BuildPathNormalizer buildPathNormalizer;
+
+    /**
+     * 역할:
+     * dump 출력 전체를 파싱해 BuildModuleManifest 목록으로 반환한다.
+     *
+     * 책임:
+     * 유효한 dump 라인을 모두 읽어 모듈 정보를 생성하고, 예외는 failures에 기록한다.
+     */
+    public List<BuildModuleManifest> parse(Path repoRoot, String output, List<BuildFailure> failures) {
+        Pattern p = Pattern.compile("^OSS_DOC_DUMP=(\\{.*\\})$", Pattern.MULTILINE);
+        Matcher m = p.matcher(output);
+
+        List<BuildModuleManifest> modules = new ArrayList<>();
+        while (m.find()) {
+            try {
+                Map<String, Object> map = objectMapper.readValue(m.group(1), Map.class);
+
+                String groupId = emptyToNull((String) map.get("group"));
+                String artifactId = emptyToNull((String) map.getOrDefault("name", ""));
+                String version = emptyToNull((String) map.get("version"));
+
+                List<String> sourceRoots = readPathList(map, "sourceRoots", repoRoot);
+                List<String> testRoots = readPathList(map, "testRoots", repoRoot);
+                List<String> resourceRoots = readPathList(map, "resourceRoots", repoRoot);
+                List<String> classesDirs = readPathList(map, "classesDirs", repoRoot);
+                List<String> compileClasspath = readPathList(map, "compileClasspath", repoRoot);
+                List<String> runtimeClasspath = readPathList(map, "runtimeClasspath", repoRoot);
+
+                String status;
+                BuildFailure failReason = null;
+                boolean hasAnySource = !sourceRoots.isEmpty() || !testRoots.isEmpty() || !resourceRoots.isEmpty();
+                String projectPath = (String) map.getOrDefault("projectPath", "");
+
+                if (!classesDirs.isEmpty()) {
+                    status = "OK";
+                } else if (hasAnySource) {
+                    status = "PARTIAL";
+                } else {
+                    // 소스/산출물이 모두 비어있는 모듈은 BOM·aggregator 등 Java 코드가 없는 모듈로 간주한다.
+                    status = "SKIPPED";
+                    failReason = BuildFailure.builder()
+                            .code("NO_JAVA_SOURCES")
+                            .message("Module has no Java sources or classes (likely BOM/aggregator).")
+                            .moduleHint(projectPath)
+                            .build();
+                }
+
+                modules.add(BuildModuleManifest.builder()
+                        .moduleId(projectPath)
+                        .name((String) map.getOrDefault("name", ""))
+                        .groupId(groupId)
+                        .artifactId(artifactId)
+                        .version(version)
+                        .sourceRoots(sourceRoots)
+                        .testRoots(testRoots)
+                        .resourceRoots(resourceRoots)
+                        .classesDirs(classesDirs)
+                        .compileClasspath(compileClasspath)
+                        .runtimeClasspath(runtimeClasspath)
+                        .status(status)
+                        .failReason(failReason)
+                        .build());
+
+            } catch (Exception e) {
+                failures.add(BuildFailure.builder()
+                        .code(BuildErrorCode.GRADLE_DUMP_FAILED.getCode())
+                        .message("Failed to parse OSS_DOC_DUMP - " + e.getMessage())
+                        .build());
+            }
+        }
+        return modules;
+    }
+
+    private static String emptyToNull(String s) {
+        return (s == null || s.isBlank()) ? null : s;
+    }
+
+    private List<String> readPathList(Map<String, Object> map, String key, Path repoRoot) {
+        Object rawValue = map.get(key);
+        if (!(rawValue instanceof List<?> values)) {
+            return List.of();
+        }
+
+        List<String> pathValues = new ArrayList<>();
+        for (Object value : values) {
+            if (value instanceof String path && !path.isBlank()) {
+                pathValues.add(path);
+            }
+        }
+
+        return buildPathNormalizer.toAbsolutePaths(repoRoot, pathValues);
+    }
+}

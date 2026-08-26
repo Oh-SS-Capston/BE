@@ -32,9 +32,33 @@ out/
 /dist/
 /nbdist/
 /.nb-gradle/
-
+s
 ### VS Code ###
 .vscode/
 
-## application ###
-/src/main/resources/application.yml
+# QueryDSL generated sources
+src/main/generated/
+
+#env
+.env
+.env.*
+!.env.example
+
+#workspace
+workspace/
+
+/AGENTS.md
+.gradle-home/
+
+/claude's generated markdown file
+!**/README.md
+
+### jurutang's file ###
+MarkDownFile/
+artifacts/
+
+### Application config ###
+src/main/resources/application.yml
+
+### claude file
+.claude/

@@ -1,0 +1,1488 @@
+diff --git a/src/main/java/com/example/ossdoc/domain/graphstore/service/GraphStoreIngestService.java b/src/main/java/com/example/ossdoc/domain/graphstore/service/GraphStoreIngestService.java
+index f0d06af..5b3ea39 100644
+--- a/src/main/java/com/example/ossdoc/domain/graphstore/service/GraphStoreIngestService.java
++++ b/src/main/java/com/example/ossdoc/domain/graphstore/service/GraphStoreIngestService.java
+@@ -45,6 +45,7 @@ import com.example.ossdoc.domain.graphstore.service.promotion.EndpointEventSpiSh
+ import com.example.ossdoc.domain.graphstore.service.promotion.ObservationPromotionShadowAnalyzer;
+ import com.example.ossdoc.domain.graphstore.service.promotion.ReflectionShadowCandidateGenerator;
+ import com.example.ossdoc.domain.graphstore.service.promotion.ReflectionShadowParityAnalyzer;
++import com.example.ossdoc.domain.graphstore.service.promotion.ShadowFactsIndex;
+ import com.example.ossdoc.domain.graphstore.service.promotion.gate.SemanticPromotionGateProperties;
+ import com.example.ossdoc.domain.graphstore.service.promotion.gate.SemanticPromotionResponsibilityGate;
+ import com.example.ossdoc.domain.graphstore.repository.EdgeEvidenceRepository;
+@@ -255,6 +256,8 @@ public class GraphStoreIngestService {
+ 
+         NormalizedFactsDocument facts = graphStoreFactsNormalizer.normalize(rawFacts);
+         validateFacts(facts);
++        // shadow generator들이 symbols/observations 인덱스를 각자 다시 만들지 않도록 ingest 단위에서 한 번만 구성한다.
++        ShadowFactsIndex shadowFactsIndex = ShadowFactsIndex.from(facts);
+ 
+         ObservationPromotionShadowReport shadowReport =
+                 ObservationPromotionShadowAnalyzer.analyze(facts);
+@@ -276,7 +279,7 @@ public class GraphStoreIngestService {
+                 candidateParity =
+                 EndpointEventSpiShadowParityAnalyzer
+                         .compare(
+-                                facts,
++                                shadowFactsIndex,
+                                 candidateGeneration,
+                                 objectMapper
+                         );
+@@ -299,7 +302,7 @@ public class GraphStoreIngestService {
+                 beanConfigurationParity =
+                 BeanConfigurationShadowParityAnalyzer
+                         .compare(
+-                                facts,
++                                shadowFactsIndex,
+                                 beanConfigurationGeneration,
+                                 objectMapper
+                         );
+@@ -314,7 +317,7 @@ public class GraphStoreIngestService {
+                 reflectionGeneration =
+                 ReflectionShadowCandidateGenerator
+                         .generate(
+-                                facts,
++                                shadowFactsIndex,
+                                 objectMapper
+                         );
+ 
+@@ -322,7 +325,7 @@ public class GraphStoreIngestService {
+                 reflectionParity =
+                 ReflectionShadowParityAnalyzer
+                         .compare(
+-                                facts,
++                                shadowFactsIndex,
+                                 reflectionGeneration,
+                                 objectMapper
+                         );
+@@ -337,7 +340,7 @@ public class GraphStoreIngestService {
+                 diGeneration =
+                 DiShadowCandidateGenerator
+                         .generate(
+-                                facts,
++                                shadowFactsIndex,
+                                 objectMapper
+                         );
+ 
+@@ -345,7 +348,7 @@ public class GraphStoreIngestService {
+                 diParity =
+                 DiShadowParityAnalyzer
+                         .compare(
+-                                facts,
++                                shadowFactsIndex,
+                                 diGeneration,
+                                 objectMapper
+                         );
+diff --git a/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/BeanConfigurationShadowParityAnalyzer.java b/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/BeanConfigurationShadowParityAnalyzer.java
+index 3c33bdb..3f5aae5 100644
+--- a/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/BeanConfigurationShadowParityAnalyzer.java
++++ b/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/BeanConfigurationShadowParityAnalyzer.java
+@@ -38,6 +38,14 @@ public final class BeanConfigurationShadowParityAnalyzer {
+             NormalizedFactsDocument facts,
+             ObservationPromotionCandidateGenerationResult generated,
+             ObjectMapper objectMapper
++    ) {
++        return compare(ShadowFactsIndex.from(facts), generated, objectMapper);
++    }
++
++    public static ObservationPromotionCandidateParityReport compare(
++            ShadowFactsIndex factsIndex,
++            ObservationPromotionCandidateGenerationResult generated,
++            ObjectMapper objectMapper
+     ) {
+         ObjectMapper mapper =
+                 objectMapper == null
+@@ -45,31 +53,13 @@ public final class BeanConfigurationShadowParityAnalyzer {
+                                 .findAndRegisterModules()
+                         : objectMapper;
+ 
+-        List<NormalizedRelationFact> allRelations =
+-                facts == null
+-                        || facts.relations() == null
+-                        ? List.of()
+-                        : facts.relations();
+-
++        ShadowFactsIndex safeIndex = factsIndex == null
++                ? ShadowFactsIndex.from(null)
++                : factsIndex;
++        // 공통 relation 인덱스를 재사용해 parity 단계의 전체 relations 반복 순회를 줄인다.
+         Map<String, NormalizedRelationFact> extractionByKey =
+-                new LinkedHashMap<>();
+-
+-        for (NormalizedRelationFact relation : allRelations) {
+-            if (relation == null
+-                    || !TARGET_RELATION_KINDS.contains(
+-                            normalizeCode(
+-                                    relation.kind()
+-                            )
+-                    )) {
+-                continue;
+-            }
+-
+-            extractionByKey.put(
+-                    ObservationPromotionShadowCandidate
+-                            .relationKey(relation),
+-                    relation
+-            );
+-        }
++                new LinkedHashMap<>(safeIndex.relationByKeyForKinds(TARGET_RELATION_KINDS));
++        int extractionRelationCount = extractionByKey.size();
+ 
+         List<ObservationPromotionShadowCandidate> candidates =
+                 generated == null
+@@ -144,23 +134,6 @@ public final class BeanConfigurationShadowParityAnalyzer {
+             );
+         }
+ 
+-        int extractionRelationCount =
+-                (int) allRelations.stream()
+-                        .filter(Objects::nonNull)
+-                        .filter(relation ->
+-                                TARGET_RELATION_KINDS.contains(
+-                                        normalizeCode(
+-                                                relation.kind()
+-                                        )
+-                                )
+-                        )
+-                        .map(
+-                                ObservationPromotionShadowCandidate
+-                                        ::relationKey
+-                        )
+-                        .distinct()
+-                        .count();
+-
+         return new ObservationPromotionCandidateParityReport(
+                 candidates.size(),
+                 extractionRelationCount,
+diff --git a/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/DiShadowCandidateGenerator.java b/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/DiShadowCandidateGenerator.java
+index 0cdf648..ef24537 100644
+--- a/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/DiShadowCandidateGenerator.java
++++ b/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/DiShadowCandidateGenerator.java
+@@ -52,6 +52,18 @@ public final class DiShadowCandidateGenerator {
+                     0, List.of(), List.of()
+             );
+         }
++        return generate(ShadowFactsIndex.from(facts), objectMapper);
++    }
++
++    public static ObservationPromotionCandidateGenerationResult generate(
++            ShadowFactsIndex factsIndex,
++            ObjectMapper objectMapper
++    ) {
++        if (factsIndex == null) {
++            return new ObservationPromotionCandidateGenerationResult(
++                    0, List.of(), List.of()
++            );
++        }
+ 
+         ObjectMapper mapper = objectMapper == null
+                 ? new ObjectMapper().findAndRegisterModules()
+@@ -63,9 +75,9 @@ public final class DiShadowCandidateGenerator {
+                 new RelationConfidencePolicy();
+ 
+         List<NormalizedObservationFact> observations =
+-                facts.observations() == null ? List.of() : facts.observations();
++                factsIndex.observations();
+         Map<String, NormalizedSymbolFact> symbols =
+-                symbolIndex(facts.symbols());
++                factsIndex.symbolsById();
+         List<ProviderCandidate> providers =
+                 providerCandidates(observations, symbols, mapper);
+ 
+diff --git a/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/DiShadowParityAnalyzer.java b/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/DiShadowParityAnalyzer.java
+index ad1aace..b3f5b85 100644
+--- a/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/DiShadowParityAnalyzer.java
++++ b/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/DiShadowParityAnalyzer.java
+@@ -17,6 +17,7 @@ import java.util.List;
+ import java.util.Locale;
+ import java.util.Map;
+ import java.util.Objects;
++import java.util.Set;
+ 
+ /**
+  * DI GraphStore shadow 후보와 Extraction INJECTS Relation을
+@@ -33,30 +34,26 @@ public final class DiShadowParityAnalyzer {
+             NormalizedFactsDocument facts,
+             ObservationPromotionCandidateGenerationResult generated,
+             ObjectMapper objectMapper
++    ) {
++        return compare(ShadowFactsIndex.from(facts), generated, objectMapper);
++    }
++
++    public static ObservationPromotionCandidateParityReport compare(
++            ShadowFactsIndex factsIndex,
++            ObservationPromotionCandidateGenerationResult generated,
++            ObjectMapper objectMapper
+     ) {
+         ObjectMapper mapper = objectMapper == null
+                 ? new ObjectMapper().findAndRegisterModules()
+                 : objectMapper;
+ 
+-        List<NormalizedRelationFact> allRelations =
+-                facts == null || facts.relations() == null
+-                        ? List.of()
+-                        : facts.relations();
+-
++        ShadowFactsIndex safeIndex = factsIndex == null
++                ? ShadowFactsIndex.from(null)
++                : factsIndex;
++        // 공통 relation 인덱스를 재사용해 parity 단계의 전체 relations 반복 순회를 줄인다.
+         Map<String, NormalizedRelationFact> extractionByKey =
+-                new LinkedHashMap<>();
+-
+-        for (NormalizedRelationFact relation : allRelations) {
+-            if (relation == null
+-                    || !TARGET_KIND.equals(normalizeCode(relation.kind()))) {
+-                continue;
+-            }
+-
+-            extractionByKey.put(
+-                    ObservationPromotionShadowCandidate.relationKey(relation),
+-                    relation
+-            );
+-        }
++                new LinkedHashMap<>(safeIndex.relationByKeyForKinds(Set.of(TARGET_KIND)));
++        int extractionCount = extractionByKey.size();
+ 
+         List<ObservationPromotionShadowCandidate> candidates =
+                 generated == null
+@@ -119,14 +116,6 @@ public final class DiShadowParityAnalyzer {
+             ));
+         }
+ 
+-        int extractionCount = (int) allRelations.stream()
+-                .filter(Objects::nonNull)
+-                .filter(relation ->
+-                        TARGET_KIND.equals(normalizeCode(relation.kind())))
+-                .map(ObservationPromotionShadowCandidate::relationKey)
+-                .distinct()
+-                .count();
+-
+         return new ObservationPromotionCandidateParityReport(
+                 candidates.size(),
+                 extractionCount,
+diff --git a/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/EndpointEventSpiShadowParityAnalyzer.java b/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/EndpointEventSpiShadowParityAnalyzer.java
+index a29817f..0eb1a74 100644
+--- a/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/EndpointEventSpiShadowParityAnalyzer.java
++++ b/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/EndpointEventSpiShadowParityAnalyzer.java
+@@ -20,8 +20,7 @@ import java.util.Objects;
+ import java.util.Set;
+ 
+ /**
+- * Endpoint·Event·SPI GraphStore shadow 후보와 Extraction Relation을
+- * relation identity 및 metadata 단위로 exact 비교한다.
++ * Endpoint/Event/SPI GraphStore shadow 후보와 Extraction Relation을 비교한다.
+  */
+ public final class EndpointEventSpiShadowParityAnalyzer {
+ 
+@@ -42,135 +41,69 @@ public final class EndpointEventSpiShadowParityAnalyzer {
+             ObservationPromotionCandidateGenerationResult generated,
+             ObjectMapper objectMapper
+     ) {
+-        ObjectMapper mapper =
+-                objectMapper == null
+-                        ? new ObjectMapper()
+-                                .findAndRegisterModules()
+-                        : objectMapper;
+-
+-        List<NormalizedRelationFact> allRelations =
+-                facts == null
+-                        || facts.relations() == null
+-                        ? List.of()
+-                        : facts.relations();
++        return compare(ShadowFactsIndex.from(facts), generated, objectMapper);
++    }
+ 
++    public static ObservationPromotionCandidateParityReport compare(
++            ShadowFactsIndex factsIndex,
++            ObservationPromotionCandidateGenerationResult generated,
++            ObjectMapper objectMapper
++    ) {
++        ObjectMapper mapper = objectMapper == null
++                ? new ObjectMapper().findAndRegisterModules()
++                : objectMapper;
++
++        ShadowFactsIndex safeIndex = factsIndex == null
++                ? ShadowFactsIndex.from(null)
++                : factsIndex;
++        // 공통 relation 인덱스에서 대상 kind만 꺼내 비교해 전체 relations 반복 순회를 줄인다.
+         Map<String, NormalizedRelationFact> extractionByKey =
+-                new LinkedHashMap<>();
+-
+-        for (NormalizedRelationFact relation : allRelations) {
+-            if (relation == null
+-                    || !TARGET_RELATION_KINDS.contains(
+-                            normalizeCode(relation.kind())
+-                    )) {
+-                continue;
+-            }
+-
+-            extractionByKey.put(
+-                    ObservationPromotionShadowCandidate
+-                            .relationKey(relation),
+-                    relation
+-            );
+-        }
++                new LinkedHashMap<>(safeIndex.relationByKeyForKinds(TARGET_RELATION_KINDS));
++        int extractionCount = extractionByKey.size();
+ 
+         List<ObservationPromotionShadowCandidate> candidates =
+-                generated == null
+-                        ? List.of()
+-                        : generated.candidates();
+-
+-        List<ObservationPromotionCandidateParityIssue> issues =
+-                new ArrayList<>();
++                generated == null ? List.of() : generated.candidates();
++        List<ObservationPromotionCandidateParityIssue> issues = new ArrayList<>();
+ 
+-        for (ObservationPromotionShadowCandidate candidate
+-                : candidates) {
++        for (ObservationPromotionShadowCandidate candidate : candidates) {
+             String key = candidate.relationKey();
+-
+-            NormalizedRelationFact extraction =
+-                    extractionByKey.remove(key);
++            NormalizedRelationFact extraction = extractionByKey.remove(key);
+ 
+             if (extraction == null) {
+                 issues.add(new ObservationPromotionCandidateParityIssue(
+                         key,
+-                        ObservationPromotionCandidateParityStatus
+-                                .MISSING_EXTRACTION_RELATION,
++                        ObservationPromotionCandidateParityStatus.MISSING_EXTRACTION_RELATION,
+                         candidate.observationIndex(),
+                         candidate.observationKind(),
+-                        List.of(
+-                                "No Extraction relation exists "
+-                                        + "for the generated relation key"
+-                        )
++                        List.of("No Extraction relation exists for the generated relation key")
+                 ));
+                 continue;
+             }
+ 
+-            List<String> reasons =
+-                    metadataDifferences(
+-                            candidate.relation(),
+-                            extraction,
+-                            mapper
+-                    );
+-
++            List<String> reasons = metadataDifferences(candidate.relation(), extraction, mapper);
+             issues.add(new ObservationPromotionCandidateParityIssue(
+                     key,
+                     reasons.isEmpty()
+-                            ? ObservationPromotionCandidateParityStatus
+-                                    .MATCHED
+-                            : ObservationPromotionCandidateParityStatus
+-                                    .METADATA_MISMATCH,
++                            ? ObservationPromotionCandidateParityStatus.MATCHED
++                            : ObservationPromotionCandidateParityStatus.METADATA_MISMATCH,
+                     candidate.observationIndex(),
+                     candidate.observationKind(),
+                     reasons
+             ));
+         }
+ 
+-        for (Map.Entry<String, NormalizedRelationFact> entry
+-                : extractionByKey.entrySet()) {
++        for (Map.Entry<String, NormalizedRelationFact> entry : extractionByKey.entrySet()) {
+             issues.add(new ObservationPromotionCandidateParityIssue(
+                     entry.getKey(),
+-                    ObservationPromotionCandidateParityStatus
+-                            .EXTRACTION_ONLY,
++                    ObservationPromotionCandidateParityStatus.EXTRACTION_ONLY,
+                     null,
+                     null,
+-                    List.of(
+-                            "Extraction produced a target relation "
+-                                    + "that GraphStore shadow generation "
+-                                    + "did not reproduce"
+-                    )
++                    List.of("Extraction produced a target relation that GraphStore shadow generation did not reproduce")
+             ));
+         }
+ 
+-        int generatedCount =
+-                candidates.size();
+-
+-        int extractionCount =
+-                extractionByKey.size()
+-                        + (int) issues.stream()
+-                        .filter(issue ->
+-                                issue.status()
+-                                        != ObservationPromotionCandidateParityStatus
+-                                        .MISSING_EXTRACTION_RELATION
+-                        )
+-                        .count();
+-
+-        /*
+-         * extractionCount는 원래 subset의 크기로 다시 계산해
+-         * duplicate key가 없는 composer 최종 계약을 명확히 한다.
+-         */
+-        extractionCount = (int) allRelations.stream()
+-                .filter(Objects::nonNull)
+-                .filter(relation ->
+-                        TARGET_RELATION_KINDS.contains(
+-                                normalizeCode(relation.kind())
+-                        )
+-                )
+-                .map(
+-                        ObservationPromotionShadowCandidate
+-                                ::relationKey
+-                )
+-                .distinct()
+-                .count();
+-
+         return new ObservationPromotionCandidateParityReport(
+-                generatedCount,
++                candidates.size(),
+                 extractionCount,
+                 issues
+         );
+@@ -181,129 +114,51 @@ public final class EndpointEventSpiShadowParityAnalyzer {
+             NormalizedRelationFact extraction,
+             ObjectMapper mapper
+     ) {
+-        List<String> reasons =
+-                new ArrayList<>();
++        List<String> reasons = new ArrayList<>();
+ 
+-        compare(
+-                reasons,
+-                "origin",
+-                normalizeCode(generated.origin()),
+-                normalizeCode(extraction.origin())
+-        );
++        compare(reasons, "origin", normalizeCode(generated.origin()), normalizeCode(extraction.origin()));
++        compare(reasons, "derivation", normalizeCode(generated.derivation()), normalizeCode(extraction.derivation()));
++        compare(reasons, "resolution.status", normalizeCode(generated.resolutionStatus()), normalizeCode(extraction.resolutionStatus()));
++        compare(reasons, "resolution.reason", generated.resolutionReason(), extraction.resolutionReason());
++        compare(reasons, "call_site_line", generated.callSiteLine(), extraction.callSiteLine());
+ 
+-        compare(
+-                reasons,
+-                "derivation",
+-                normalizeCode(generated.derivation()),
+-                normalizeCode(extraction.derivation())
+-        );
+-
+-        compare(
+-                reasons,
+-                "resolution.status",
+-                normalizeCode(generated.resolutionStatus()),
+-                normalizeCode(extraction.resolutionStatus())
+-        );
+-
+-        compare(
+-                reasons,
+-                "resolution.reason",
+-                generated.resolutionReason(),
+-                extraction.resolutionReason()
+-        );
+-
+-        compare(
+-                reasons,
+-                "call_site_line",
+-                generated.callSiteLine(),
+-                extraction.callSiteLine()
+-        );
+-
+-        if (!sameDecimal(
+-                generated.confidenceHint(),
+-                extraction.confidenceHint()
+-        )) {
+-            reasons.add(
+-                    "confidence_hint expected="
+-                            + generated.confidenceHint()
+-                            + ", actual="
+-                            + extraction.confidenceHint()
+-            );
++        if (!sameDecimal(generated.confidenceHint(), extraction.confidenceHint())) {
++            reasons.add("confidence_hint expected=" + generated.confidenceHint()
++                    + ", actual=" + extraction.confidenceHint());
+         }
+ 
+-        if (!Objects.equals(
+-                generated.evidenceIds(),
+-                extraction.evidenceIds()
+-        )) {
+-            reasons.add(
+-                    "evidence_ids expected="
+-                            + generated.evidenceIds()
+-                            + ", actual="
+-                            + extraction.evidenceIds()
+-            );
++        if (!Objects.equals(generated.evidenceIds(), extraction.evidenceIds())) {
++            reasons.add("evidence_ids expected=" + generated.evidenceIds()
++                    + ", actual=" + extraction.evidenceIds());
+         }
+ 
+-        JsonNode generatedAttrs =
+-                mapper.valueToTree(
+-                        generated.attrs()
+-                );
+-
+-        JsonNode extractionAttrs =
+-                mapper.valueToTree(
+-                        extraction.attrs()
+-                );
++        JsonNode generatedAttrs = mapper.valueToTree(generated.attrs());
++        JsonNode extractionAttrs = mapper.valueToTree(extraction.attrs());
+ 
+-        if (!Objects.equals(
+-                generatedAttrs,
+-                extractionAttrs
+-        )) {
+-            reasons.add(
+-                    "attrs expected="
+-                            + generatedAttrs
+-                            + ", actual="
+-                            + extractionAttrs
+-            );
++        if (!Objects.equals(generatedAttrs, extractionAttrs)) {
++            reasons.add("attrs expected=" + generatedAttrs + ", actual=" + extractionAttrs);
+         }
+ 
+         return List.copyOf(reasons);
+     }
+ 
+-    private static void compare(
+-            List<String> reasons,
+-            String field,
+-            Object expected,
+-            Object actual
+-    ) {
++    private static void compare(List<String> reasons, String field, Object expected, Object actual) {
+         if (!Objects.equals(expected, actual)) {
+-            reasons.add(
+-                    field
+-                            + " expected="
+-                            + expected
+-                            + ", actual="
+-                            + actual
+-            );
++            reasons.add(field + " expected=" + expected + ", actual=" + actual);
+         }
+     }
+ 
+-    private static boolean sameDecimal(
+-            BigDecimal left,
+-            BigDecimal right
+-    ) {
++    private static boolean sameDecimal(BigDecimal left, BigDecimal right) {
+         if (left == null || right == null) {
+             return left == null && right == null;
+         }
+-
+         return left.compareTo(right) == 0;
+     }
+ 
+-    private static String normalizeCode(
+-            String value
+-    ) {
++    private static String normalizeCode(String value) {
+         if (value == null || value.isBlank()) {
+             return null;
+         }
+-
+-        return value.trim()
+-                .toLowerCase(Locale.ROOT);
++        return value.trim().toLowerCase(Locale.ROOT);
+     }
+ }
+diff --git a/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/ObservationPromotionShadowAnalyzer.java b/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/ObservationPromotionShadowAnalyzer.java
+index 2c5f999..130b054 100644
+--- a/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/ObservationPromotionShadowAnalyzer.java
++++ b/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/ObservationPromotionShadowAnalyzer.java
+@@ -14,7 +14,9 @@ import java.lang.reflect.Array;
+ import java.math.BigDecimal;
+ import java.util.ArrayList;
+ import java.util.Collection;
++import java.util.Collections;
+ import java.util.Comparator;
++import java.util.LinkedHashMap;
+ import java.util.LinkedHashSet;
+ import java.util.List;
+ import java.util.Locale;
+@@ -55,8 +57,10 @@ public final class ObservationPromotionShadowAnalyzer {
+         List<NormalizedObservationFact> observations =
+                 safeList(facts.observations());
+ 
+-        List<NormalizedRelationFact> relations =
+-                safeList(facts.relations());
++        RelationAnchorIndex relationIndex =
++                RelationAnchorIndex.from(
++                        safeList(facts.relations())
++                );
+ 
+         List<ObservationPromotionShadowIssue> issues =
+                 new ArrayList<>(observations.size());
+@@ -95,7 +99,7 @@ public final class ObservationPromotionShadowAnalyzer {
+                     index,
+                     observation,
+                     contract.get(),
+-                    relations
++                    relationIndex
+             ));
+         }
+ 
+@@ -110,16 +114,22 @@ public final class ObservationPromotionShadowAnalyzer {
+             int observationIndex,
+             NormalizedObservationFact observation,
+             ObservationPromotionContract contract,
+-            List<NormalizedRelationFact> relations
++            RelationAnchorIndex relationIndex
+     ) {
++        ObservationAnchor observationAnchor =
++                ObservationAnchor.from(observation);
++
+         List<ScoredRelation> anchoredRelations =
+-                relations.stream()
+-                        .filter(relation -> relation != null)
++                relationIndex.candidatesFor(
++                                observationAnchor,
++                                contract
++                        )
++                        .stream()
+                         .map(relation ->
+                                 new ScoredRelation(
+-                                        relation,
++                                        relation.relation(),
+                                         anchorScore(
+-                                                observation,
++                                                observationAnchor,
+                                                 contract,
+                                                 relation
+                                         )
+@@ -255,9 +265,9 @@ public final class ObservationPromotionShadowAnalyzer {
+      * target 일치는 후보 간 선택용 보너스로만 사용한다.
+      */
+     private static int anchorScore(
+-            NormalizedObservationFact observation,
++            ObservationAnchor observation,
+             ObservationPromotionContract contract,
+-            NormalizedRelationFact relation
++            IndexedRelation relation
+     ) {
+         if (observation == null || relation == null) {
+             return 0;
+@@ -265,28 +275,18 @@ public final class ObservationPromotionShadowAnalyzer {
+ 
+         int score = 0;
+ 
+-        String sourceObservationKind =
+-                stringAttr(
+-                        relation.attrs(),
+-                        "source_observation_kind"
+-                );
+-
+         if (sameObservationKind(
+                 observation.kind(),
+-                sourceObservationKind
++                relation.sourceObservationKind()
+         )) {
+             score += 100;
+         }
+ 
+         Set<String> observationEvidence =
+-                normalizedIds(
+-                        observation.evidenceIds()
+-                );
++                observation.evidenceIds();
+ 
+         Set<String> relationEvidence =
+-                normalizedIds(
+-                        relation.evidenceIds()
+-                );
++                relation.evidenceIds();
+ 
+         if (!observationEvidence.isEmpty()) {
+             if (relationEvidence.containsAll(
+@@ -302,37 +302,29 @@ public final class ObservationPromotionShadowAnalyzer {
+         }
+ 
+         String siteSymbol =
+-                trimToNull(
+-                        observation.siteSymbol()
+-                );
++                observation.siteSymbol();
+ 
+         if (siteSymbol != null) {
+             if (siteSymbol.equals(
+-                    trimToNull(relation.srcSymbol())
++                    relation.srcSymbol()
+             )) {
+                 score += 40;
+             }
+ 
+-            if (containsValue(
+-                    relation.attrs(),
+-                    siteSymbol
+-            )) {
++            if (relation.attrValues().contains(siteSymbol)) {
+                 score += 35;
+             }
+         }
+ 
+-        if (targetMatches(
+-                observation,
+-                relation
++        if (observation.target() != null
++                && observation.target().equals(
++                relation.destination()
+         )) {
+             score += 20;
+         }
+ 
+         String resolver =
+-                stringAttr(
+-                        relation.attrs(),
+-                        "resolver"
+-                );
++                relation.resolver();
+ 
+         if (contract.resolverClassName()
+                 .equals(resolver)) {
+@@ -584,27 +576,6 @@ public final class ObservationPromotionShadowAnalyzer {
+                 : trimToNull(relation.dstRawRef());
+     }
+ 
+-    private static boolean targetMatches(
+-            NormalizedObservationFact observation,
+-            NormalizedRelationFact relation
+-    ) {
+-        String observationTarget =
+-                normalizeTarget(
+-                        observationTarget(observation)
+-                );
+-
+-        if (observationTarget == null) {
+-            return false;
+-        }
+-
+-        String relationTarget =
+-                normalizeTarget(
+-                        relationDestination(relation)
+-                );
+-
+-        return observationTarget.equals(relationTarget);
+-    }
+-
+     private static String normalizeTarget(String value) {
+         String normalized =
+                 trimToNull(value);
+@@ -693,62 +664,6 @@ public final class ObservationPromotionShadowAnalyzer {
+                 );
+     }
+ 
+-    private static boolean containsValue(
+-            Object value,
+-            String expected
+-    ) {
+-        if (value == null || expected == null) {
+-            return false;
+-        }
+-
+-        if (value instanceof CharSequence sequence) {
+-            return expected.equals(
+-                    sequence.toString()
+-            );
+-        }
+-
+-        if (value instanceof Map<?, ?> map) {
+-            for (Object nested : map.values()) {
+-                if (containsValue(
+-                        nested,
+-                        expected
+-                )) {
+-                    return true;
+-                }
+-            }
+-            return false;
+-        }
+-
+-        if (value instanceof Collection<?> collection) {
+-            for (Object nested : collection) {
+-                if (containsValue(
+-                        nested,
+-                        expected
+-                )) {
+-                    return true;
+-                }
+-            }
+-            return false;
+-        }
+-
+-        if (value.getClass().isArray()) {
+-            int length = Array.getLength(value);
+-
+-            for (int index = 0;
+-                 index < length;
+-                 index++) {
+-                if (containsValue(
+-                        Array.get(value, index),
+-                        expected
+-                )) {
+-                    return true;
+-                }
+-            }
+-        }
+-
+-        return expected.equals(String.valueOf(value));
+-    }
+-
+     private static Set<String> normalizedIds(
+             List<String> ids
+     ) {
+@@ -808,6 +723,241 @@ public final class ObservationPromotionShadowAnalyzer {
+                 : values;
+     }
+ 
++    /**
++     * Observation promotion shadow는 원래 observation마다 모든 relation을 다시 훑었다.
++     * relation anchor 조건에 쓰이는 값을 한 번만 인덱싱해 점수가 생길 수 있는 후보만 평가한다.
++     */
++    private static final class RelationAnchorIndex {
++
++        private final Map<String, List<IndexedRelation>> bySourceObservationKind;
++        private final Map<String, List<IndexedRelation>> byEvidenceId;
++        private final Map<String, List<IndexedRelation>> bySrcSymbol;
++        private final Map<String, List<IndexedRelation>> byAttrValue;
++        private final Map<String, List<IndexedRelation>> byDestination;
++        private final Map<String, List<IndexedRelation>> byResolver;
++
++        private RelationAnchorIndex(
++                Map<String, List<IndexedRelation>> bySourceObservationKind,
++                Map<String, List<IndexedRelation>> byEvidenceId,
++                Map<String, List<IndexedRelation>> bySrcSymbol,
++                Map<String, List<IndexedRelation>> byAttrValue,
++                Map<String, List<IndexedRelation>> byDestination,
++                Map<String, List<IndexedRelation>> byResolver
++        ) {
++            this.bySourceObservationKind = bySourceObservationKind;
++            this.byEvidenceId = byEvidenceId;
++            this.bySrcSymbol = bySrcSymbol;
++            this.byAttrValue = byAttrValue;
++            this.byDestination = byDestination;
++            this.byResolver = byResolver;
++        }
++
++        static RelationAnchorIndex from(List<NormalizedRelationFact> relations) {
++            List<IndexedRelation> indexed = new ArrayList<>();
++            Map<String, List<IndexedRelation>> bySourceObservationKind = new LinkedHashMap<>();
++            Map<String, List<IndexedRelation>> byEvidenceId = new LinkedHashMap<>();
++            Map<String, List<IndexedRelation>> bySrcSymbol = new LinkedHashMap<>();
++            Map<String, List<IndexedRelation>> byAttrValue = new LinkedHashMap<>();
++            Map<String, List<IndexedRelation>> byDestination = new LinkedHashMap<>();
++            Map<String, List<IndexedRelation>> byResolver = new LinkedHashMap<>();
++
++            for (int index = 0; index < relations.size(); index++) {
++                NormalizedRelationFact relation = relations.get(index);
++                if (relation == null) {
++                    continue;
++                }
++
++                IndexedRelation value = IndexedRelation.from(index, relation);
++                indexed.add(value);
++                add(bySourceObservationKind, value.sourceObservationKind(), value);
++                add(bySrcSymbol, value.srcSymbol(), value);
++                add(byDestination, value.destination(), value);
++                add(byResolver, value.resolver(), value);
++
++                for (String evidenceId : value.evidenceIds()) {
++                    add(byEvidenceId, evidenceId, value);
++                }
++                for (String attrValue : value.attrValues()) {
++                    add(byAttrValue, attrValue, value);
++                }
++            }
++
++            return new RelationAnchorIndex(
++                    freeze(bySourceObservationKind),
++                    freeze(byEvidenceId),
++                    freeze(bySrcSymbol),
++                    freeze(byAttrValue),
++                    freeze(byDestination),
++                    freeze(byResolver)
++            );
++        }
++
++        List<IndexedRelation> candidatesFor(
++                ObservationAnchor observation,
++                ObservationPromotionContract contract
++        ) {
++            if (observation == null) {
++                return List.of();
++            }
++
++            Map<Integer, IndexedRelation> candidates = new LinkedHashMap<>();
++            addAll(candidates, indexed(bySourceObservationKind, observation.kind()));
++            addAll(candidates, indexed(bySrcSymbol, observation.siteSymbol()));
++            addAll(candidates, indexed(byAttrValue, observation.siteSymbol()));
++            addAll(candidates, indexed(byDestination, observation.target()));
++
++            if (contract != null) {
++                addAll(candidates, indexed(byResolver, contract.resolverClassName()));
++            }
++
++            for (String evidenceId : observation.evidenceIds()) {
++                addAll(candidates, indexed(byEvidenceId, evidenceId));
++            }
++
++            if (candidates.isEmpty()) {
++                return List.of();
++            }
++
++            return candidates.values()
++                    .stream()
++                    .sorted(Comparator.comparingInt(IndexedRelation::index))
++                    .toList();
++        }
++
++        private static void add(
++                Map<String, List<IndexedRelation>> index,
++                String key,
++                IndexedRelation relation
++        ) {
++            if (key == null || relation == null) {
++                return;
++            }
++            index.computeIfAbsent(key, ignored -> new ArrayList<>()).add(relation);
++        }
++
++        private static void addAll(
++                Map<Integer, IndexedRelation> target,
++                List<IndexedRelation> values
++        ) {
++            if (values == null || values.isEmpty()) {
++                return;
++            }
++            for (IndexedRelation value : values) {
++                target.putIfAbsent(value.index(), value);
++            }
++        }
++
++        private static List<IndexedRelation> indexed(
++                Map<String, List<IndexedRelation>> index,
++                String key
++        ) {
++            if (key == null || index == null) {
++                return List.of();
++            }
++            return index.getOrDefault(key, List.of());
++        }
++
++        private static Map<String, List<IndexedRelation>> freeze(
++                Map<String, List<IndexedRelation>> source
++        ) {
++            source.replaceAll((key, values) -> List.copyOf(values));
++            return Collections.unmodifiableMap(new LinkedHashMap<>(source));
++        }
++    }
++
++    private record ObservationAnchor(
++            String kind,
++            String siteSymbol,
++            String target,
++            Set<String> evidenceIds
++    ) {
++
++        static ObservationAnchor from(NormalizedObservationFact observation) {
++            if (observation == null) {
++                return new ObservationAnchor(null, null, null, Set.of());
++            }
++            return new ObservationAnchor(
++                    normalizeCode(observation.kind()),
++                    trimToNull(observation.siteSymbol()),
++                    normalizeTarget(observationTarget(observation)),
++                    normalizedIds(observation.evidenceIds())
++            );
++        }
++    }
++
++    private record IndexedRelation(
++            int index,
++            NormalizedRelationFact relation,
++            String sourceObservationKind,
++            Set<String> evidenceIds,
++            String srcSymbol,
++            Set<String> attrValues,
++            String destination,
++            String resolver
++    ) {
++
++        static IndexedRelation from(int index, NormalizedRelationFact relation) {
++            return new IndexedRelation(
++                    index,
++                    relation,
++                    normalizeCode(stringAttr(relation.attrs(), "source_observation_kind")),
++                    normalizedIds(relation.evidenceIds()),
++                    trimToNull(relation.srcSymbol()),
++                    scalarAttrValues(relation.attrs()),
++                    normalizeTarget(relationDestination(relation)),
++                    stringAttr(relation.attrs(), "resolver")
++            );
++        }
++    }
++
++    private static Set<String> scalarAttrValues(Object value) {
++        if (value == null) {
++            return Set.of();
++        }
++
++        LinkedHashSet<String> result = new LinkedHashSet<>();
++        collectScalarAttrValues(value, result);
++        return Set.copyOf(result);
++    }
++
++    private static void collectScalarAttrValues(Object value, Set<String> target) {
++        if (value == null) {
++            return;
++        }
++
++        if (value instanceof CharSequence sequence) {
++            String normalized = trimToNull(sequence.toString());
++            if (normalized != null) {
++                target.add(normalized);
++            }
++            return;
++        }
++
++        if (value instanceof Map<?, ?> map) {
++            for (Object nested : map.values()) {
++                collectScalarAttrValues(nested, target);
++            }
++            return;
++        }
++
++        if (value instanceof Collection<?> collection) {
++            for (Object nested : collection) {
++                collectScalarAttrValues(nested, target);
++            }
++            return;
++        }
++
++        if (value.getClass().isArray()) {
++            int length = Array.getLength(value);
++            for (int index = 0; index < length; index++) {
++                collectScalarAttrValues(Array.get(value, index), target);
++            }
++            return;
++        }
++
++        target.add(String.valueOf(value));
++    }
++
+     private record ScoredRelation(
+             NormalizedRelationFact relation,
+             int score
+diff --git a/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/ReflectionShadowCandidateGenerator.java b/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/ReflectionShadowCandidateGenerator.java
+index b476d08..294e5ed 100644
+--- a/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/ReflectionShadowCandidateGenerator.java
++++ b/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/ReflectionShadowCandidateGenerator.java
+@@ -59,6 +59,21 @@ public final class ReflectionShadowCandidateGenerator {
+                     List.of()
+             );
+         }
++        return generate(ShadowFactsIndex.from(facts), objectMapper);
++    }
++
++    public static ObservationPromotionCandidateGenerationResult
++    generate(
++            ShadowFactsIndex factsIndex,
++            ObjectMapper objectMapper
++    ) {
++        if (factsIndex == null) {
++            return new ObservationPromotionCandidateGenerationResult(
++                    0,
++                    List.of(),
++                    List.of()
++            );
++        }
+ 
+         ObjectMapper mapper =
+                 objectMapper == null
+@@ -72,15 +87,8 @@ public final class ReflectionShadowCandidateGenerator {
+         RelationConfidencePolicy confidencePolicy =
+                 new RelationConfidencePolicy();
+ 
+-        List<NormalizedSymbolFact> symbols =
+-                facts.symbols() == null
+-                        ? List.of()
+-                        : facts.symbols();
+-
+         List<NormalizedObservationFact> observations =
+-                facts.observations() == null
+-                        ? List.of()
+-                        : facts.observations();
++                factsIndex.observations();
+ 
+         List<ObservationPromotionShadowCandidate> candidates =
+                 new ArrayList<>();
+@@ -113,7 +121,7 @@ public final class ReflectionShadowCandidateGenerator {
+                     generateCandidate(
+                             index,
+                             observation,
+-                            symbols,
++                            factsIndex,
+                             mapper,
+                             resolutionPolicy,
+                             confidencePolicy,
+@@ -136,7 +144,7 @@ public final class ReflectionShadowCandidateGenerator {
+     generateCandidate(
+             int observationIndex,
+             NormalizedObservationFact observation,
+-            List<NormalizedSymbolFact> symbols,
++            ShadowFactsIndex factsIndex,
+             ObjectMapper mapper,
+             RelationResolutionPolicy resolutionPolicy,
+             RelationConfidencePolicy confidencePolicy,
+@@ -206,7 +214,7 @@ public final class ReflectionShadowCandidateGenerator {
+                     case TYPE ->
+                             resolveTypeTarget(
+                                     targetType,
+-                                    symbols
++                                    factsIndex
+                             );
+ 
+                     case METHOD ->
+@@ -214,21 +222,21 @@ public final class ReflectionShadowCandidateGenerator {
+                                     targetType,
+                                     memberName,
+                                     parameterTypes,
+-                                    symbols
++                                    factsIndex
+                             );
+ 
+                     case FIELD ->
+                             resolveFieldTarget(
+                                     targetType,
+                                     memberName,
+-                                    symbols
++                                    factsIndex
+                             );
+ 
+                     case CONSTRUCTOR ->
+                             resolveConstructorTarget(
+                                     targetType,
+                                     parameterTypes,
+-                                    symbols
++                                    factsIndex
+                             );
+ 
+                     case UNKNOWN ->
+@@ -406,7 +414,7 @@ public final class ReflectionShadowCandidateGenerator {
+ 
+     private static ResolutionTarget resolveTypeTarget(
+             String rawTargetType,
+-            List<NormalizedSymbolFact> symbols
++            ShadowFactsIndex factsIndex
+     ) {
+         String normalizedType =
+                 normalizeRawType(rawTargetType);
+@@ -424,7 +432,7 @@ public final class ReflectionShadowCandidateGenerator {
+ 
+         List<NormalizedSymbolFact> matches =
+                 matchingTypes(
+-                        symbols,
++                        factsIndex,
+                         normalizedType
+                 );
+ 
+@@ -461,7 +469,7 @@ public final class ReflectionShadowCandidateGenerator {
+             String rawTargetType,
+             String memberName,
+             List<String> parameterTypes,
+-            List<NormalizedSymbolFact> symbols
++            ShadowFactsIndex factsIndex
+     ) {
+         String normalizedType =
+                 normalizeRawType(rawTargetType);
+@@ -490,10 +498,7 @@ public final class ReflectionShadowCandidateGenerator {
+ 
+         List<NormalizedSymbolFact> matches =
+                 matchingMembers(
+-                        symbolsOfKind(
+-                                symbols,
+-                                "method"
+-                        ),
++                        factsIndex.symbolsOfKind("method"),
+                         normalizedType,
+                         normalizedMember,
+                         parameterTypes
+@@ -541,7 +546,7 @@ public final class ReflectionShadowCandidateGenerator {
+     private static ResolutionTarget resolveFieldTarget(
+             String rawTargetType,
+             String memberName,
+-            List<NormalizedSymbolFact> symbols
++            ShadowFactsIndex factsIndex
+     ) {
+         String normalizedType =
+                 normalizeRawType(rawTargetType);
+@@ -567,10 +572,7 @@ public final class ReflectionShadowCandidateGenerator {
+ 
+         List<NormalizedSymbolFact> matches =
+                 matchingMembers(
+-                        symbolsOfKind(
+-                                symbols,
+-                                "field"
+-                        ),
++                        factsIndex.symbolsOfKind("field"),
+                         normalizedType,
+                         normalizedMember,
+                         List.of()
+@@ -614,7 +616,7 @@ public final class ReflectionShadowCandidateGenerator {
+     private static ResolutionTarget resolveConstructorTarget(
+             String rawTargetType,
+             List<String> parameterTypes,
+-            List<NormalizedSymbolFact> symbols
++            ShadowFactsIndex factsIndex
+     ) {
+         String normalizedType =
+                 normalizeRawType(rawTargetType);
+@@ -636,10 +638,7 @@ public final class ReflectionShadowCandidateGenerator {
+ 
+         List<NormalizedSymbolFact> matches =
+                 matchingMembers(
+-                        symbolsOfKind(
+-                                symbols,
+-                                "constructor"
+-                        ),
++                        factsIndex.symbolsOfKind("constructor"),
+                         normalizedType,
+                         null,
+                         parameterTypes
+@@ -683,13 +682,10 @@ public final class ReflectionShadowCandidateGenerator {
+     }
+ 
+     private static List<NormalizedSymbolFact> matchingTypes(
+-            List<NormalizedSymbolFact> symbols,
++            ShadowFactsIndex factsIndex,
+             String rawType
+     ) {
+-        return symbolsOfKind(
+-                symbols,
+-                "type"
+-        ).stream()
++        return factsIndex.symbolsOfKind("type").stream()
+                 .filter(symbol ->
+                         typeMatches(
+                                 symbol,
+diff --git a/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/ReflectionShadowParityAnalyzer.java b/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/ReflectionShadowParityAnalyzer.java
+index a464343..cebe803 100644
+--- a/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/ReflectionShadowParityAnalyzer.java
++++ b/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/ReflectionShadowParityAnalyzer.java
+@@ -40,6 +40,14 @@ public final class ReflectionShadowParityAnalyzer {
+             NormalizedFactsDocument facts,
+             ObservationPromotionCandidateGenerationResult generated,
+             ObjectMapper objectMapper
++    ) {
++        return compare(ShadowFactsIndex.from(facts), generated, objectMapper);
++    }
++
++    public static ObservationPromotionCandidateParityReport compare(
++            ShadowFactsIndex factsIndex,
++            ObservationPromotionCandidateGenerationResult generated,
++            ObjectMapper objectMapper
+     ) {
+         ObjectMapper mapper =
+                 objectMapper == null
+@@ -47,31 +55,13 @@ public final class ReflectionShadowParityAnalyzer {
+                                 .findAndRegisterModules()
+                         : objectMapper;
+ 
+-        List<NormalizedRelationFact> allRelations =
+-                facts == null
+-                        || facts.relations() == null
+-                        ? List.of()
+-                        : facts.relations();
+-
++        ShadowFactsIndex safeIndex = factsIndex == null
++                ? ShadowFactsIndex.from(null)
++                : factsIndex;
++        // 공통 relation 인덱스를 재사용해 parity 단계의 전체 relations 반복 순회를 줄인다.
+         Map<String, NormalizedRelationFact> extractionByKey =
+-                new LinkedHashMap<>();
+-
+-        for (NormalizedRelationFact relation : allRelations) {
+-            if (relation == null
+-                    || !TARGET_RELATION_KINDS.contains(
+-                    normalizeCode(
+-                            relation.kind()
+-                    )
+-            )) {
+-                continue;
+-            }
+-
+-            extractionByKey.put(
+-                    ObservationPromotionShadowCandidate
+-                            .relationKey(relation),
+-                    relation
+-            );
+-        }
++                new LinkedHashMap<>(safeIndex.relationByKeyForKinds(TARGET_RELATION_KINDS));
++        int extractionRelationCount = extractionByKey.size();
+ 
+         List<ObservationPromotionShadowCandidate> candidates =
+                 generated == null
+@@ -146,23 +136,6 @@ public final class ReflectionShadowParityAnalyzer {
+             );
+         }
+ 
+-        int extractionRelationCount =
+-                (int) allRelations.stream()
+-                        .filter(Objects::nonNull)
+-                        .filter(relation ->
+-                                TARGET_RELATION_KINDS.contains(
+-                                        normalizeCode(
+-                                                relation.kind()
+-                                        )
+-                                )
+-                        )
+-                        .map(
+-                                ObservationPromotionShadowCandidate
+-                                        ::relationKey
+-                        )
+-                        .distinct()
+-                        .count();
+-
+         return new ObservationPromotionCandidateParityReport(
+                 candidates.size(),
+                 extractionRelationCount,
+diff --git a/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/ShadowFactsIndex.java b/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/ShadowFactsIndex.java
+new file mode 100644
+index 0000000..e7cfa8a
+--- /dev/null
++++ b/src/main/java/com/example/ossdoc/domain/graphstore/service/promotion/ShadowFactsIndex.java
+@@ -0,0 +1,129 @@
++package com.example.ossdoc.domain.graphstore.service.promotion;
++
++import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedFactsDocument;
++import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedObservationFact;
++import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedRelationFact;
++import com.example.ossdoc.domain.graphstore.model.normalized.NormalizedSymbolFact;
++import com.example.ossdoc.domain.graphstore.model.promotion.ObservationPromotionShadowCandidate;
++
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Locale;
++import java.util.Map;
++import java.util.Set;
++
++/**
++ * semantic promotion shadow 단계에서 반복해서 쓰는 facts 조회 인덱스.
++ *
++ * 여러 generator가 같은 symbols/observations를 매번 순회해 map/list를 다시 만들지 않도록
++ * ingest 시작 시 한 번 구성하고 shadow 분석 전체에서 재사용한다.
++ */
++public record ShadowFactsIndex(
++        List<NormalizedObservationFact> observations,
++        List<NormalizedSymbolFact> symbols,
++        List<NormalizedRelationFact> relations,
++        Map<String, NormalizedSymbolFact> symbolsById,
++        Map<String, List<NormalizedSymbolFact>> symbolsByKind,
++        Map<String, List<NormalizedRelationFact>> relationsByKind
++) {
++
++    public static ShadowFactsIndex from(NormalizedFactsDocument facts) {
++        if (facts == null) {
++            return new ShadowFactsIndex(List.of(), List.of(), List.of(), Map.of(), Map.of(), Map.of());
++        }
++
++        List<NormalizedObservationFact> observations = facts.observations() == null
++                ? List.of()
++                : List.copyOf(facts.observations());
++        List<NormalizedSymbolFact> symbols = facts.symbols() == null
++                ? List.of()
++                : List.copyOf(facts.symbols());
++        List<NormalizedRelationFact> relations = facts.relations() == null
++                ? List.of()
++                : List.copyOf(facts.relations());
++
++        Map<String, NormalizedSymbolFact> symbolsById = new LinkedHashMap<>();
++        Map<String, List<NormalizedSymbolFact>> symbolsByKind = symbols.stream()
++                .filter(symbol -> symbol != null && normalizeCode(symbol.kind()) != null)
++                .collect(
++                        LinkedHashMap::new,
++                        (result, symbol) -> result
++                                .computeIfAbsent(normalizeCode(symbol.kind()), ignored -> new java.util.ArrayList<>())
++                                .add(symbol),
++                        Map::putAll
++                );
++
++        for (NormalizedSymbolFact symbol : symbols) {
++            if (symbol == null || trimToNull(symbol.symbol()) == null) {
++                continue;
++            }
++            symbolsById.put(symbol.symbol(), symbol);
++        }
++
++        Map<String, List<NormalizedRelationFact>> relationsByKind = new LinkedHashMap<>();
++        for (NormalizedRelationFact relation : relations) {
++            String kind = relation == null ? null : normalizeCode(relation.kind());
++            if (kind == null) {
++                continue;
++            }
++            relationsByKind.computeIfAbsent(kind, ignored -> new ArrayList<>()).add(relation);
++        }
++
++        symbolsByKind.replaceAll((kind, values) -> List.copyOf(values));
++        relationsByKind.replaceAll((kind, values) -> List.copyOf(values));
++
++        return new ShadowFactsIndex(
++                observations,
++                symbols,
++                relations,
++                Collections.unmodifiableMap(symbolsById),
++                Collections.unmodifiableMap(symbolsByKind),
++                Collections.unmodifiableMap(relationsByKind)
++        );
++    }
++
++    public List<NormalizedSymbolFact> symbolsOfKind(String kind) {
++        String normalized = normalizeCode(kind);
++        if (normalized == null) {
++            return List.of();
++        }
++        return symbolsByKind.getOrDefault(normalized, List.of());
++    }
++
++    public Map<String, NormalizedRelationFact> relationByKeyForKinds(Set<String> kinds) {
++        if (kinds == null || kinds.isEmpty()) {
++            return Map.of();
++        }
++
++        Map<String, NormalizedRelationFact> result = new LinkedHashMap<>();
++        for (String kind : kinds) {
++            for (NormalizedRelationFact relation : relationsOfKind(kind)) {
++                result.put(ObservationPromotionShadowCandidate.relationKey(relation), relation);
++            }
++        }
++        return result;
++    }
++
++    private List<NormalizedRelationFact> relationsOfKind(String kind) {
++        String normalized = normalizeCode(kind);
++        if (normalized == null) {
++            return List.of();
++        }
++        return relationsByKind.getOrDefault(normalized, List.of());
++    }
++
++    private static String normalizeCode(String value) {
++        String trimmed = trimToNull(value);
++        return trimmed == null ? null : trimmed.toLowerCase(Locale.ROOT);
++    }
++
++    private static String trimToNull(String value) {
++        if (value == null) {
++            return null;
++        }
++        String trimmed = value.trim();
++        return trimmed.isEmpty() ? null : trimmed;
++    }
++}

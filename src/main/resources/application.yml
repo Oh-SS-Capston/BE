@@ -1,0 +1,197 @@
+spring:
+  config:
+    import: optional:file:.env[.properties]
+
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:local}
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      timeout: 3s
+      repositories:
+        enabled: false
+
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/ossdoc_db}
+    username: ${DB_USER:postgres}
+    password: ${DB_PW}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      data-source-properties:
+        reWriteBatchedInserts: true
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        show_sql: false
+        format_sql: false
+        use_sql_comments: false
+        default_batch_fetch_size: 50
+        jdbc:
+          batch_size: 50
+          batch_versioned_data: true
+        order_inserts: true
+        order_updates: true
+
+  sql:
+    init:
+      mode: never
+
+  security:
+    oauth2:
+      client:
+        registration:
+          google:
+            client-id: ${GOOGLE_CLIENT_ID}
+            client-secret: ${GOOGLE_CLIENT_SECRET}
+            scope:
+              - openid
+              - profile
+              - email
+            redirect-uri: "{baseUrl}/login/oauth2/code/{registrationId}"
+
+build:
+  maven-command: ${MAVEN_COMMAND:mvn}
+  gradle-command: ${GRADLE_COMMAND:gradle}
+  java-homes:
+    - ${JAVA11_HOME:}
+    - ${JAVA17_HOME:}
+    - ${JAVA21_HOME:}
+    - ${JAVA25_HOME:}
+  isolated-execution: true
+  gradle-no-daemon: ${GRADLE_NO_DAEMON:false}
+  gradle-user-home-dir: ${GRADLE_USER_HOME_DIR:${OSSDOC_WORKSPACE_BASE_DIR:C:/data/ossdoc}/.gradle-home}
+  maven-local-repo-dir: ${MAVEN_LOCAL_REPO_DIR:${OSSDOC_WORKSPACE_BASE_DIR:C:/data/ossdoc}/.m2/repository}
+
+ossdoc:
+  workspace:
+    base-dir: ${OSSDOC_WORKSPACE_BASE_DIR:C:/data/ossdoc}
+  analysis-cache:
+    pipeline-contract-version: ${OSSDOC_CACHE_PIPELINE_CONTRACT_VERSION:pipeline-v1}
+    llm-profile-version: ${OSSDOC_CACHE_LLM_PROFILE_VERSION:llm-profile-sonnet-v2}
+    prompt-template-version: ${OSSDOC_CACHE_PROMPT_TEMPLATE_VERSION:prompt-v2}
+    output-schema-version: ${OSSDOC_CACHE_OUTPUT_SCHEMA_VERSION:schema-v2}
+    default-run-options-signature: ${OSSDOC_CACHE_DEFAULT_RUN_OPTIONS_SIGNATURE:options-default-v1}
+    redis-enabled: ${OSSDOC_CACHE_REDIS_ENABLED:true}
+    redis-ready-key-prefix: ${OSSDOC_CACHE_REDIS_READY_KEY_PREFIX:analysis:ready}
+    redis-lock-key-prefix: ${OSSDOC_CACHE_REDIS_LOCK_KEY_PREFIX:analysis:lock}
+    redis-ready-ttl-hours: ${OSSDOC_CACHE_REDIS_READY_TTL_HOURS:24}
+    redis-lock-ttl-minutes: ${OSSDOC_CACHE_REDIS_LOCK_TTL_MINUTES:20}
+    failed-cooldown-seconds: ${OSSDOC_CACHE_FAILED_COOLDOWN_SECONDS:30}
+  pipeline:
+    worker:
+      fixed-delay-ms: ${PIPELINE_WORKER_FIXED_DELAY_MS:2000}
+      max-jobs-per-tick: ${PIPELINE_WORKER_MAX_JOBS_PER_TICK:1}
+      lock-renew-interval-ms: ${PIPELINE_WORKER_LOCK_RENEW_INTERVAL_MS:600000}
+  cluster:
+    signals:
+      package:
+        enabled: ${CLUSTER_SIGNAL_PACKAGE_ENABLED:true}
+      name:
+        enabled: ${CLUSTER_SIGNAL_NAME_ENABLED:true}
+      doc:
+        enabled: ${CLUSTER_SIGNAL_DOC_ENABLED:true}
+    super-cluster:
+      enabled: ${CLUSTER_SUPER_CLUSTER_ENABLED:true}
+  llm:
+    enabled: ${LLM_ENABLED:true}
+    provider: ${LLM_PROVIDER:ollama}
+    output:
+      local-only: ${LLM_OUTPUT_LOCAL_ONLY:false}
+    generation:
+      max-cautions: ${LLM_MAX_CAUTIONS:20}
+      max-scenarios: ${LLM_MAX_SCENARIOS:6}
+      max-steps-per-scenario: ${LLM_MAX_STEPS_PER_SCENARIO:6}
+      tokens-cautions: ${LLM_TOKENS_CAUTIONS:6500}
+      tokens-scenarios: ${LLM_TOKENS_SCENARIOS:5000}
+      scenario-call-mode: ${LLM_SCENARIO_CALL_MODE:per-scenario}
+      tokens-scenario-base: ${LLM_TOKENS_SCENARIO_BASE:400}
+      tokens-scenario-per-step: ${LLM_TOKENS_SCENARIO_PER_STEP:350}
+      tokens-overview: ${LLM_TOKENS_OVERVIEW:900}
+      reuse-cautions: ${LLM_REUSE_CAUTIONS:false}
+    input:
+      super-cluster:
+        enabled: ${LLM_INPUT_SUPER_CLUSTER_ENABLED:true}
+      api-flow:
+        enabled: ${LLM_INPUT_API_FLOW_ENABLED:true}
+  api-flow:
+    max-entry-points: ${OSSDOC_API_FLOW_MAX_ENTRY_POINTS:50}
+
+app:
+  cors:
+    allowed-origins:
+      - ${FRONTEND_BASE_URL:http://localhost:5173}
+
+  auth:
+    frontend-success-redirect-uri: ${FRONTEND_SUCCESS_REDIRECT_URI:http://localhost:5173/login/success}
+    frontend-failure-redirect-uri: ${FRONTEND_FAILURE_REDIRECT_URI:http://localhost:5173/login/failure}
+    access-cookie-name: ${ACCESS_COOKIE_NAME:ossdoc_access_token}
+    refresh-cookie-name: ${REFRESH_COOKIE_NAME:ossdoc_refresh_token}
+    secure-cookie: ${AUTH_SECURE_COOKIE:false}
+    same-site: ${AUTH_COOKIE_SAME_SITE:Lax}
+  account:
+    rejoin-wait-days: ${ACCOUNT_REJOIN_WAIT_DAYS:30}
+
+  membership:
+    payment-provider: ${MEMBERSHIP_PAYMENT_PROVIDER:PORTONE_V2}
+
+jwt:
+  issuer: ${JWT_ISSUER:ossdoc}
+  secret: ${JWT_SECRET}
+  access-expiration-ms: ${JWT_ACCESS_EXPIRATION_MS:1800000}
+  refresh-expiration-ms: ${JWT_REFRESH_EXPIRATION_MS:1209600000}
+
+claude:
+  api-key: ${CLAUDE_API_KEY:}
+  model: ${CLAUDE_MODEL:claude-sonnet-4-6}
+  haiku-model: ${CLAUDE_HAIKU_MODEL:claude-haiku-4-5}
+  haiku-fallback-enabled: ${CLAUDE_HAIKU_FALLBACK_ENABLED:false}
+  max-tokens: ${CLAUDE_MAX_TOKENS:20000}
+ollama:
+  base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+  model: ${OLLAMA_MODEL:qwen3.5:9b}
+  num-ctx: ${OLLAMA_NUM_CTX:32768}
+  num-predict: ${OLLAMA_NUM_PREDICT:6500}
+  temperature: ${OLLAMA_TEMPERATURE:0.2}
+  seed: ${OLLAMA_SEED:0}
+  timeout-minutes: ${OLLAMA_TIMEOUT_MINUTES:360}
+  json-format: ${OLLAMA_JSON_FORMAT:true}
+  think: ${OLLAMA_THINK:false}
+
+cloud:
+  aws:
+    credentials:
+      access-key: ${AWS_ACCESS_KEY_ID}
+      secret-key: ${AWS_SECRET_ACCESS_KEY}
+    region:
+      static: ${AWS_REGION:ap-northeast-2}
+    s3:
+      bucket: ${S3_BUCKET:ossdoc-artifact-storage}
+
+github:
+  stats:
+    token: ${GITHUB_STATS_TOKEN:}
+    cache-ttl-minutes: ${GITHUB_STATS_CACHE_TTL_MINUTES:360}
+    api-timeout-seconds: ${GITHUB_STATS_API_TIMEOUT_SECONDS:30}
+
+portone:
+  env: ${PORTONE_ENV:test}
+  store-id: ${PORTONE_STORE_ID:}
+  channel-key: ${PORTONE_CHANNEL_KEY:}
+  api-secret: ${PORTONE_API_SECRET:}
+  webhook-secret: ${PORTONE_WEBHOOK_SECRET:}
+  api-base-url: ${PORTONE_API_BASE_URL:https://api.portone.io}
+
+logging:
+  level:
+    com:
+      example:
+        ossdoc:
+          domain:
+            build: DEBUG
