@@ -99,6 +99,7 @@ class SymbolBatchSavePersistenceTest {
     }
 
     private RepoRun persistRun() {
+        // 필드가 하나 늘 때마다 깨지지 않도록 @AllArgsConstructor 대신 명시 생성자를 쓴다.
         RepoRun run = new RepoRun(
                 RUN_ID,
                 null,
@@ -107,12 +108,7 @@ class SymbolBatchSavePersistenceTest {
                 "repo",
                 "main",
                 "0123456789abcdef0123456789abcdef01234567",
-                RunStatus.QUEUED,
-                null,
-                null,
-                null,
-                null,
-                null,
+                "/tmp/" + RUN_ID,
                 null
         );
 

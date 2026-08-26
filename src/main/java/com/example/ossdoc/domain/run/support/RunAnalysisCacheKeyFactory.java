@@ -50,7 +50,8 @@ public class RunAnalysisCacheKeyFactory {
                 "llm=" + normalizeToken(seed.getLlmProfileVersion(), "llm:v1"),
                 "prompt=" + normalizeToken(seed.getPromptTemplateVersion(), "prompt:v1"),
                 "schema=" + normalizeToken(seed.getOutputSchemaVersion(), "schema:v1"),
-                "options=" + normalizeToken(seed.getRunOptionsSignature(), "options:default")
+                "options=" + normalizeToken(seed.getRunOptionsSignature(), "options:default"),
+                "provider=" + normalizeToken(seed.getLlmProvider(), "provider:default")
         );
     }
 

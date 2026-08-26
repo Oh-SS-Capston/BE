@@ -53,4 +53,15 @@ public class RunAnalysisCacheKeySeed {
      * include/exclude, 모드 등의 실행 옵션 차이를 키에 반영합니다.
      */
     private final String runOptionsSignature;
+
+    /**
+     * 이 run이 쓴 LLM 제공자 이름입니다(OLLAMA/CLAUDE).
+     *
+     * 키에 넣는 이유:
+     * - 제공자가 run 단위로 갈리면서 같은 repo/commit에서도 산출물이 달라졌습니다.
+     *   키에 없으면 claude로 요청한 run에 ollama가 만든 READY 번들이 그대로 나갑니다.
+     * - 지정 없이 만들어진 과거 run은 null이며, 양쪽(발행/조회)에서 같은 폴백 토큰으로
+     *   정규화되므로 키가 어긋나지 않습니다.
+     */
+    private final String llmProvider;
 }
