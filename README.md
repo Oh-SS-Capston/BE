@@ -7,6 +7,7 @@ Oh! SS Backend는 GitHub Repository의 Source Code와 구조를 분석하여 **D
 정적 분석 결과를 기반으로 **Ollama에서 실행되는 Qwen3.5 9B**가 개발자용 설명 및 문서 산출물을 생성합니다.
 
 프로젝트 전체 소개: https://github.com/Oh-SS-Capston
+
 Oh! SS Frontend: https://github.com/Oh-SS-Capston/FE
 
 ---
