@@ -50,7 +50,6 @@ workspace/
 .gradle-home/
 
 /claude's generated markdown file
-*.md
 !**/README.md
 
 ### jurutang's file ###
