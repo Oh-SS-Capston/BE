@@ -106,6 +106,32 @@ public class RunPipelineJob extends BaseAuditedEntity {
         this.run.markRunning();
     }
 
+    /**
+     * 실행 중인 job의 lock 만료 시각만 뒤로 미룹니다.
+     *
+     * 왜 필요한가:
+     * - claim은 lock을 30분으로 잡는데 LLM 단계 하나가 그보다 오래 걸립니다(junit-framework 실측 67분).
+     *   갱신이 없으면 claim SQL의 "RUNNING + locked_until < now" 조건에 걸려
+     *   다른 인스턴스가 아직 돌고 있는 job을 다시 집어가 중복 실행합니다.
+     *
+     * 소유자와 상태를 함께 확인하는 이유:
+     * - lock을 이미 뺏겼거나(lockedBy 변경) 캐시 대기로 전환돼 lock이 비워진 job을
+     *   되살리면 안 됩니다. 그 경우 false를 돌려 호출자가 갱신을 멈추게 합니다.
+     *
+     * @return 갱신했으면 true, 소유자가 아니거나 실행 중이 아니면 false
+     */
+    public boolean renewLock(String workerId, LocalDateTime lockedUntil) {
+        if (this.status != PipelineJobStatus.RUNNING) {
+            return false;
+        }
+        if (this.lockedBy == null || !this.lockedBy.equals(workerId)) {
+            return false;
+        }
+
+        this.lockedUntil = lockedUntil;
+        return true;
+    }
+
     public void updateProgress(RunStage stage, String message) {
         this.status = PipelineJobStatus.RUNNING;
         this.currentStage = stage;

@@ -94,6 +94,10 @@ ossdoc:
     worker:
       fixed-delay-ms: ${PIPELINE_WORKER_FIXED_DELAY_MS:2000}
       max-jobs-per-tick: ${PIPELINE_WORKER_MAX_JOBS_PER_TICK:1}
+      # 실행 중인 job의 lock 연장 주기. claim이 잡는 lock(30분)보다 충분히 짧아야 한다.
+      # LLM 단계 하나가 lock보다 오래 걸려(junit-framework 실측 67분) 갱신이 없으면
+      # 만료된 lock을 다른 인스턴스가 집어가 같은 job을 중복 실행한다.
+      lock-renew-interval-ms: ${PIPELINE_WORKER_LOCK_RENEW_INTERVAL_MS:600000}
   # refactplan.md 2~5순위 의미 신호(가상 엣지) ablation 토글. 기본 OFF, 환경변수로 개별 ON 가능.
   cluster:
     signals:
