@@ -110,14 +110,23 @@ ossdoc:
     super-cluster:
       enabled: ${CLUSTER_SUPER_CLUSTER_ENABLED:false}
   llm:
-    # 라이선스/구조 분석만 확인할 때는 외부 LLM 호출을 끄고 파이프라인을 완료할 수 있게 합니다.
-    enabled: ${LLM_ENABLED:false}
+    # LLM 단계를 파이프라인 끝에 붙여 실행합니다. false면 SKIPPED로 기록하고 RULE까지만 진행합니다.
+    #
+    # 켜기 전제: provider가 가리키는 모델이 실제로 닿아야 합니다.
+    # ollama(기본)라면 ollama.base-url이 앱에서 접근 가능한 주소여야 하고,
+    # 닿지 않으면 LLM은 선택 단계이므로 run이 PARTIAL_SUCCESS로 끝납니다.
+    # 라이선스/구조 분석만 확인할 때는 LLM_ENABLED=false로 끌 수 있습니다.
+    enabled: ${LLM_ENABLED:true}
     # 사용할 LLM 제공자. ollama = 로컬 모델, claude = Anthropic API.
     # 미지정 시 ollama가 기본이다.
     provider: ${LLM_PROVIDER:ollama}
     # LLM 산출물 저장 방식. true면 로컬 파일만 남기고 S3/DB 저장을 건너뛴다.
+    #
+    # 기본을 false로 두는 이유: AnalysisCachePublishService.REQUIRED_READY_ARTIFACT_KINDS가
+    # LLM 산출물 5종을 DB에서 조회하므로, local-only면 READY 캐시가 발행되지 않고
+    # artifact 조회 API로도 결과를 꺼낼 수 없다. true는 프롬프트 실험용 모드다.
     output:
-      local-only: ${LLM_OUTPUT_LOCAL_ONLY:true}
+      local-only: ${LLM_OUTPUT_LOCAL_ONLY:false}
     # 생성 단계 튜닝. 이 값이 프롬프트 문구이자 실제 출력 상한이다.
     # (로컬 9B는 프롬프트의 "최대 N개"를 무시하므로 코드 상한이 실효 값이다)
     generation:
