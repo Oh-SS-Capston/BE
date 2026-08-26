@@ -57,8 +57,8 @@ import java.util.concurrent.atomic.AtomicReference;
  * 필수 단계 실패: FAILED
  * 선택 단계 실패: PARTIAL_SUCCESS
  *
- * [임시] LLM 단계는 모델 교체 작업 동안 실행하지 않고 SKIPPED로만 기록합니다.
- * 실제 파이프라인은 RULE 단계까지만 진행됩니다.
+ * LLM 단계는 로컬 모델(ossdoc.llm.provider=ollama)로 파이프라인 끝에 이어붙어 있습니다.
+ * ossdoc.llm.enabled=false로 두면 이전처럼 SKIPPED로만 기록하고 RULE까지만 진행합니다.
  */
 @Slf4j
 @Service
@@ -280,8 +280,9 @@ public class RunPipelineExecutor {
             );
 
             /*
-             * LLM 단계는 외부 API 토큰과 비용에 의존합니다.
-             * 기능 검증 환경에서는 설정으로 끌 수 있고, RULE이 실패한 경우에도 입력 전제가 깨졌으므로 SKIPPED 처리합니다.
+             * LLM 단계는 provider 설정에 따라 로컬 모델(ollama) 또는 외부 API(claude)를 씁니다.
+             * 어느 쪽이든 모델이 준비되지 않은 환경에서는 설정으로 끌 수 있고,
+             * RULE이 실패한 경우에도 입력 전제가 깨졌으므로 SKIPPED 처리합니다.
              */
             if (!llmEnabled) {
                 /*
