@@ -364,8 +364,9 @@ http://localhost:8080/swagger-ui/index.html
 
 # License
 
-Oh! SS Backend source code is licensed under the **Apache License 2.0**.
+Oh! SS Backend is licensed under the **Apache License 2.0**.
 
-Qwen3.5 9B is distributed under the **Apache License 2.0**.
+See [`LICENSE`](./LICENSE) for details.
 
-See `LICENSE` and `THIRD_PARTY_LICENSES.md`.
+Third-party dependencies and AI models remain subject to their respective licenses.
+See [`THIRD_PARTY_LICENSES.md`](./THIRD_PARTY_LICENSES.md).
