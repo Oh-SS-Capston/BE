@@ -33,7 +33,15 @@ public enum LlmErrorCode implements BaseCode {
     REQUIRED_ARTIFACT_NOT_FOUND(HttpStatus.NOT_FOUND, "LLM_404_002", "Required analysis artifact not found."),
 
     // 시나리오 캐시 저장 실패
-    SCENARIO_CACHE_SAVE_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "LLM_500_005", "Failed to save scenario cache.");
+    SCENARIO_CACHE_SAVE_FAILED(HttpStatus.INTERNAL_SERVER_ERROR, "LLM_500_005", "Failed to save scenario cache."),
+
+    /*
+     * 요청한 제공자를 쓸 수 없는 경우입니다.
+     * - 인식할 수 없는 provider 값
+     * - claude를 요청했지만 API 키가 설정되지 않은 환경
+     * 조용히 다른 모델로 대체하지 않고 실패로 알립니다. 비용과 산출물 품질이 함께 달라지기 때문입니다.
+     */
+    PROVIDER_NOT_AVAILABLE(HttpStatus.BAD_REQUEST, "LLM_400_001", "Requested LLM provider is not available.");
 
     private final HttpStatus httpStatus;
     private final String code;

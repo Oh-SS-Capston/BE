@@ -5,6 +5,7 @@ import com.example.ossdoc.domain.run.entity.RepoRun;
 import com.example.ossdoc.domain.run.repository.RepoRunRepository;
 import com.example.ossdoc.global.llm.dto.json.LlmResult;
 import com.example.ossdoc.global.llm.dto.request.LlmRequest;
+import com.example.ossdoc.global.llm.enums.LlmProvider;
 import com.example.ossdoc.global.llm.dto.response.LlmResponse;
 import com.example.ossdoc.global.llm.entity.LlmScenarioCache;
 import com.example.ossdoc.global.llm.exception.LlmException;
@@ -15,6 +16,7 @@ import com.example.ossdoc.global.llm.config.LlmOutputProperties;
 import com.example.ossdoc.global.llm.model.LlmContextBundle;
 import com.example.ossdoc.global.llm.service.support.LlmArtifactWriter;
 import com.example.ossdoc.global.llm.service.support.LlmChatClient;
+import com.example.ossdoc.global.llm.service.support.LlmChatClientResolver;
 import com.example.ossdoc.global.llm.service.support.LlmPromptCatalog;
 import com.example.ossdoc.global.llm.service.support.LlmScenarioContextSupport;
 import com.example.ossdoc.global.llm.service.support.LlmServiceBuildSupport;
@@ -66,7 +68,7 @@ public class LlmService {
     private final RepoRunRepository repoRunRepository;
     private final LlmInputAssemblerService llmInputAssemblerService;
     private final LlmScenarioCacheService llmScenarioCacheService;
-    private final LlmChatClient llmChatClient;
+    private final LlmChatClientResolver llmChatClientResolver;
     private final LlmServiceBuildSupport llmServiceBuildSupport;
     private final LlmScenarioContextSupport llmScenarioContextSupport;
     private final LlmGenerationProperties llmGenerationProperties;
@@ -82,6 +84,14 @@ public class LlmService {
         RepoRun run = repoRunRepository.findById(request.getRunId())
                 .orElseThrow(() -> new LlmException(LlmErrorCode.RUN_NOT_FOUND));
 
+        /*
+         * 제공자는 run이 정한다. 요청에 없으면 설정 기본값이다.
+         * 여기서 한 번 확정해 아래 단계 전부가 같은 클라이언트를 쓰게 한다 —
+         * 단계마다 다시 고르면 한 run의 산출물이 두 모델에서 나올 수 있다.
+         */
+        LlmChatClient chatClient = llmChatClientResolver.resolve(resolveRequestedProvider(request));
+        log.info("[LlmService] provider={}, model={}", chatClient.provider(), chatClient.resolvePrimaryModel());
+
         LlmContextBundle bundle = llmInputAssemblerService.assemble(request);
         JsonNode structure = objectMapper.valueToTree(bundle.structureEngineOutput());
         List<LlmRequest.EvidenceSnippet> evidence = bundle.evidenceBundle() == null
@@ -90,12 +100,12 @@ public class LlmService {
 
         JsonNode refinedRules = reusableCautions(request.getRunId())
                 .map(this::refreshReusedGate)
-                .orElseGet(() -> generateCautions(structure, evidence));
+                .orElseGet(() -> generateCautions(chatClient, structure, evidence));
         llmArtifactWriter.write(
                 run, ArtifactKind.LLM_REFINED_RULES, ARTIFACT_SCHEMA_VERSION, PATH_REFINED_RULES, refinedRules
         );
 
-        JsonNode scenarioSpecs = generateScenarioSpecs(structure, refinedRules, evidence);
+        JsonNode scenarioSpecs = generateScenarioSpecs(chatClient, structure, refinedRules, evidence);
         llmArtifactWriter.write(
                 run, ArtifactKind.LLM_SCENARIO_SPECS, ARTIFACT_SCHEMA_VERSION, PATH_SCENARIO_SPECS, scenarioSpecs
         );
@@ -107,7 +117,7 @@ public class LlmService {
             LlmScenarioCache scenarioCache = llmScenarioCacheService.upsertScenarioCache(
                     run,
                     scenarioSpecs,
-                    llmChatClient.resolvePrimaryModel(),
+                    chatClient.resolvePrimaryModel(),
                     SCENARIO_PROMPT_VERSION
             );
             scenarioCacheId = scenarioCache.getCacheId();
@@ -197,12 +207,17 @@ public class LlmService {
     /**
      * Step 1: rule 후보를 caution/rules 계약으로 정규화한다.
      */
-    private JsonNode generateCautions(JsonNode structure, List<LlmRequest.EvidenceSnippet> evidence) {
+    private JsonNode generateCautions(
+            LlmChatClient chatClient,
+            JsonNode structure,
+            List<LlmRequest.EvidenceSnippet> evidence
+    ) {
         String context = llmServiceBuildSupport.buildCautionContext(structure, evidence);
         log.info("[LlmService] {} (contextChars={})", STEP1_REFINED_RULES, context.length());
 
         int maxCautions = llmGenerationProperties.getMaxCautions();
         JsonNode cautions = generateWithRetryPlan(
+                chatClient,
                 STEP1_REFINED_RULES,
                 applyLanguagePolicy(String.format(LlmPromptCatalog.PROMPT_CAUTIONS, maxCautions)),
                 applyLanguagePolicy(String.format(LlmPromptCatalog.PROMPT_CAUTIONS_COMPACT, Math.min(8, maxCautions))),
@@ -231,11 +246,12 @@ public class LlmService {
      * 두 모드의 산출물은 같은 정규화 경로를 통과하므로 설정 한 줄로 A/B가 된다.</p>
      */
     private JsonNode generateScenarioSpecs(
+            LlmChatClient chatClient,
             JsonNode structure,
             JsonNode refinedRules,
             List<LlmRequest.EvidenceSnippet> evidence
     ) {
-        JsonNode specs = generateScenarioSpecsByMode(structure, refinedRules, evidence);
+        JsonNode specs = generateScenarioSpecsByMode(chatClient, structure, refinedRules, evidence);
 
         // 게이트는 여기 한 곳에서만 붙인다. 두 모드와 fallback이 전부 이 함수를 통과하므로
         // 같은 단위로 기록되어야 A/B 비교가 성립한다.
@@ -253,14 +269,15 @@ public class LlmService {
     }
 
     private JsonNode generateScenarioSpecsByMode(
+            LlmChatClient chatClient,
             JsonNode structure,
             JsonNode refinedRules,
             List<LlmRequest.EvidenceSnippet> evidence
     ) {
         if (llmGenerationProperties.getScenarioCallMode() == ScenarioCallMode.PER_SCENARIO) {
-            return generateScenarioSpecsPerScenario(structure, refinedRules, evidence);
+            return generateScenarioSpecsPerScenario(chatClient, structure, refinedRules, evidence);
         }
-        return generateScenarioSpecsSingle(structure, refinedRules, evidence);
+        return generateScenarioSpecsSingle(chatClient, structure, refinedRules, evidence);
     }
 
     /**
@@ -273,6 +290,7 @@ public class LlmService {
      * 골격 없이 쪼개면 시나리오 수를 모델이 정하게 되어 분해의 전제가 무너진다.</p>
      */
     private JsonNode generateScenarioSpecsPerScenario(
+            LlmChatClient chatClient,
             JsonNode structure,
             JsonNode refinedRules,
             List<LlmRequest.EvidenceSnippet> evidence
@@ -281,13 +299,14 @@ public class LlmService {
         if (!scenarioSeed.isArray() || scenarioSeed.isEmpty()) {
             log.warn("[LlmService] {} 골격이 비어 PER_SCENARIO를 쓸 수 없습니다. SINGLE로 처리합니다.",
                     STEP2_SCENARIO_SPECS);
-            return generateScenarioSpecsSingle(structure, refinedRules, evidence);
+            return generateScenarioSpecsSingle(chatClient, structure, refinedRules, evidence);
         }
 
         String overviewContext = llmScenarioContextSupport.buildOverviewContext(structure, refinedRules);
         log.info("[LlmService] {} overview 호출 (contextChars={})",
                 STEP2_SCENARIO_SPECS, overviewContext.length());
         JsonNode overviewRaw = generateWithRetryPlan(
+                chatClient,
                 STEP2_SCENARIO_SPECS + " overview",
                 applyLanguagePolicy(LlmPromptCatalog.PROMPT_OVERVIEW),
                 applyLanguagePolicy(LlmPromptCatalog.PROMPT_OVERVIEW),
@@ -315,6 +334,7 @@ public class LlmService {
 
             String prompt = applyLanguagePolicy(String.format(LlmPromptCatalog.PROMPT_SCENARIO_ONE, scenarioId));
             JsonNode scenario = generateWithRetryPlan(
+                    chatClient,
                     stepLabel,
                     prompt,
                     prompt,
@@ -338,6 +358,7 @@ public class LlmService {
      * SINGLE 모드: 한 호출로 골격 전체를 채운다. 5차까지의 방식이자 A/B 기준선이다.
      */
     private JsonNode generateScenarioSpecsSingle(
+            LlmChatClient chatClient,
             JsonNode structure,
             JsonNode refinedRules,
             List<LlmRequest.EvidenceSnippet> evidence
@@ -347,6 +368,7 @@ public class LlmService {
 
         int maxScenarios = llmGenerationProperties.getMaxScenarios();
         return generateWithRetryPlan(
+                chatClient,
                 STEP2_SCENARIO_SPECS,
                 applyLanguagePolicy(String.format(
                         LlmPromptCatalog.PROMPT_SCENARIOS,
@@ -458,6 +480,7 @@ public class LlmService {
      * 파싱 실패 시 compact prompt 재시도 후 fallback까지 수행하는 공통 실행기.
      */
     private JsonNode generateWithRetryPlan(
+            LlmChatClient chatClient,
             String stepName,
             String normalPrompt,
             String compactPrompt,
@@ -468,7 +491,7 @@ public class LlmService {
             Supplier<JsonNode> fallbackSupplier
     ) {
         try {
-            JsonNode raw = llmChatClient.call(stepName, normalPrompt, context, maxTokens);
+            JsonNode raw = chatClient.call(stepName, normalPrompt, context, maxTokens);
             return normalizer.apply(raw);
         } catch (LlmException firstFailure) {
             if (!isResponseParseFailed(firstFailure)) {
@@ -481,7 +504,7 @@ public class LlmService {
                 ? context
                 : context.substring(0, compactContextLimit);
         try {
-            JsonNode raw = llmChatClient.call(stepName + " compact", compactPrompt, compactContext, maxTokens);
+            JsonNode raw = chatClient.call(stepName + " compact", compactPrompt, compactContext, maxTokens);
             return normalizer.apply(raw);
         } catch (LlmException secondFailure) {
             if (!isResponseParseFailed(secondFailure)) {
@@ -495,6 +518,27 @@ public class LlmService {
     private Object toSerializable(JsonNode node) {
         if (node == null || node.isNull()) return null;
         return objectMapper.convertValue(node, Object.class);
+    }
+
+    /**
+     * 요청이 지정한 제공자를 파싱한다.
+     *
+     * <p>값이 없으면 null을 돌려 resolver가 설정 기본값을 쓰게 한다.
+     * 인식할 수 없는 값은 기본값으로 흘리지 않고 실패시킨다 — 오타 하나로 의도와 다른 모델이
+     * 조용히 돌면 비용과 산출물 품질이 함께 어긋나고, 캐시 키도 다른 값으로 굳는다.</p>
+     */
+    private LlmProvider resolveRequestedProvider(LlmRequest request) {
+        String raw = request.getProvider();
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+
+        LlmProvider parsed = LlmProvider.from(raw);
+        if (parsed == null) {
+            log.warn("[LlmService] 인식할 수 없는 provider 요청. value={}", raw);
+            throw new LlmException(LlmErrorCode.PROVIDER_NOT_AVAILABLE);
+        }
+        return parsed;
     }
 
     private boolean isResponseParseFailed(LlmException e) {

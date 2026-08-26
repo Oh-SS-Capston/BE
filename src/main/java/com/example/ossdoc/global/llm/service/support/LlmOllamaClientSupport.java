@@ -4,12 +4,12 @@ import com.example.ossdoc.global.config.OllamaConfig;
 import com.example.ossdoc.global.llm.exception.LlmException;
 import com.example.ossdoc.global.llm.exception.code.LlmErrorCode;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.example.ossdoc.global.llm.enums.LlmProvider;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientResponseException;
@@ -17,17 +17,21 @@ import org.springframework.web.client.RestClientResponseException;
 /**
  * 로컬 Ollama 호출/재시도/응답 파싱 전담 컴포넌트.
  *
- * <p>{@code ossdoc.llm.provider}가 ollama이거나 미지정이면 이 구현이 기본으로 등록된다.
+ * <p>run이 provider=OLLAMA를 지정했거나 지정이 없을 때 기본으로 쓰인다.
  * 엔드포인트는 {@code POST /api/generate}(non-streaming)를 쓴다.
  * Anthropic Messages API와 달리 system/user가 별도 필드라 기존 프롬프트 구조를
  * 그대로 옮길 수 있다.</p>
  */
 @Slf4j
 @Component
-@ConditionalOnProperty(name = "ossdoc.llm.provider", havingValue = "ollama", matchIfMissing = true)
 public class LlmOllamaClientSupport implements LlmChatClient {
 
     private static final int MAX_OLLAMA_RETRY_ATTEMPTS = 2;
+
+    @Override
+    public LlmProvider provider() {
+        return LlmProvider.OLLAMA;
+    }
 
     /**
      * 프롬프트 토큰 수 추정용 계수.

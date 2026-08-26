@@ -314,7 +314,16 @@ public class RunPipelineExecutor {
                                         null,
                                         null,
                                         true,
-                                        true
+                                        true,
+                                        /*
+                                         * 제공자는 run이 만들어질 때 확정돼 저장돼 있습니다.
+                                         * job.getRun()은 지연 로딩 프록시라 이 스레드에서 초기화가 보장되지 않으므로,
+                                         * 저장소에서 다시 읽어 값을 꺼냅니다.
+                                         */
+                                        repoRunRepository.findById(runId)
+                                                .map(RepoRun::getLlmProvider)
+                                                .map(Enum::name)
+                                                .orElse(null)
                                 )
                         )
                 );
@@ -591,6 +600,7 @@ public class RunPipelineExecutor {
                 .promptTemplateVersion(analysisCacheProperties.getPromptTemplateVersion())
                 .outputSchemaVersion(analysisCacheProperties.getOutputSchemaVersion())
                 .runOptionsSignature(analysisCacheProperties.getDefaultRunOptionsSignature())
+                .llmProvider(run.getLlmProvider() == null ? null : run.getLlmProvider().name())
                 .build();
         return runAnalysisCacheKeyFactory.buildKey(seed);
     }

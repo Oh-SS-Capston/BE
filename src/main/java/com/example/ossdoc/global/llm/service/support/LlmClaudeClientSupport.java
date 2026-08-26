@@ -4,13 +4,13 @@ import com.example.ossdoc.global.config.LlmConfig;
 import com.example.ossdoc.global.llm.exception.LlmException;
 import com.example.ossdoc.global.llm.exception.code.LlmErrorCode;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.example.ossdoc.global.llm.enums.LlmProvider;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientResponseException;
@@ -18,15 +18,30 @@ import org.springframework.web.client.RestClientResponseException;
 /**
  * Anthropic Claude API 호출/재시도/응답 파싱 전담 컴포넌트.
  *
- * <p>{@code ossdoc.llm.provider=claude}일 때만 빈으로 등록된다.
- * 기본값은 ollama이므로 이 구현은 명시적으로 되돌렸을 때만 동작한다.</p>
+ * <p>run이 provider=CLAUDE를 지정했을 때 {@link LlmChatClientResolver}가 고른다.
+ * 제공자를 run 단위로 고를 수 있어야 해서 조건부 등록을 걷어냈다 — 이제 항상 빈으로 뜨고,
+ * 실제로 쓸 수 있는지는 {@link #available()}(API 키 존재)로 판단한다.</p>
  */
 @Slf4j
 @Component
-@ConditionalOnProperty(name = "ossdoc.llm.provider", havingValue = "claude")
 public class LlmClaudeClientSupport implements LlmChatClient {
 
     private static final int MAX_CLAUDE_RETRY_ATTEMPTS = 2;
+
+    @Override
+    public LlmProvider provider() {
+        return LlmProvider.CLAUDE;
+    }
+
+    /*
+     * 키가 없으면 호출이 전부 401로 떨어진다. 그 실패를 40분짜리 단계 중간이 아니라
+     * 요청을 받는 시점에 알리기 위해 여기서 미리 본다.
+     */
+    @Override
+    public boolean available() {
+        String apiKey = llmConfig.getApiKey();
+        return apiKey != null && !apiKey.isBlank();
+    }
 
     private final RestClient claudeRestClient;
     private final LlmConfig llmConfig;
