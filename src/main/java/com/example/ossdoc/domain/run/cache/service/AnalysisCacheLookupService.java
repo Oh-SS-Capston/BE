@@ -11,6 +11,7 @@ import com.example.ossdoc.domain.run.cache.support.ReadyPayload;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.example.ossdoc.global.llm.service.support.LlmChatClientResolver;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -36,9 +37,15 @@ public class AnalysisCacheLookupService {
     private final AnalysisCacheRedisKeyPolicy redisKeyPolicy;
     private final AnalysisCacheRedisStore redisStore;
     private final ObjectMapper objectMapper;
+    private final LlmChatClientResolver llmChatClientResolver;
 
     @Transactional
-    public AnalysisCacheLookupResult lookupReady(String cacheKey, String repoUrlNorm, String commitSha) {
+    public AnalysisCacheLookupResult lookupReady(
+            String cacheKey,
+            String repoUrlNorm,
+            String commitSha,
+            String llmProvider
+    ) {
         String readyKey = redisKeyPolicy.readyKey(cacheKey);
 
         Optional<String> redisPayload = redisStore.get(readyKey);
@@ -66,11 +73,25 @@ public class AnalysisCacheLookupService {
             log.info("[CACHE] stale redis ready key removed. key={}", abbreviate(cacheKey));
         }
 
+        /*
+         * DB 폴백은 cacheKey가 아니라 repo/commit으로 찾기 때문에 키의 provider 축이 여기서는 안 먹습니다.
+         * (실측: reason=DB_HIT_CACHE_KEY_MISMATCH_SYNCED로 키가 다른 행이 그대로 수용됐습니다.)
+         * 그래서 provider를 조회 조건으로 직접 넣어 다른 제공자의 산출물이 새어 나가지 않게 합니다.
+         *
+         * 나머지 버전 축(prompt/schema/options)은 종전대로 이 경로에서 우회됩니다.
+         * 그것들은 라벨이 바뀌어도 산출물이 같을 수 있는 반면, provider는 내용 자체가 달라집니다.
+         */
+        String effectiveProvider = llmProvider == null || llmProvider.isBlank()
+                ? llmChatClientResolver.defaultProvider().name()
+                : llmProvider;
+
         Optional<AnalysisCache> dbReady = analysisCacheRepository
-                .findLatestByRepoAndCommitAndStatus(
+                .findLatestByRepoAndCommitAndProviderAndStatus(
                         repoUrlNorm,
                         commitSha,
-                        AnalysisCacheStatus.READY
+                        AnalysisCacheStatus.READY,
+                        effectiveProvider,
+                        llmChatClientResolver.defaultProvider().name()
                 );
 
         if (dbReady.isPresent() && isUsableReady(dbReady.get())) {

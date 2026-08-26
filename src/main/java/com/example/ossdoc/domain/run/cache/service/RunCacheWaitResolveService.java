@@ -93,7 +93,8 @@ public class RunCacheWaitResolveService {
         AnalysisCacheLookupResult readyResult = analysisCacheLookupService.lookupReady(
                 cacheKey,
                 normalizedRepoUrl,
-                waitingRun.getCommitSha()
+                waitingRun.getCommitSha(),
+                waitingRun.getLlmProvider() == null ? null : waitingRun.getLlmProvider().name()
         );
 
         if (readyResult.hit()) {
@@ -268,6 +269,7 @@ public class RunCacheWaitResolveService {
                 .promptTemplateVersion(analysisCacheProperties.getPromptTemplateVersion())
                 .outputSchemaVersion(analysisCacheProperties.getOutputSchemaVersion())
                 .runOptionsSignature(analysisCacheProperties.getDefaultRunOptionsSignature())
+                .llmProvider(run.getLlmProvider() == null ? null : run.getLlmProvider().name())
                 .build();
         return runAnalysisCacheKeyFactory.buildKey(seed);
     }

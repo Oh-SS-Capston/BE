@@ -153,6 +153,7 @@ public class AnalysisCachePublishService {
 
         AnalysisCache cache = analysisCacheRepository.findById(cacheKey)
                 .orElseGet(() -> new AnalysisCache(cacheKey, repoUrlNorm, run.getCommitSha()));
+        cache.assignLlmProvider(run.getLlmProvider() == null ? null : run.getLlmProvider().name());
         cache.markReady(run.getRunId(), artifactBundle, qualityHash, expiresAt);
         analysisCacheRepository.save(cache);
 
@@ -196,6 +197,7 @@ public class AnalysisCachePublishService {
         long cooldownSeconds = Math.max(1L, analysisCacheProperties.getFailedCooldownSeconds());
         LocalDateTime retryAfter = LocalDateTime.now().plusSeconds(cooldownSeconds);
 
+        cache.assignLlmProvider(run.getLlmProvider() == null ? null : run.getLlmProvider().name());
         cache.markFailed(run.getRunId(), retryAfter);
         analysisCacheRepository.save(cache);
 
@@ -219,6 +221,7 @@ public class AnalysisCachePublishService {
                 .promptTemplateVersion(analysisCacheProperties.getPromptTemplateVersion())
                 .outputSchemaVersion(analysisCacheProperties.getOutputSchemaVersion())
                 .runOptionsSignature(analysisCacheProperties.getDefaultRunOptionsSignature())
+                .llmProvider(run.getLlmProvider() == null ? null : run.getLlmProvider().name())
                 .build();
         return runAnalysisCacheKeyFactory.buildKey(seed);
     }

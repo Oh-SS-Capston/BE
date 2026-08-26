@@ -36,6 +36,10 @@ import com.example.ossdoc.domain.run.support.RunAnalysisCacheKeySeed;
 import com.example.ossdoc.domain.run.support.WorkspaceManager;
 import com.example.ossdoc.domain.user.entity.User;
 import com.example.ossdoc.domain.user.repository.UserRepository;
+import com.example.ossdoc.global.llm.enums.LlmProvider;
+import com.example.ossdoc.global.llm.exception.LlmException;
+import com.example.ossdoc.global.llm.exception.code.LlmErrorCode;
+import com.example.ossdoc.global.llm.service.support.LlmChatClientResolver;
 import com.example.ossdoc.global.properties.AnalysisCacheProperties;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -76,6 +80,7 @@ public class RepoRunService {
     private final RunPipelineStepExecutionRepository runPipelineStepExecutionRepository;
     private final ArtifactRepository artifactRepository;
     private final TokenService tokenService;
+    private final LlmChatClientResolver llmChatClientResolver;
 
     @Transactional
     public RepoRunCreateResponse createRun(RepoRunCreateRequest req, Long userId) {
@@ -112,7 +117,14 @@ public class RepoRunService {
                 ref
         );
 
-        RunAnalysisCacheKeySeed cacheKeySeed = buildCacheKeySeed(req.getRepoUrl(), commitSha);
+        /*
+         * 제공자는 캐시 키의 일부이므로 캐시 조회보다 먼저 확정해야 합니다.
+         * 여기서 확정하면 쓸 수 없는 제공자(예: 키 없는 claude)를 요청한 경우
+         * 80분짜리 파이프라인이 아니라 이 요청에서 바로 실패합니다.
+         */
+        LlmProvider llmProvider = resolveLlmProvider(req);
+
+        RunAnalysisCacheKeySeed cacheKeySeed = buildCacheKeySeed(req.getRepoUrl(), commitSha, llmProvider);
         String analysisCacheKey = runAnalysisCacheKeyFactory.buildKey(cacheKeySeed);
         String normalizedRepoUrl = runAnalysisCacheKeyFactory.normalizeRepoUrlForCache(req.getRepoUrl());
 
@@ -144,7 +156,8 @@ public class RepoRunService {
             AnalysisCacheLookupResult cacheLookupResult = analysisCacheLookupService.lookupReady(
                     analysisCacheKey,
                     normalizedRepoUrl,
-                    commitSha
+                    commitSha,
+                    llmProvider.name()
             );
 
             if (cacheLookupResult.hit()) {
@@ -448,6 +461,8 @@ public class RepoRunService {
                 analysisAccessType
         );
 
+        run.assignLlmProvider(llmProvider);
+
         try {
             chargeTokensForAnalysis(
                     userId,
@@ -506,7 +521,7 @@ public class RepoRunService {
      * - createRun 본문에서 버전/옵션 조립 로직을 분리해 가독성과 유지보수성을 높입니다.
      * - 추후 옵션 축이 늘어나도 이 메서드만 수정하면 되도록 변경 지점을 고정합니다.
      */
-    private RunAnalysisCacheKeySeed buildCacheKeySeed(String repoUrl, String commitSha) {
+    private RunAnalysisCacheKeySeed buildCacheKeySeed(String repoUrl, String commitSha, LlmProvider llmProvider) {
         return RunAnalysisCacheKeySeed.builder()
                 .repoUrl(repoUrl)
                 .commitSha(commitSha)
@@ -515,7 +530,32 @@ public class RepoRunService {
                 .promptTemplateVersion(analysisCacheProperties.getPromptTemplateVersion())
                 .outputSchemaVersion(analysisCacheProperties.getOutputSchemaVersion())
                 .runOptionsSignature(analysisCacheProperties.getDefaultRunOptionsSignature())
+                .llmProvider(llmProvider == null ? null : llmProvider.name())
                 .build();
+    }
+
+    /**
+     * 요청이 지정한 LLM 제공자를 확정합니다.
+     *
+     * - 값이 없으면 서버 설정 기본값을 씁니다(기존 클라이언트 하위호환).
+     * - 인식할 수 없는 값이나 지금 환경에서 쓸 수 없는 제공자는 실패로 처리합니다.
+     *   조용히 다른 모델로 대체하면 비용과 산출물이 함께 어긋나고 캐시 키도 그 값으로 굳습니다.
+     */
+    private LlmProvider resolveLlmProvider(RepoRunCreateRequest req) {
+        String raw = req.getLlmProvider();
+        LlmProvider requested = LlmProvider.from(raw);
+
+        if (raw != null && !raw.isBlank() && requested == null) {
+            log.warn("인식할 수 없는 llmProvider 요청입니다. value={}", raw);
+            throw new LlmException(LlmErrorCode.PROVIDER_NOT_AVAILABLE);
+        }
+
+        LlmProvider target = requested == null ? llmChatClientResolver.defaultProvider() : requested;
+
+        // 사용 가능 여부(예: claude API 키 존재)까지 여기서 확인합니다.
+        llmChatClientResolver.resolve(target);
+
+        return target;
     }
 
     /**
@@ -568,6 +608,11 @@ public class RepoRunService {
      * - 단순히 원본 runId를 반환하면 owner 검증(progress/artifact)에서 차단됩니다.
      * - 요청자 소유 run으로 메타를 복제하면 기존 권한 모델을 유지한 채 전역 캐시를 재사용할 수 있습니다.
      */
+    /*
+     * 제공자는 sourceRun에서 물려받습니다. 복제하는 것이 그 run의 산출물이므로,
+     * 요청이 지정한 값이 아니라 실제로 결과를 만든 제공자를 기록해야 사후 추적이 맞습니다.
+     * (요청 제공자가 sourceRun과 다르면 캐시 키가 달라 애초에 hit되지 않습니다.)
+     */
     private RepoRun createSharedCachedRun(
             RepoRun sourceRun,
             User owner,
@@ -587,6 +632,7 @@ public class RepoRunService {
                 sourceRun.getWorkspaceRoot(),
                 accessType
         );
+        sharedRun.assignLlmProvider(sourceRun.getLlmProvider());
 
         repoRunRepository.save(sharedRun);
 
@@ -755,6 +801,8 @@ public class RepoRunService {
                 waitingWsRoot.toString(),
                 accessType
         );
+        // 대기 run은 자기 분석으로 폴백할 수 있으므로 요청이 정한 제공자를 그대로 싣습니다.
+        waitingRun.assignLlmProvider(resolveLlmProvider(req));
 
         repoRunRepository.save(waitingRun);
 
