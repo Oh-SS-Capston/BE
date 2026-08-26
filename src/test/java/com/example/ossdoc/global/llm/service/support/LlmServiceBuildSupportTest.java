@@ -1,5 +1,6 @@
 package com.example.ossdoc.global.llm.service.support;
 
+import com.example.ossdoc.global.llm.exception.LlmException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -7,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class LlmServiceBuildSupportTest {
 
@@ -62,6 +64,75 @@ class LlmServiceBuildSupportTest {
                     }]
                   }],
                   "methodFlow": []
+                }
+                """);
+    }
+
+    @Test
+    void normalizeOneScenario_rejectsContractShapedResponseWithEmptyNarrative() throws Exception {
+        // junit-framework SCN-005 실측 응답: stepNo까지 맞춘 완전한 스키마에 서술만 전부 "".
+        JsonNode raw = objectMapper.readTree("""
+                {
+                  "scenarios": [{
+                    "scenarioId": "SCN-005",
+                    "title": "TestDiscoveryOptions 사용 흐름",
+                    "intent": "TestDiscoveryOptions 의 공개 메서드를 순서대로 사용해 기능을 구성한다.",
+                    "whyThisMatters": "",
+                    "entryPoint": "",
+                    "expectedOutcome": "",
+                    "steps": [
+                      {"stepNo": 1, "description": "", "precondition": "", "action": "",
+                       "successSignal": "", "failureSignal": "", "userAction": "",
+                       "dataHandled": "", "evidenceInterpretation": "", "confidenceReason": ""},
+                      {"stepNo": 2, "description": "", "precondition": "", "action": "",
+                       "successSignal": "", "failureSignal": "", "userAction": "",
+                       "dataHandled": "", "evidenceInterpretation": "", "confidenceReason": ""}
+                    ]
+                  }]
+                }
+                """);
+
+        assertThatThrownBy(() -> support.normalizeOneScenario(
+                twoStepSeedScenario(), raw, structureWithMethodSeed()))
+                .isInstanceOf(LlmException.class);
+    }
+
+    @Test
+    void normalizeOneScenario_keepsResponseThatFillsOnlyActionWithoutDescription() throws Exception {
+        // description은 비었지만 action이 있으면 서술이 있는 응답이다. 이것까지 버리면 과잉 차단이다.
+        JsonNode raw = objectMapper.readTree("""
+                {
+                  "scenarios": [{
+                    "scenarioId": "SCN-005",
+                    "title": "TestDiscoveryOptions 사용 흐름",
+                    "steps": [
+                      {"stepNo": 1, "description": "", "action": "getAdditionalClasspathEntries() 로 항목을 읽는다."},
+                      {"stepNo": 2, "description": "", "action": ""}
+                    ]
+                  }]
+                }
+                """);
+
+        JsonNode built = support.normalizeOneScenario(
+                twoStepSeedScenario(), raw, structureWithMethodSeed());
+
+        assertThat(built.path("steps").get(0).path("action").asText())
+                .contains("getAdditionalClasspathEntries");
+    }
+
+    private JsonNode twoStepSeedScenario() throws Exception {
+        return objectMapper.readTree("""
+                {
+                  "scenarioId": "SCN-005",
+                  "title": "TestDiscoveryOptions 사용 흐름",
+                  "steps": [
+                    {"stepNo": 1,
+                     "classFqn": "org.junit.platform.console.options.TestDiscoveryOptions",
+                     "methodFqn": "org.junit.platform.console.options.TestDiscoveryOptions.getAdditionalClasspathEntries"},
+                    {"stepNo": 2,
+                     "classFqn": "org.junit.platform.console.options.TestDiscoveryOptions",
+                     "methodFqn": "org.junit.platform.console.options.TestDiscoveryOptions.getExistingAdditionalClasspathEntries"}
+                  ]
                 }
                 """);
     }

@@ -353,11 +353,31 @@ public class LlmServiceBuildSupport {
      * 근거 우선순위(골격이 이기고 서술은 모델이 이긴다)와 폐기 계측을 그대로 쓰기 위해서다.
      * 두 모드의 산출물이 같은 코드를 통과해야 A/B 비교가 성립한다.</p>
      *
-     * @throws LlmException 응답에 시나리오가 없으면 compact 재시도 기회를 남긴다.
+     * @throws LlmException 응답에 시나리오가 없거나 서술이 전부 비어 있으면 compact 재시도 기회를 남긴다.
      */
     public JsonNode normalizeOneScenario(JsonNode seedScenario, JsonNode raw, JsonNode structure) {
         JsonNode scenariosRaw = extractArrayByKey(raw, "scenarios");
         if (scenariosRaw == null || !scenariosRaw.isArray() || scenariosRaw.isEmpty()) {
+            throw new LlmException(LlmErrorCode.RESPONSE_PARSE_FAILED);
+        }
+        /*
+         * 계약 형태만 갖추고 값이 전부 빈 문자열인 응답("빈 봉투")도 실패로 인정한다.
+         *
+         * junit-framework 실측에서 접근자만 나열된 시나리오 두 장(SCN-005/006)이
+         * stepNo까지 맞춘 완전한 스키마에 서술만 전부 ""로 채워 돌아왔다. 파싱은 성공하고
+         * step도 stepNo로 정상 매칭되므로 logSeedAxisDrops의 폐기 수도 0이라,
+         * 기존 방어선 어디에도 걸리지 않고 "골격 채움 0/N" 한 줄만 남긴 채 통과했다.
+         * 그 결과 20 step 중 8 step이 시드 문구만 실린 채 산출물로 나갔다.
+         *
+         * 여기서 던지면 generateWithRetryPlan의 compact 재시도를 한 번 더 쓰고,
+         * 그래도 비면 fallbackOneScenario로 그 한 장만 골격으로 떨어진다.
+         */
+        if (!hasAnyStepNarrative(scenariosRaw)) {
+            log.warn(
+                    "[LlmScenario] {} 응답이 계약 형태만 갖추고 서술이 전부 비어 있습니다."
+                            + " 파싱 실패로 처리해 재시도합니다.",
+                    seedScenario.path("scenarioId").asText("")
+            );
             throw new LlmException(LlmErrorCode.RESPONSE_PARSE_FAILED);
         }
         ArrayNode seedOnly = objectMapper.createArrayNode();
@@ -369,6 +389,29 @@ public class LlmServiceBuildSupport {
                 indexMethodSeedByFqn(structure.path("coreMethodSeed"))
         );
         return built.isEmpty() ? NullNode.getInstance() : built.get(0);
+    }
+
+    /**
+     * 응답의 step 중 서술을 하나라도 담은 것이 있는지 본다.
+     *
+     * <p>{@code description}과 {@link #STEP_RICH_TEXT_FIELDS} 중 하나라도 비어있지 않으면
+     * 서술이 있는 것으로 친다. 판정을 description 하나로 좁히면 모델이 description은 비우고
+     * action만 쓴 응답까지 버리게 된다.</p>
+     */
+    private boolean hasAnyStepNarrative(JsonNode scenariosRaw) {
+        for (JsonNode scenario : scenariosRaw) {
+            for (JsonNode step : scenario.path("steps")) {
+                if (!safeText(step.path("description").asText("")).isBlank()) {
+                    return true;
+                }
+                for (String field : STEP_RICH_TEXT_FIELDS) {
+                    if (!safeText(step.path(field).asText("")).isBlank()) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
     }
 
     /**
@@ -747,10 +790,18 @@ public class LlmServiceBuildSupport {
                     droppedScenarios, scenariosRaw.size(), droppedSteps, rawStepsSeen
             );
         }
-        log.info(
-                "[LlmScenario] 골격 채움. {}/{} 칸을 모델 서술로 채웠다 (나머지는 시드 문구).",
-                slotsFilledByModel, seedStepSlots
-        );
+        if (slotsFilledByModel == 0 && seedStepSlots > 0) {
+            // 전 구간이 시드 문구라는 뜻이라 INFO로 묻히면 안 된다. 34% 채움의 원인이 여기에 있었다.
+            log.warn(
+                    "[LlmScenario] 골격 채움 0/{}. 모델 서술이 한 칸도 실리지 않아 전 구간이 시드 문구입니다.",
+                    seedStepSlots
+            );
+        } else {
+            log.info(
+                    "[LlmScenario] 골격 채움. {}/{} 칸을 모델 서술로 채웠다 (나머지는 시드 문구).",
+                    slotsFilledByModel, seedStepSlots
+            );
+        }
     }
 
     private Map<Integer, JsonNode> indexStepsByNo(JsonNode rawSteps) {
