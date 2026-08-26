@@ -25,7 +25,7 @@ spring:
 
   jpa:
     hibernate:
-      ddl-auto: update
+      ddl-auto: validate
     properties:
       hibernate:
         dialect: org.hibernate.dialect.PostgreSQLDialect
@@ -57,34 +57,28 @@ spring:
             redirect-uri: "{baseUrl}/login/oauth2/code/{registrationId}"
 
 build:
-  maven-command: ${MAVEN_COMMAND:D:\\Program Files\\apache-maven-3.9.13\\bin\\mvn.cmd}
+  maven-command: ${MAVEN_COMMAND:mvn}
   gradle-command: ${GRADLE_COMMAND:gradle}
   java-homes:
-    - ${JAVA11_HOME}
-    - ${JAVA17_HOME}
-    - ${JAVA21_HOME}
-    - ${JAVA25_HOME}
+    - ${JAVA11_HOME:}
+    - ${JAVA17_HOME:}
+    - ${JAVA21_HOME:}
+    - ${JAVA25_HOME:}
   isolated-execution: true
-  # 기본은 데몬 재사용(false)으로 반복 빌드 시작 비용을 줄인다.
   gradle-no-daemon: ${GRADLE_NO_DAEMON:false}
-  # run별 캐시 대신 공용 캐시를 기본값으로 사용해 의존성 재다운로드를 줄인다.
   gradle-user-home-dir: ${GRADLE_USER_HOME_DIR:${OSSDOC_WORKSPACE_BASE_DIR:C:/data/ossdoc}/.gradle-home}
-  # run별 캐시 대신 공용 Maven 로컬 저장소를 기본값으로 사용한다.
   maven-local-repo-dir: ${MAVEN_LOCAL_REPO_DIR:${OSSDOC_WORKSPACE_BASE_DIR:C:/data/ossdoc}/.m2/repository}
 
 ossdoc:
   workspace:
     base-dir: ${OSSDOC_WORKSPACE_BASE_DIR:C:/data/ossdoc}
   analysis-cache:
-    # 구조 분석/LLM/출력 계약이 바뀌면 아래 버전값을 올려서 캐시를 분리합니다.
     pipeline-contract-version: ${OSSDOC_CACHE_PIPELINE_CONTRACT_VERSION:pipeline-v1}
     llm-profile-version: ${OSSDOC_CACHE_LLM_PROFILE_VERSION:llm-profile-sonnet-v2}
     prompt-template-version: ${OSSDOC_CACHE_PROMPT_TEMPLATE_VERSION:prompt-v2}
     output-schema-version: ${OSSDOC_CACHE_OUTPUT_SCHEMA_VERSION:schema-v2}
     default-run-options-signature: ${OSSDOC_CACHE_DEFAULT_RUN_OPTIONS_SIGNATURE:options-default-v1}
-    # true면 실제 Redis 저장소, false면 Noop 저장소를 사용합니다.
-    redis-enabled: ${OSSDOC_CACHE_REDIS_ENABLED:false}
-    # Redis 키 네이밍/TTL 정책
+    redis-enabled: ${OSSDOC_CACHE_REDIS_ENABLED:true}
     redis-ready-key-prefix: ${OSSDOC_CACHE_REDIS_READY_KEY_PREFIX:analysis:ready}
     redis-lock-key-prefix: ${OSSDOC_CACHE_REDIS_LOCK_KEY_PREFIX:analysis:lock}
     redis-ready-ttl-hours: ${OSSDOC_CACHE_REDIS_READY_TTL_HOURS:24}
@@ -94,117 +88,39 @@ ossdoc:
     worker:
       fixed-delay-ms: ${PIPELINE_WORKER_FIXED_DELAY_MS:2000}
       max-jobs-per-tick: ${PIPELINE_WORKER_MAX_JOBS_PER_TICK:1}
-      # 실행 중인 job의 lock 연장 주기. claim이 잡는 lock(30분)보다 충분히 짧아야 한다.
-      # LLM 단계 하나가 lock보다 오래 걸려(junit-framework 실측 67분) 갱신이 없으면
-      # 만료된 lock을 다른 인스턴스가 집어가 같은 job을 중복 실행한다.
       lock-renew-interval-ms: ${PIPELINE_WORKER_LOCK_RENEW_INTERVAL_MS:600000}
-  # refactplan.md 2~5순위 의미 신호(가상 엣지) ablation 토글. 기본 OFF, 환경변수로 개별 ON 가능.
   cluster:
     signals:
       package:
-        enabled: ${CLUSTER_SIGNAL_PACKAGE_ENABLED:false}
+        enabled: ${CLUSTER_SIGNAL_PACKAGE_ENABLED:true}
       name:
-        enabled: ${CLUSTER_SIGNAL_NAME_ENABLED:false}
+        enabled: ${CLUSTER_SIGNAL_NAME_ENABLED:true}
       doc:
-        enabled: ${CLUSTER_SIGNAL_DOC_ENABLED:false}
+        enabled: ${CLUSTER_SIGNAL_DOC_ENABLED:true}
     super-cluster:
-      enabled: ${CLUSTER_SUPER_CLUSTER_ENABLED:false}
+      enabled: ${CLUSTER_SUPER_CLUSTER_ENABLED:true}
   llm:
-    # LLM 단계를 파이프라인 끝에 붙여 실행합니다. false면 SKIPPED로 기록하고 RULE까지만 진행합니다.
-    #
-    # 켜기 전제: provider가 가리키는 모델이 실제로 닿아야 합니다.
-    # ollama(기본)라면 ollama.base-url이 앱에서 접근 가능한 주소여야 하고,
-    # 닿지 않으면 LLM은 선택 단계이므로 run이 PARTIAL_SUCCESS로 끝납니다.
-    # 라이선스/구조 분석만 확인할 때는 LLM_ENABLED=false로 끌 수 있습니다.
     enabled: ${LLM_ENABLED:true}
-    # 사용할 LLM 제공자. ollama = 로컬 모델, claude = Anthropic API.
-    # 미지정 시 ollama가 기본이다.
     provider: ${LLM_PROVIDER:ollama}
-    # LLM 산출물 저장 방식. true면 로컬 파일만 남기고 S3/DB 저장을 건너뛴다.
-    #
-    # 기본을 false로 두는 이유: AnalysisCachePublishService.REQUIRED_READY_ARTIFACT_KINDS가
-    # LLM 산출물 5종을 DB에서 조회하므로, local-only면 READY 캐시가 발행되지 않고
-    # artifact 조회 API로도 결과를 꺼낼 수 없다. true는 프롬프트 실험용 모드다.
     output:
       local-only: ${LLM_OUTPUT_LOCAL_ONLY:false}
-    # 생성 단계 튜닝. 이 값이 프롬프트 문구이자 실제 출력 상한이다.
-    # (로컬 9B는 프롬프트의 "최대 N개"를 무시하므로 코드 상한이 실효 값이다)
     generation:
-      # ①은 20개에서 품질 저하 없이 완주했다. 그대로 둔다.
-      # 8차 baseline 실측: 프롬프트 5,640토큰 / 출력 6,500토큰(상한 절단) / 총 40.1분.
       max-cautions: ${LLM_MAX_CAUTIONS:20}
-      # ②는 이제 scenarioSeed(골격) 크기를 결정한다.
-      # 모델이 몇 개를 만들든 뒤에서 잘라내던 방식과 달리, 이 값이 곧 생성 대상 수다.
-      # 골격 = 시나리오 N개 × 단계 M개, 단계마다 서술 7필드를 채우게 한다.
-      #
-      # 2였던 이유는 "모델이 3번째 시나리오부터 열화된다"였는데, 골격이 그 열화를 막으므로
-      # 근거가 사라져 되돌린다. junit 실측 시뮬레이션: 2→step 4개 / 4→11개 / 6→20개.
-      #
-      # 4 → 6. "6은 tokens-scenarios 5,000을 넘겨 절단된다"는 이전 근거는 SINGLE 모드
-      # (한 호출이 시나리오 전부를 쓰던 시절) 조건이라 PER_SCENARIO에는 적용되지 않는다.
-      # 지금은 호출당 tokens-per-scenario=1600이 상한이므로 시나리오 수와 절단은 무관하다.
-      # 4는 distinct 메서드 2개 이상인 클래스 6개 중 4개만 통과시켜
-      # ParallelExecutionConfiguration(6장)과 ClassSource(8장)를 골격에서 떨어뜨렸고,
-      # 그 결과 api_docs 조인이 17/40에 머물렀다. 6이면 31/40이 된다(예측, run B에서 검증).
       max-scenarios: ${LLM_MAX_SCENARIOS:6}
-      # 한 타입의 공개 메서드 수가 이보다 적으면 그만큼만 쓴다. 억지로 채우지 않는다.
       max-steps-per-scenario: ${LLM_MAX_STEPS_PER_SCENARIO:6}
-      # 단계별 출력 상한. num_predict와 min()으로 clamp된다.
-      # ①: 실측 5,378토큰이므로 여유를 둔 6,500.
-      # ②: 시나리오 2개면 약 4,000토큰. 여유를 둔 5,000. (SINGLE 모드 전용)
-      #
-      # 주의: max-scenarios=6이면 골격이 20 step이고 step당 약 300토큰이라
-      # SINGLE은 약 6,000토큰이 필요해 이 상한에서 절단된다. 값을 그대로 두는 것은
-      # SINGLE이 8차/9차 산출물과 비교 가능한 기준선이어야 하기 때문이다.
-      # 기준선으로서의 비교 가능성은 max-scenarios=4에서만 유효하다.
       tokens-cautions: ${LLM_TOKENS_CAUTIONS:6500}
       tokens-scenarios: ${LLM_TOKENS_SCENARIOS:5000}
-      # ② 호출 분해 방식. single = 한 호출로 골격 전체(5차까지의 방식).
-      # per-scenario = 개요 1회 + 시나리오마다 1회. 모델이 "몇 장 썼나"를 판단할 자리를 없앤다.
-      #
-      # 같은 입력(junit-framework)으로 8차(single) / 9차(per-scenario)를 나란히 재고 기본을 뒤집었다.
-      #   서술 칸 채움   36/88 → 85/88
-      #   ② 벽시계      49.6분 → 28.5분
-      #   출력 토큰      5,000 → 2,954     (덜 쓰고 더 채운다)
-      #   골격 밖 폐기   6/10  → 0
-      # single이 11칸 전부 비워두던 precondition/userAction/dataHandled가 회복한 것이 결정적이다.
-      # 비교 기준선이 필요하면 LLM_SCENARIO_CALL_MODE=single로 되돌린다.
-      #
-      # per-scenario는 컨텍스트 필터링이 전제다(LlmScenarioContextSupport).
-      # 필터링 없이 쪼개면 8차 실측 기준 ② 프롬프트가 12,489토큰/14.2분 → 62,445토큰/약 71분이 된다.
       scenario-call-mode: ${LLM_SCENARIO_CALL_MODE:per-scenario}
-      # per-scenario 전용 출력 상한. 시나리오 1장 = base + per-step × 골격 step 수.
-      #
-      # 이전에는 시나리오당 1600 고정이었고 근거는 "8차 실측 step당 약 150토큰"이었다.
-      # 그 실측이 틀렸다 — 8차는 SINGLE 모드에서 서술 칸이 36/88만 채워졌던 실행이라,
-      # 빈 칸이 59%인 산출물로 칸당 분량을 재서 실제보다 낮게 나왔다.
-      # 1600은 4 step까지 우연히 충분했고(실측 최대 1129) 6 step에서 처음 깨졌다.
-      #
-      # 칸이 실제로 채워진 뒤 다시 쟀다(run B, step별 출력 토큰):
-      #   2 step 453·585 / 3 step 618·922 / 4 step 1129 / 6 step 1600(절단)
-      #   최소제곱 y = 297·steps - 91, 잔차 최대 +121  →  step당 약 300토큰
-      # 잔차를 덮어 350으로 잡는다. 2 step 1,100 / 4 step 1,800 / 6 step 2,500.
-      #
-      # num_predict는 목표가 아니라 정지 조건이라 올려도 모델이 안 쓰면 비용이 늘지 않는다.
-      # run B에서 6회 중 5회가 상한 훨씬 아래에서 스스로 멈췄다.
       tokens-scenario-base: ${LLM_TOKENS_SCENARIO_BASE:400}
       tokens-scenario-per-step: ${LLM_TOKENS_SCENARIO_PER_STEP:350}
-      # 개요는 8필드 단문이라 짧다. 짧아서 조기종료 위험도 없다.
       tokens-overview: ${LLM_TOKENS_OVERVIEW:900}
-      # true면 이전 실행의 llm/refined_rules.json을 재사용하고 ①을 건너뛴다.
-      # ②를 여러 번 비교하는 동안 ①이 매번 같은 결과를 40분에 걸쳐 다시 만들고 있었다.
-      # 8차 baseline에서 ① 산출물이 5차와 바이트 동일함을 확인했으므로 재사용해도 같다.
-      #
-      # 기본 false. ① 프롬프트나 시드를 바꾼 뒤에는 반드시 꺼서 한 번은 정직하게 돌린다.
-      # local-only 모드에서만 동작한다(읽을 경로가 로컬 워크스페이스에 묶여 있다).
       reuse-cautions: ${LLM_REUSE_CAUTIONS:false}
     input:
       super-cluster:
-        enabled: ${LLM_INPUT_SUPER_CLUSTER_ENABLED:false}
+        enabled: ${LLM_INPUT_SUPER_CLUSTER_ENABLED:true}
       api-flow:
-        enabled: ${LLM_INPUT_API_FLOW_ENABLED:false}
+        enabled: ${LLM_INPUT_API_FLOW_ENABLED:true}
   api-flow:
-    # BFS 트레이스 대상 진입점 상한. confidence 높은 순으로 정렬 후 자른다.
     max-entry-points: ${OSSDOC_API_FLOW_MAX_ENTRY_POINTS:50}
 
 app:
@@ -234,34 +150,17 @@ jwt:
 claude:
   api-key: ${CLAUDE_API_KEY:}
   model: ${CLAUDE_MODEL:claude-sonnet-4-6}
-  # 기본 생성은 Sonnet을 사용하고, Haiku fallback은 명시적으로 켠 경우에만 수행한다.
   haiku-model: ${CLAUDE_HAIKU_MODEL:claude-haiku-4-5}
   haiku-fallback-enabled: ${CLAUDE_HAIKU_FALLBACK_ENABLED:false}
   max-tokens: ${CLAUDE_MAX_TOKENS:20000}
-
-# 로컬 Ollama. ossdoc.llm.provider=ollama(기본)일 때 사용된다.
 ollama:
   base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
-  # ollama list에 보이는 태그와 정확히 같아야 한다.
   model: ${OLLAMA_MODEL:qwen3.5:9b}
-  # num_ctx는 프롬프트 + 생성 출력을 모두 담아야 한다.
-  # run_20260815_94b1aaa5(junit-framework) 실측 프롬프트: ① 5,639토큰 / ② 10,323토큰.
-  # 여기에 출력 상한 6,500을 더해도 17,000 미만이지만,
-  # 대상 저장소가 커지면 프롬프트가 늘어나므로 여유를 두어 32,768을 유지한다.
-  # 모델 점유 실측: 16384=6.6GB / 32768=7.2GB / 65536=8.7GB (총 RAM 17GB)
   num-ctx: ${OLLAMA_NUM_CTX:32768}
-  # 전역 상한. 실제 적용값은 단계별 ossdoc.llm.generation.tokens-* 와 min()으로 결정된다.
-  # 16,384로 뒀을 때 ②가 상한까지 132분을 쓰고도 쓸 만한 시나리오는 1개뿐이었다.
   num-predict: ${OLLAMA_NUM_PREDICT:6500}
   temperature: ${OLLAMA_TEMPERATURE:0.2}
-  # 생성 시드. 고정하면 같은 입력에 같은 출력이 나온다.
-  # 설정을 바꿔가며 품질을 비교할 때 이게 없으면 "설정 효과"와 "모델 편차"를 구분할 수 없다.
-  # 음수(-1)면 시드를 보내지 않아 Ollama가 호출마다 임의 시드를 쓴다.
   seed: ${OLLAMA_SEED:0}
-  # 읽기 타임아웃은 num_predict를 전부 생성하는 시간보다 길어야 한다.
-  # 실측 3.7 tok/s 기준 num_predict=16384는 약 74분이 필요하므로 3배 여유를 두어 240분.
-  # 짧게 잡으면 생성이 끝나기 전에 끊기고, 그 요청은 재시도해도 같은 시간이 걸려 반드시 실패한다.
-  timeout-minutes: ${OLLAMA_TIMEOUT_MINUTES:240}
+  timeout-minutes: ${OLLAMA_TIMEOUT_MINUTES:360}
   json-format: ${OLLAMA_JSON_FORMAT:true}
   think: ${OLLAMA_THINK:false}
 

@@ -281,8 +281,9 @@ public class RunPipelineExecutor {
 
             /*
              * LLM 단계는 provider 설정에 따라 로컬 모델(ollama) 또는 외부 API(claude)를 씁니다.
-             * 어느 쪽이든 모델이 준비되지 않은 환경에서는 설정으로 끌 수 있고,
-             * RULE이 실패한 경우에도 입력 전제가 깨졌으므로 SKIPPED 처리합니다.
+             * LLM이 활성화되어 있으면 RULE 단계의 성공 여부와 무관하게 실행을 시도합니다.
+             * RULE 산출물이 실제로 없으면 LLM 내부의 계약 검증 오류가 기록되므로,
+             * 조용히 SKIPPED 처리하여 원인을 숨기지 않습니다.
              */
             if (!llmEnabled) {
                 /*
@@ -301,7 +302,13 @@ public class RunPipelineExecutor {
                         RunStage.LLM,
                         "LLM 기능이 비활성화되어 결과 생성을 건너뛰었습니다."
                 );
-            } else if (ruleSucceeded) {
+            } else {
+                if (!ruleSucceeded) {
+                    log.warn(
+                            "[PIPELINE] RULE step failed; attempting LLM so the concrete prerequisite failure is recorded. jobId={}",
+                            jobId
+                    );
+                }
                 executeOptional(
                         jobId,
                         RunStage.LLM,
@@ -326,12 +333,6 @@ public class RunPipelineExecutor {
                                                 .orElse(null)
                                 )
                         )
-                );
-            } else {
-                stepService.skipStep(
-                        jobId,
-                        RunStage.LLM,
-                        "규칙 후보 생성 실패로 LLM 결과 생성을 건너뛰었습니다."
                 );
             }
 
